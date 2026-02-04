@@ -1,0 +1,204 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Logs
+*.log
+logs/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Output files
+outputs/
+*.csv
+*.xlsx
+*.xls
+
+# =============================================================================
+# SENSITIVE / CREDENTIALS / CONFIG (never commit)
+# =============================================================================
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.env.local
+*.env.production
+.envrc
+
+# Config files that may contain connection strings, passwords, keys
+database_config.json
+azure_database_config.json
+*config*.json
+*_config.json
+config.json
+config.local.json
+config.*.json
+!**/pyrightconfig.json
+!**/tsconfig.json
+# Config/credential YAML (not CI workflows)
+config*.yaml
+config*.yml
+*credentials*.yaml
+*secrets*.yaml
+application*.yml
+application*.yaml
+
+# Credentials and secrets
+credentials.json
+secrets.json
+*credentials*
+*secrets*
+*password*
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+token.json
+*.token
+access_tokens/
+
+# Azure / app settings (often contain connection strings and keys)
+local.settings.json
+appsettings.json
+appsettings.*.json
+application.properties
+application-*.yml
+
+# Project and server config (may contain DB connection info)
+project.json
+saved_servers.json
+**/saved_servers.json
+**/AzureMigrationTool/**/saved_servers.json
+
+# Connection / database config (any name pattern)
+*connection*.json
+*database*.json
+*db_config*
+connection_strings.*
+
+# =============================================================================
+# OUTPUT / REPORTS (may contain schema/table names and metadata)
+# =============================================================================
+outputs/
+output/
+validation_outputs/
+validation_output/
+**/validation_outputs/
+*.csv
+*.xlsx
+*.xls
+reports/
+export/
+schema_validate_*.csv
+data_validate_*.csv
+
+# Bundle/download folders
+bundle/
+bundle.zip
+
+# Application data
+app_data/
+*.setup_complete
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+temp/
+tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# JDBC drivers (large binary files - keep in drivers/ but don't track)
+# Uncomment if you don't want to track the jar file:
+# drivers/*.jar
+
+# Keep drivers folder but ignore contents except README
+# !drivers/
+# drivers/*
+# !drivers/README.txt

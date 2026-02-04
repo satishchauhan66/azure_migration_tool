@@ -1,0 +1,26 @@
+# DB2 to Azure Migration Validation Module
+# Core dependencies
+
+# Pydantic for data validation and settings
+pydantic>=2.0
+pydantic-settings>=2.0
+
+# PySpark for distributed data processing
+pyspark>=3.5.0
+
+# Pandas for data manipulation
+pandas>=2.0.0
+
+# Database drivers
+pyodbc>=5.0.0
+
+# Azure authentication
+azure-identity>=1.15.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# IBM DB2 drivers (optional - only needed for DB2 connections)
+# Uncomment if connecting to DB2:
+# ibm-db>=3.1.0
+# ibm-db-sa>=0.3.0

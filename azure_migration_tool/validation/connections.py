@@ -1,0 +1,83 @@
+"""
+Open DB2 (jaydebeapi) and Azure SQL (pyodbc) connections from config.
+Config can be a file path (str) or an in-memory dict (no file stored).
+"""
+
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+
+# Ensure gui.utils is importable from azure_migration_tool
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from .config import load_config, normalize_config
+
+
+def _get_config(config_path_or_dict: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Return normalized config from path or dict."""
+    if isinstance(config_path_or_dict, dict):
+        return normalize_config(config_path_or_dict)
+    return load_config(config_path_or_dict)
+
+
+def _map_azure_auth(authentication: str) -> str:
+    """Map config authentication to database_utils auth string."""
+    a = (authentication or "").strip()
+    mapping = {
+        "SqlPassword": "sql",
+        "ActiveDirectoryPassword": "entra_password",
+        "ActiveDirectoryInteractive": "entra_mfa",
+        "IntegratedSecurity": "windows",
+    }
+    return mapping.get(a, "sql")
+
+
+def connect_db2(config_path_or_dict: Union[str, Dict[str, Any]], logger=None):
+    """
+    Open DB2 connection via gui.utils.database_utils._connect_to_db2_jdbc_internal.
+    config_path_or_dict: path to JSON file or in-memory config dict (no file stored).
+    """
+    from gui.utils.database_utils import _connect_to_db2_jdbc_internal
+
+    config = _get_config(config_path_or_dict)
+    db2 = config.get("db2", {})
+    host = db2.get("host", "").strip()
+    port = int(db2.get("port", 50000))
+    database = db2.get("database", "").strip()
+    user = db2.get("username", db2.get("user", "")).strip()
+    password = db2.get("password", "")
+    return _connect_to_db2_jdbc_internal(
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        password=password,
+        logger=logger,
+    )
+
+
+def connect_azure_sql(config_path_or_dict: Union[str, Dict[str, Any]], logger=None):
+    """
+    Open Azure SQL connection via gui.utils.database_utils.connect_to_any_database.
+    config_path_or_dict: path to JSON file or in-memory config dict (no file stored).
+    """
+    from gui.utils.database_utils import connect_to_any_database
+
+    config = _get_config(config_path_or_dict)
+    az = config.get("azure_sql", {})
+    server = az.get("server", "").strip()
+    database = az.get("database", "").strip()
+    user = az.get("username", az.get("user", "")).strip()
+    password = az.get("password", "")
+    auth_config = az.get("authentication", "SqlPassword")
+    auth = _map_azure_auth(auth_config)
+    return connect_to_any_database(
+        server=server,
+        database=database,
+        auth=auth,
+        user=user,
+        password=password,
+        db_type="sqlserver",
+    )
