@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Database utility functions for GUI.
 """
@@ -18,12 +20,15 @@ try:
     from src.utils.database import pick_sql_driver, connect_to_database, connect_to_db2_jdbc
 except ImportError:
     try:
-        from utils.database import pick_sql_driver, connect_to_database
-        connect_to_db2_jdbc = None
+        from src.utils.database import pick_sql_driver, connect_to_database, connect_to_db2_jdbc
     except ImportError:
-        pick_sql_driver = None
-        connect_to_database = None
-        connect_to_db2_jdbc = None
+        try:
+            from utils.database import pick_sql_driver, connect_to_database
+            connect_to_db2_jdbc = None
+        except ImportError:
+            pick_sql_driver = None
+            connect_to_database = None
+            connect_to_db2_jdbc = None
 
 
 def _connect_to_db2_jdbc_internal(
@@ -322,8 +327,10 @@ def connect_with_msal_cache(
             pass
     
     # Fallback: manual connection with MSAL token support
+    # TrustServerCertificate=yes for Windows auth (on-prem SQL Server often has untrusted certs)
     driver_str = "{" + driver + "}"
-    base = f"Driver={driver_str};Server={server};Database={database};Encrypt=yes;TrustServerCertificate=no;"
+    trust_cert = "yes" if (auth or "").strip().lower() == "windows" else "no"
+    base = f"Driver={driver_str};Server={server};Database={database};Encrypt=yes;TrustServerCertificate={trust_cert};"
     
     if auth == "entra_mfa":
         if not user:
@@ -474,9 +481,10 @@ def list_databases(
             if not driver:
                 raise RuntimeError("No SQL Server ODBC driver found")
             
-            # Build connection string
+            # Build connection string (TrustServerCertificate=yes for Windows auth - on-prem often has untrusted certs)
             driver_str = "{" + driver + "}"
-            base = f"Driver={driver_str};Server={server};Database=master;Encrypt=yes;TrustServerCertificate=no;"
+            trust_cert = "yes" if (auth or "").strip().lower() == "windows" else "no"
+            base = f"Driver={driver_str};Server={server};Database=master;Encrypt=yes;TrustServerCertificate={trust_cert};"
             
             if auth == "entra_mfa":
                 # Try to use MSAL token cache first (no MFA prompt if token is cached)

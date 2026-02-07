@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Build Azure Migration Tool - Creates small exe with all dependencies.
 
@@ -34,21 +36,16 @@ def build_pyinstaller(app_dir: Path, console: bool = False) -> bool:
     
     project_root = app_dir.parent
     drivers_dir = app_dir / 'drivers'
-    db2_val_dir = project_root / 'db2_azure_validation'
     
-    # Build datas list
+    # Build datas list (Legacy tabs use azure_migration_tool.validation only – no db2_azure_validation)
     datas_list = []
     
-    # Add db2_azure_validation module from parent
-    if db2_val_dir.exists():
-        datas_list.append((str(db2_val_dir), 'db2_azure_validation'))
-    
-    # Add drivers folder (includes db2jcc4.jar)
+    # Add drivers folder (includes db2jcc4.jar for DB2 connections)
     if drivers_dir.exists():
         datas_list.append((str(drivers_dir), 'drivers'))
     
-    # Add gui and setup folders
-    for subdir in ['gui', 'setup']:
+    # Add gui, setup, backup, and src folders
+    for subdir in ['gui', 'setup', 'backup', 'src']:
         subdir_path = app_dir / subdir
         if subdir_path.exists():
             datas_list.append((str(subdir_path), subdir))
@@ -85,18 +82,22 @@ a = Analysis(
         "gui.dialogs", "gui.dialogs.restore_preview_dialog",
         # Setup
         "setup", "setup.auto_setup",
-        # db2_azure_validation module
-        "db2_azure_validation",
-        "db2_azure_validation.services",
-        "db2_azure_validation.services.schema_validation_service",
-        "db2_azure_validation.services.data_validation_service",
-        "db2_azure_validation.services.behavior_validation_service",
-        "db2_azure_validation.services.pyspark_schema_comparison",
-        "db2_azure_validation.schemas",
-        "db2_azure_validation.utils",
-        # External modules (NO pyspark - installed separately)
+        # Validation (Legacy schema/data comparison – Python only)
+        "validation", "validation.schema_service", "validation.data_service",
+        "validation.run_subprocess", "validation.connections", "validation.config",
+        "validation.azure_catalog",
+        # Local backup module
+        "backup", "backup.exporters",
+        # src module (schema backup/restore/migration)
+        "src", "src.backup", "src.backup.exporters", "src.backup.schema_backup",
+        "src.restore", "src.restore.schema_restore", "src.restore.nullability_fix",
+        "src.migration", "src.migration.data_migration",
+        "src.orchestration", "src.orchestration.full_migration",
+        "src.utils", "src.utils.database", "src.utils.sql", "src.utils.paths",
+        "src.utils.config", "src.utils.logging", "src.utils.azure_compat",
+        # External modules (Legacy tabs: no PySpark, no db2_azure_validation)
         "jaydebeapi", "jpype1", "jpype", "jpype.imports", "pyodbc", "pandas",
-        "pydantic", "pydantic_settings", "dotenv", "openpyxl",
+        "openpyxl",
         "tkinter", "tkinter.ttk", "tkinter.messagebox", "tkinter.filedialog",
         "tkinter.scrolledtext",
     ],
@@ -208,12 +209,15 @@ def main():
         print(f"Size: {size:.0f} MB")
         
         print("\n" + "-" * 60)
-        print("TO USE:")
+        print("REQUIRED ON DESTINATION (target PC):")
         print("-" * 60)
-        print(f"1. Copy {exe_path.name} to target PC")
-        print(f"2. Target PC needs: Java 11+, Python 3.x, PySpark")
-        print(f"3. Run: pip install pyspark (on target PC)")
-        print(f"4. Double-click AzureMigrationTool.exe")
+        print("• Windows (this exe is Windows-only)")
+        print("• ODBC Driver for SQL Server (for Azure SQL / SQL Server)")
+        print("  Install: https://aka.ms/downloadmsodbcsql or use Tools > Install database driver")
+        print("• Java 11+ ONLY if you use Compare DB2 (Schema/Data) tabs (for DB2 connection)")
+        print("  Install: https://adoptium.net/")
+        print("• No Python or PySpark needed on target – everything is bundled in the exe")
+        print("\nTO USE: Copy the exe to target PC and double-click to run.")
         
         print("\nBUNDLED DRIVERS:")
         if db2_jar.exists():

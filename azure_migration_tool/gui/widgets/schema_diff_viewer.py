@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Schema diff viewer dialog for side-by-side comparison.
 """

@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 LegacyDataValidationService: Python-only data comparison (DB2 vs Azure SQL).
 compare_row_counts, compare_column_nulls. Same __init__ and save_comparison_to_csv as schema_service.
@@ -22,7 +24,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from .config import get_output_dir, load_config, normalize_config
-from .connections import connect_db2, connect_azure_sql
+from .connections import connect_db2, connect_azure_sql, connect_source, connect_destination
 from . import azure_catalog
 from gui.utils import db2_schema
 
@@ -111,6 +113,46 @@ def _run_azure_null_counts(
     """Run COUNT(*), COUNT(col) on Azure SQL in a worker. Returns (total, non_null) or None."""
     try:
         conn = connect_azure_sql(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT COUNT(*), COUNT([{col_name}]) FROM [{schema}].[{table}]")
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return (int(row[0]) if row[0] is not None else 0, int(row[1]) if row[1] is not None else 0)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+
+def _run_source_sql_count(config: Dict[str, Any], schema: str, table: str) -> Optional[int]:
+    """Run COUNT(*) on SQL Server source in a worker thread. Returns count or None on error."""
+    try:
+        conn = connect_source(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM [{schema}].[{table}]")
+            row = cur.fetchone()
+            return int(row[0]) if row is not None else None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+
+def _run_source_sql_null_counts(
+    config: Dict[str, Any], schema: str, table: str, col_name: str
+) -> Optional[Tuple[int, int]]:
+    """Run COUNT(*), COUNT(col) on SQL Server source in a worker. Returns (total, non_null) or None."""
+    try:
+        conn = connect_source(config)
         try:
             cur = conn.cursor()
             cur.execute(f"SELECT COUNT(*), COUNT([{col_name}]) FROM [{schema}].[{table}]")
@@ -288,13 +330,55 @@ class LegacyDataValidationService:
         uniq = uuid.uuid4().hex[:6]
         name = f"data_validate_{scope}_{db}_{ts}_{uniq}.csv"
         path = os.path.join(self._output_dir, name)
-        for c in STANDARD_DATA_VALIDATION_COLUMNS:
-            if c not in unified_df.columns:
-                unified_df = unified_df.copy()
-                unified_df[c] = ""
-        unified_df = unified_df[STANDARD_DATA_VALIDATION_COLUMNS]
+        
+        # Ensure unified_df is a valid DataFrame with standard columns
+        if unified_df is None or unified_df.empty:
+            unified_df = pd.DataFrame(columns=STANDARD_DATA_VALIDATION_COLUMNS)
+        else:
+            # Ensure all standard columns exist
+            for c in STANDARD_DATA_VALIDATION_COLUMNS:
+                if c not in unified_df.columns:
+                    unified_df = unified_df.copy()
+                    unified_df[c] = ""
+            unified_df = unified_df[STANDARD_DATA_VALIDATION_COLUMNS]
+        
         unified_df.to_csv(path, index=False)
         return path
+
+    def _is_source_db2(self) -> bool:
+        """Check if source database is DB2."""
+        return self._get_config().get("source_db_type", "db2").lower() == "db2"
+
+    def _get_source_tables(self, conn, schema: Optional[str]) -> List[Tuple[str, str]]:
+        """Get list of (schema, table) from source database."""
+        if self._is_source_db2():
+            cur = conn.cursor()
+            tables = db2_schema.fetch_db2_tables(cur, schema)
+            try:
+                cur.close()
+            except Exception:
+                pass
+            return [(str(t.schema_name).strip(), str(t.table_name).strip()) for t in tables]
+        else:
+            # SQL Server source - use azure_catalog functions
+            try:
+                tables_df = azure_catalog.get_tables(conn, schema)
+                if tables_df.empty:
+                    return []
+                return [(str(r["schema_name"]).strip(), str(r["object_name"]).strip()) for _, r in tables_df.iterrows()]
+            except Exception as e:
+                # Log error but return empty list to prevent crash
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error fetching source tables: {e}")
+                return []
+
+    def _build_source_count_query(self, schema: str, table: str) -> str:
+        """Build COUNT(*) query for source database."""
+        if self._is_source_db2():
+            return f'SELECT COUNT(*) FROM "{schema}"."{table}"'
+        else:
+            return f"SELECT COUNT(*) FROM [{schema}].[{table}]"
 
     def compare_row_counts(
         self,
@@ -306,46 +390,47 @@ class LegacyDataValidationService:
     ) -> pd.DataFrame:
         """Return DataFrame: ObjectType, SourceSchemaName, SourceObjectName, DestinationSchemaName, DestinationObjectName, SourceRowCount, DestinationRowCount, RowCountMatch, ErrorDescription.
         progress_callback(current_index, total, schema_name, table_name) is called for each table.
-        reuse_connections=True (default): one DB2 and one Azure connection for the whole run (~1 min for 110 tables).
+        reuse_connections=True (default): one source and one destination connection for the whole run (~1 min for 110 tables).
         reuse_connections=False: new connection per table (slower, ~20+ min) but allows per-query timeout if run in a thread."""
         if not object_types:
             object_types = ["TABLE"]
-        conn_db2 = connect_db2(self._get_config())
-        conn_azure = connect_azure_sql(self._get_config())
+        
+        # Use the appropriate connection based on source type
+        conn_source = connect_source(self._get_config())
+        conn_dest = connect_destination(self._get_config())
+        
         try:
-            cur = conn_db2.cursor()
-            tables_db2 = db2_schema.fetch_db2_tables(cur, source_schema)
-            tables_db2 = [(str(t.schema_name).strip(), str(t.table_name).strip()) for t in tables_db2]
+            source_tables = self._get_source_tables(conn_source, source_schema)
         finally:
             try:
-                conn_db2.close()
+                conn_source.close()
             except Exception:
                 pass
 
-        az_tables = azure_catalog.get_tables(conn_azure, target_schema)
-        set_az = set((str(r["schema_name"]).strip().upper(), str(r["object_name"]).strip().upper()) for _, r in az_tables.iterrows())
+        dest_tables = azure_catalog.get_tables(conn_dest, target_schema)
+        set_dest = set((str(r["schema_name"]).strip().upper(), str(r["object_name"]).strip().upper()) for _, r in dest_tables.iterrows())
         pairs = []
-        for s, o in tables_db2:
-            if (s.upper(), o.upper()) in set_az:
-                row = az_tables[(az_tables["schema_name"].astype(str).str.upper() == s.upper()) & (az_tables["object_name"].astype(str).str.upper() == o.upper())]
+        for s, o in source_tables:
+            if (s.upper(), o.upper()) in set_dest:
+                row = dest_tables[(dest_tables["schema_name"].astype(str).str.upper() == s.upper()) & (dest_tables["object_name"].astype(str).str.upper() == o.upper())]
                 if not row.empty:
                     r = row.iloc[0]
                     pairs.append((s, o, str(r["schema_name"]).strip(), str(r["object_name"]).strip()))
         try:
-            conn_azure.close()
+            conn_dest.close()
         except Exception:
             pass
-        conn_azure = None
+        conn_dest = None
 
         total = len(pairs)
         out_rows = []
 
         if reuse_connections:
-            # Fast path: one DB2 and one Azure connection for the whole run (~1 min for 110 tables).
-            conn_db2_2 = connect_db2(self._get_config())
-            conn_azure_2 = connect_azure_sql(self._get_config())
+            # Fast path: one source and one destination connection for the whole run.
+            conn_source_2 = connect_source(self._get_config())
+            conn_dest_2 = connect_destination(self._get_config())
             try:
-                cur = conn_db2_2.cursor()
+                cur = conn_source_2.cursor()
                 for idx, (s, o, d_schema, d_table) in enumerate(pairs):
                     if progress_callback:
                         try:
@@ -355,17 +440,17 @@ class LegacyDataValidationService:
                     src_count = None
                     dest_count = None
                     try:
-                        cur.execute(f'SELECT COUNT(*) FROM "{s}"."{o}"' if s and o else f"SELECT COUNT(*) FROM {s}.{o}")
+                        cur.execute(self._build_source_count_query(s, o))
                         row = cur.fetchone()
                         src_count = int(row[0]) if row is not None else None
                     except Exception:
                         src_count = None
                     try:
-                        cursor_az = conn_azure_2.cursor()
-                        cursor_az.execute(f"SELECT COUNT(*) FROM [{d_schema}].[{d_table}]")
-                        row = cursor_az.fetchone()
+                        cursor_dest = conn_dest_2.cursor()
+                        cursor_dest.execute(f"SELECT COUNT(*) FROM [{d_schema}].[{d_table}]")
+                        row = cursor_dest.fetchone()
                         dest_count = int(row[0]) if row is not None else None
-                        cursor_az.close()
+                        cursor_dest.close()
                     except Exception:
                         dest_count = None
                     match = "MATCH" if src_count is not None and dest_count is not None and src_count == dest_count else "MISMATCH"
@@ -389,17 +474,18 @@ class LegacyDataValidationService:
                     })
             finally:
                 try:
-                    conn_db2_2.close()
+                    conn_source_2.close()
                 except Exception:
                     pass
                 try:
-                    conn_azure_2.close()
+                    conn_dest_2.close()
                 except Exception:
                     pass
             return pd.DataFrame(out_rows)
 
         # Slow path: new connection per table (for per-query timeout when run in-process).
         config = self._get_config()
+        is_db2 = self._is_source_db2()
         executor = ThreadPoolExecutor(max_workers=4)
         try:
             for idx, (s, o, d_schema, d_table) in enumerate(pairs):
@@ -411,15 +497,18 @@ class LegacyDataValidationService:
                 src_count = None
                 dest_count = None
                 try:
-                    f_db2 = executor.submit(_run_db2_count, config, s, o)
-                    src_count = f_db2.result(timeout=QUERY_TIMEOUT_SECONDS)
+                    if is_db2:
+                        f_src = executor.submit(_run_db2_count, config, s, o)
+                    else:
+                        f_src = executor.submit(_run_source_sql_count, config, s, o)
+                    src_count = f_src.result(timeout=QUERY_TIMEOUT_SECONDS)
                 except TimeoutError:
                     src_count = None
                 except Exception:
                     src_count = None
                 try:
-                    f_az = executor.submit(_run_azure_count, config, d_schema, d_table)
-                    dest_count = f_az.result(timeout=QUERY_TIMEOUT_SECONDS)
+                    f_dest = executor.submit(_run_azure_count, config, d_schema, d_table)
+                    dest_count = f_dest.result(timeout=QUERY_TIMEOUT_SECONDS)
                 except TimeoutError:
                     dest_count = None
                 except Exception:
@@ -447,6 +536,46 @@ class LegacyDataValidationService:
             executor.shutdown(wait=False)
         return pd.DataFrame(out_rows)
 
+    def _get_source_columns(self, conn, schema: str, table: str) -> List:
+        """Get list of nullable columns from source database."""
+        if self._is_source_db2():
+            cur = conn.cursor()
+            cols = db2_schema.fetch_db2_columns(cur, schema, table)
+            try:
+                cur.close()
+            except Exception:
+                pass
+            return [c for c in cols if c.nullable]
+        else:
+            # SQL Server source - get columns from sys.columns
+            cur = conn.cursor()
+            try:
+                cur.execute("""
+                    SELECT c.name
+                    FROM sys.columns c
+                    JOIN sys.tables t ON c.object_id = t.object_id
+                    JOIN sys.schemas s ON t.schema_id = s.schema_id
+                    WHERE s.name = ? AND t.name = ? AND c.is_nullable = 1
+                """, (schema, table))
+                rows = cur.fetchall()
+            finally:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+            # Return simple objects with column_name attribute
+            class ColInfo:
+                def __init__(self, name):
+                    self.column_name = name
+            return [ColInfo(row[0]) for row in rows]
+
+    def _build_source_null_count_query(self, schema: str, table: str, col_name: str) -> str:
+        """Build COUNT(*), COUNT(col) query for source database."""
+        if self._is_source_db2():
+            return f'SELECT COUNT(*), COUNT("{col_name}") FROM "{schema}"."{table}"'
+        else:
+            return f"SELECT COUNT(*), COUNT([{col_name}]) FROM [{schema}].[{table}]"
+
     def compare_column_nulls(
         self,
         source_schema: Optional[str],
@@ -460,36 +589,37 @@ class LegacyDataValidationService:
         """Return DataFrame: ObjectType, SourceSchemaName, SourceObjectName, ColumnName, SourceNullCount, DestinationNullCount, SourceEmptyCount, DestinationEmptyCount, NullCountMatch, EmptyCountMatch.
         Iterate tables; where row counts match run COUNT(*) and COUNT(column) for nullable columns.
         progress_callback(current_index, total, schema_name, table_name) is called for each table.
-        reuse_connections=True (default): one DB2 and one Azure connection for the whole run (fast).
+        reuse_connections=True (default): one source and one destination connection for the whole run (fast).
         """
         if not object_types:
             object_types = ["TABLE"]
-        conn_db2 = connect_db2(self._get_config())
-        conn_azure = connect_azure_sql(self._get_config())
+        
+        conn_source = connect_source(self._get_config())
+        conn_dest = connect_destination(self._get_config())
+        
         try:
-            cur = conn_db2.cursor()
-            tables_db2 = [(str(t.schema_name).strip(), str(t.table_name).strip()) for t in db2_schema.fetch_db2_tables(cur, source_schema)]
+            source_tables = self._get_source_tables(conn_source, source_schema)
         finally:
             try:
-                conn_db2.close()
+                conn_source.close()
             except Exception:
                 pass
 
-        az_tables = azure_catalog.get_tables(conn_azure, target_schema)
-        set_az = set((str(r["schema_name"]).strip().upper(), str(r["object_name"]).strip().upper()) for _, r in az_tables.iterrows())
+        dest_tables = azure_catalog.get_tables(conn_dest, target_schema)
+        set_dest = set((str(r["schema_name"]).strip().upper(), str(r["object_name"]).strip().upper()) for _, r in dest_tables.iterrows())
         pairs = []
-        for s, o in tables_db2:
-            if (s.upper(), o.upper()) in set_az:
-                row = az_tables[(az_tables["schema_name"].astype(str).str.upper() == s.upper()) & (az_tables["object_name"].astype(str).str.upper() == o.upper())]
+        for s, o in source_tables:
+            if (s.upper(), o.upper()) in set_dest:
+                row = dest_tables[(dest_tables["schema_name"].astype(str).str.upper() == s.upper()) & (dest_tables["object_name"].astype(str).str.upper() == o.upper())]
                 if not row.empty:
                     r = row.iloc[0]
                     pairs.append((s, o, str(r["schema_name"]).strip(), str(r["object_name"]).strip()))
 
         try:
-            conn_azure.close()
+            conn_dest.close()
         except Exception:
             pass
-        conn_azure = None
+        conn_dest = None
 
         if only_when_rowcount_matches:
             row_counts = self.compare_row_counts(source_schema, target_schema, object_types, reuse_connections=reuse_connections)
@@ -504,43 +634,47 @@ class LegacyDataValidationService:
         config = self._get_config()
 
         if reuse_connections:
-            # Fast path: one DB2 and one Azure connection for the whole run.
-            conn_db2_2 = connect_db2(config)
-            conn_azure_2 = connect_azure_sql(config)
+            # Fast path: one source and one destination connection for the whole run.
+            conn_source_2 = connect_source(config)
+            conn_dest_2 = connect_destination(config)
             try:
-                cur = conn_db2_2.cursor()
                 for idx, (s, o, d_schema, d_table) in enumerate(pairs):
                     if progress_callback:
                         try:
                             progress_callback(idx + 1, total_tables, s, o)
                         except Exception:
                             pass
-                    cols_db2 = db2_schema.fetch_db2_columns(cur, s, o)
-                    nullable_cols = [c.column_name for c in cols_db2 if c.nullable]
+                    nullable_cols = self._get_source_columns(conn_source_2, s, o)
                     if not nullable_cols:
                         continue
-                    for col_name in nullable_cols:
+                    for col_info in nullable_cols:
+                        col_name = col_info.column_name
                         src_nulls = None
                         src_empty = 0
                         dest_nulls = None
                         dest_empty = 0
                         try:
-                            cur.execute(f'SELECT COUNT(*), COUNT("{col_name}") FROM "{s}"."{o}"')
+                            cur = conn_source_2.cursor()
+                            cur.execute(self._build_source_null_count_query(s, o, col_name))
                             row = cur.fetchone()
+                            cur.close()
                             if row is not None:
                                 src_total = int(row[0]) if row[0] is not None else 0
                                 src_non_null = int(row[1]) if row[1] is not None else 0
                                 src_nulls = src_total - src_non_null
                         except Exception:
-                            pass
+                            try:
+                                cur.close()
+                            except Exception:
+                                pass
                         try:
-                            cursor_az = conn_azure_2.cursor()
-                            cursor_az.execute(f"SELECT COUNT(*), COUNT([{col_name}]) FROM [{d_schema}].[{d_table}]")
-                            row_az = cursor_az.fetchone()
-                            cursor_az.close()
-                            if row_az is not None:
-                                dest_total = int(row_az[0]) if row_az[0] is not None else 0
-                                dest_non_null = int(row_az[1]) if row_az[1] is not None else 0
+                            cursor_dest = conn_dest_2.cursor()
+                            cursor_dest.execute(f"SELECT COUNT(*), COUNT([{col_name}]) FROM [{d_schema}].[{d_table}]")
+                            row_dest = cursor_dest.fetchone()
+                            cursor_dest.close()
+                            if row_dest is not None:
+                                dest_total = int(row_dest[0]) if row_dest[0] is not None else 0
+                                dest_non_null = int(row_dest[1]) if row_dest[1] is not None else 0
                                 dest_nulls = dest_total - dest_non_null
                         except Exception:
                             pass
@@ -564,38 +698,41 @@ class LegacyDataValidationService:
                         })
             finally:
                 try:
-                    conn_db2_2.close()
+                    conn_source_2.close()
                 except Exception:
                     pass
                 try:
-                    conn_azure_2.close()
+                    conn_dest_2.close()
                 except Exception:
                     pass
             return pd.DataFrame(out_rows)
 
         # Slow path: new connection per column (for per-query timeout).
-        conn_db2_2 = connect_db2(config)
+        conn_source_2 = connect_source(config)
+        is_db2 = self._is_source_db2()
         executor = ThreadPoolExecutor(max_workers=4)
         try:
-            cur = conn_db2_2.cursor()
             for idx, (s, o, d_schema, d_table) in enumerate(pairs):
                 if progress_callback:
                     try:
                         progress_callback(idx + 1, total_tables, s, o)
                     except Exception:
                         pass
-                cols_db2 = db2_schema.fetch_db2_columns(cur, s, o)
-                nullable_cols = [c.column_name for c in cols_db2 if c.nullable]
+                nullable_cols = self._get_source_columns(conn_source_2, s, o)
                 if not nullable_cols:
                     continue
-                for col_name in nullable_cols:
+                for col_info in nullable_cols:
+                    col_name = col_info.column_name
                     src_nulls = None
                     src_empty = 0
                     dest_nulls = None
                     dest_empty = 0
                     try:
-                        f_db2 = executor.submit(_run_db2_null_counts, config, s, o, col_name)
-                        res = f_db2.result(timeout=QUERY_TIMEOUT_SECONDS)
+                        if is_db2:
+                            f_src = executor.submit(_run_db2_null_counts, config, s, o, col_name)
+                        else:
+                            f_src = executor.submit(_run_source_sql_null_counts, config, s, o, col_name)
+                        res = f_src.result(timeout=QUERY_TIMEOUT_SECONDS)
                         if res is not None:
                             src_total, src_non_null = res
                             src_nulls = src_total - src_non_null
@@ -604,8 +741,8 @@ class LegacyDataValidationService:
                     except Exception:
                         pass
                     try:
-                        f_az = executor.submit(_run_azure_null_counts, config, d_schema, d_table, col_name)
-                        res = f_az.result(timeout=QUERY_TIMEOUT_SECONDS)
+                        f_dest = executor.submit(_run_azure_null_counts, config, d_schema, d_table, col_name)
+                        res = f_dest.result(timeout=QUERY_TIMEOUT_SECONDS)
                         if res is not None:
                             dest_total, dest_non_null = res
                             dest_nulls = dest_total - dest_non_null
@@ -633,7 +770,7 @@ class LegacyDataValidationService:
                     })
         finally:
             try:
-                conn_db2_2.close()
+                conn_source_2.close()
             except Exception:
                 pass
             executor.shutdown(wait=False)

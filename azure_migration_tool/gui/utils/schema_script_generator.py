@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Script generator for selected schema objects.
 """
@@ -6,44 +8,54 @@ import logging
 from typing import List, Tuple, Dict, Optional, Any
 import pyodbc
 
-# Import from backup/restore modules
+# Prefer local backup exporters; fallback to external src.backup.exporters
 import sys
 from pathlib import Path
 
-# Add parent directories to path
 parent_dir = Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(parent_dir))
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
 
 try:
-    from src.backup.exporters import (
+    from backup.exporters import (
         fetch_tables, fetch_columns, fetch_primary_key,
         fetch_objects, fetch_triggers, fetch_sequences, fetch_synonyms,
         export_foreign_keys, export_check_constraints, export_default_constraints,
         export_indexes, export_primary_keys, object_definition,
-        wrap_create_or_alter, build_create_table_sql, export_sequences, export_synonyms
+        wrap_create_or_alter, build_create_table_sql, export_sequences, export_synonyms,
+        qident, sql_header
     )
-    from src.utils.sql import sql_header
-    from src.utils.paths import qident
 except ImportError:
-    # Fallback if modules not available
-    fetch_tables = None
-    fetch_columns = None
-    fetch_primary_key = None
-    fetch_objects = None
-    fetch_triggers = None
-    fetch_sequences = None
-    fetch_synonyms = None
-    export_foreign_keys = None
-    export_check_constraints = None
-    export_default_constraints = None
-    export_indexes = None
-    export_primary_keys = None
-    object_definition = None
-    wrap_create_or_alter = None
-    build_create_table_sql = None
-    export_sequences = None
-    export_synonyms = None
-    sql_header = None
+    try:
+        from src.backup.exporters import (
+            fetch_tables, fetch_columns, fetch_primary_key,
+            fetch_objects, fetch_triggers, fetch_sequences, fetch_synonyms,
+            export_foreign_keys, export_check_constraints, export_default_constraints,
+            export_indexes, export_primary_keys, object_definition,
+            wrap_create_or_alter, build_create_table_sql, export_sequences, export_synonyms
+        )
+        from src.utils.sql import sql_header
+        from src.utils.paths import qident
+    except ImportError:
+        fetch_tables = None
+        fetch_columns = None
+        fetch_primary_key = None
+        fetch_objects = None
+        fetch_triggers = None
+        fetch_sequences = None
+        fetch_synonyms = None
+        export_foreign_keys = None
+        export_check_constraints = None
+        export_default_constraints = None
+        export_indexes = None
+        export_primary_keys = None
+        object_definition = None
+        wrap_create_or_alter = None
+        build_create_table_sql = None
+        export_sequences = None
+        export_synonyms = None
+        sql_header = None
+        qident = lambda x: f"[{x}]" if x else "[]"
 
 
 def generate_script_for_objects(

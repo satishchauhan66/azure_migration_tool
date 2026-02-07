@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Streaming Log Console Window
 Real-time log viewer for debugging and monitoring application activity.

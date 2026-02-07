@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Azure Data Factory (ADF) Client
 Handles authentication, pipeline triggering, and status monitoring.

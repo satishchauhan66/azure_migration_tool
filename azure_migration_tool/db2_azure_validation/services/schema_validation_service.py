@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """Schema validation service thin wrappers."""
 from typing import Optional, Dict, Any, List
 

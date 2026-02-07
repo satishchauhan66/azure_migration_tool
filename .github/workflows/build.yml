@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -76,10 +78,38 @@ jobs:
           name: AzureMigrationTool-${{ steps.version.outputs.version }}.exe
           path: dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
 
-      - name: Upload to Release (on tag/release only)
-        if: github.event_name == 'release' && github.event.release.id != ''
+      # Push to main: update "latest" tag and create/update release so it shows on Releases page
+      - name: Update latest tag (push to main only)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -d latest 2>/dev/null || true
+          git push origin :refs/tags/latest 2>/dev/null || true
+          git tag latest
+          git push origin latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create or update Release (push to main – show on Releases page)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: latest
+          name: Latest (main)
+          body: "Built from main. Download **AzureMigrationTool-${{ steps.version.outputs.version }}.exe** below."
+          files: dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
+          allow_updates: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tag v* or published release: create release if needed and attach exe
+      - name: Upload to Release (tag v* or published release)
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
           files: dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
           fail_on_unmatched_files: true
         env:

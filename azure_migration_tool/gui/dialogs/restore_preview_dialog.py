@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Preview dialog for SQL restore operations.
 Shows SQL query before deployment and allows user to approve or skip.

@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Legacy Schema Validation Tab - Python-only validation (DB2 vs Azure SQL).
 Uses azure_migration_tool.validation; no PySpark required.
@@ -446,26 +448,62 @@ class LegacySchemaValidationTab:
     
     def _create_database_config(self):
         """Create database_config.json from user inputs."""
+        # Map auth types
+        src_auth = self._map_auth_to_pyspark(self.src_auth_var.get())
         dest_auth = self._map_auth_to_pyspark(self.dest_auth_var.get())
         
+        src_db_type = self.src_db_type_var.get().strip().lower()
+        dest_db_type = self.dest_db_type_var.get().strip().lower()
+        
         config = {
-            "db2": {
+            "source_db_type": src_db_type,
+            "destination_db_type": dest_db_type,
+        }
+        
+        # Build source config based on type
+        if src_db_type == "db2":
+            config["db2"] = {
                 "host": self.src_server_var.get().strip(),
                 "port": int(self.src_port_var.get().strip() or "50000"),
                 "database": self.src_db_var.get().strip(),
-                "username": self.src_user_var.get().strip(),  # DB2 expects 'username'
+                "username": self.src_user_var.get().strip(),
                 "password": self.src_password_var.get()
-            },
-            "azure_sql": {
-                "server": self.dest_server_var.get().strip(),
+            }
+        else:
+            # SQL Server source
+            config["source_sql"] = {
+                "server": self.src_server_var.get().strip(),
+                "port": int(self.src_port_var.get().strip() or "1433"),
+                "database": self.src_db_var.get().strip(),
+                "username": self.src_user_var.get().strip(),
+                "password": self.src_password_var.get(),
+                "authentication": src_auth,
+                "encrypt": "yes",
+                "trust_server_certificate": "yes"
+            }
+        
+        # Build destination config based on type
+        if dest_db_type == "db2":
+            config["dest_db2"] = {
+                "host": self.dest_server_var.get().strip(),
+                "port": int(self.dest_port_var.get().strip() or "50000"),
                 "database": self.dest_db_var.get().strip(),
-                "username": self.dest_user_var.get().strip(),  # Azure SQL also expects 'username'
+                "username": self.dest_user_var.get().strip(),
+                "password": self.dest_password_var.get()
+            }
+        else:
+            # SQL Server / Azure SQL destination
+            config["azure_sql"] = {
+                "server": self.dest_server_var.get().strip(),
+                "port": int(self.dest_port_var.get().strip() or "1433"),
+                "database": self.dest_db_var.get().strip(),
+                "username": self.dest_user_var.get().strip(),
                 "password": self.dest_password_var.get(),
                 "authentication": dest_auth,
                 "encrypt": "yes",
-                "trust_server_certificate": "yes"  # Required for Azure SQL MI with custom certs
+                "trust_server_certificate": "yes"
             }
-        }
+        
         return config
     
     def _validate_inputs(self):
@@ -539,8 +577,22 @@ class LegacySchemaValidationTab:
             config = self._create_database_config()
             os.environ["VALIDATION_OUTPUT_DIR"] = output_dir
             
-            self._log(f"Source: {config['db2']['host']}:{config['db2']['port']}/{config['db2']['database']}")
-            self._log(f"Destination: {config['azure_sql']['server']}/{config['azure_sql']['database']}")
+            # Log source connection info
+            if config.get("source_db_type", "db2").lower() == "db2":
+                src_info = config.get("db2", {})
+                self._log(f"Source: {src_info.get('host', '')}:{src_info.get('port', '')}/{src_info.get('database', '')}")
+            else:
+                src_info = config.get("source_sql", {})
+                self._log(f"Source: {src_info.get('server', '')}:{src_info.get('port', '')}/{src_info.get('database', '')}")
+            
+            # Log destination connection info
+            if config.get("destination_db_type", "sqlserver").lower() == "db2":
+                dest_info = config.get("dest_db2", {})
+                self._log(f"Destination: {dest_info.get('host', '')}:{dest_info.get('port', '')}/{dest_info.get('database', '')}")
+            else:
+                dest_info = config.get("azure_sql", {})
+                self._log(f"Destination: {dest_info.get('server', '')}/{dest_info.get('database', '')}")
+            
             self._log(f"Results will be saved to: {output_dir}")
             
             # Import the validation service (Python-only, no PySpark)
@@ -565,10 +617,18 @@ class LegacySchemaValidationTab:
             # Initialize service
             self._log("Initializing LegacySchemaValidationService...")
             
+            # Log config info for debugging
+            src_type = config.get("source_db_type", "unknown")
+            dest_type = config.get("destination_db_type", "unknown")
+            self._log(f"Source database type: {src_type}")
+            self._log(f"Destination database type: {dest_type}")
+            
             try:
                 service = LegacySchemaValidationService(config=config, output_dir=output_dir)
             except Exception as e:
+                import traceback
                 self._log(f"ERROR: Failed to initialize service: {e}", logging.ERROR)
+                self._log(traceback.format_exc())
                 self._update_status(f"Init error: {e}", "red")
                 self._show_error(f"Failed to initialize validation service.\n\n{e}")
                 return
@@ -608,13 +668,34 @@ class LegacySchemaValidationTab:
                         object_types=object_types
                     )
                     count = len(df)
-                    self._log(f"Object presence check found {count} differences")
+                    # Count unique objects being compared
+                    if not df.empty:
+                        src_objects = df[df["SourceObjectName"] != ""]["SourceObjectName"].nunique()
+                        dest_objects = df[df["DestinationObjectName"] != ""]["DestinationObjectName"].nunique()
+                        missing_target = len(df[df["ChangeType"] == "MISSING_IN_TARGET"]) if "ChangeType" in df.columns else 0
+                        missing_source = len(df[df["ChangeType"] == "MISSING_IN_SOURCE"]) if "ChangeType" in df.columns else 0
+                        self._log(f"Object presence check: {src_objects} source objects, {dest_objects} destination objects")
+                        self._log(f"  Found {count} differences: {missing_target} missing in target, {missing_source} missing in source")
+                        if count > 0:
+                            # Show first few examples
+                            sample = df.head(3)
+                            for _, row in sample.iterrows():
+                                change = row.get("ChangeType", "")
+                                src_obj = row.get("SourceObjectName", "")
+                                dest_obj = row.get("DestinationObjectName", "")
+                                self._log(f"  Example: {change} - Source: {src_obj}, Dest: {dest_obj}")
+                    else:
+                        self._log(f"Object presence check: DataFrame is empty - no objects found or no differences")
+                        self._log(f"  This might indicate: 1) No objects in databases, 2) All objects match, or 3) Connection issue")
                     
                     self._load_presence_results(df)
                     results.append(("Object Presence", count, None))
                     self.validation_results["presence"] = df
+                    self._log(f"Stored presence results: {len(df)} rows in validation_results['presence']")
                 except Exception as e:
+                    import traceback
                     self._log(f"ERROR in presence check: {e}", logging.ERROR)
+                    self._log(traceback.format_exc())
                     results.append(("Object Presence", "ERROR", str(e)))
             
             # 2. Data Types
@@ -630,13 +711,21 @@ class LegacySchemaValidationTab:
                         object_types=["TABLE"] if "TABLE" in object_types else object_types
                     )
                     count = len(df)
-                    self._log(f"Data types check found {count} differences")
+                    # Count unique tables being compared
+                    if not df.empty:
+                        unique_tables = df.groupby(["SourceSchemaName", "SourceObjectName"]).size().shape[0]
+                        unique_columns = df["ColumnName"].nunique()
+                        self._log(f"Data types check: Compared {unique_tables} table(s), {unique_columns} column(s), found {count} differences")
+                    else:
+                        self._log(f"Data types check: No tables matched or no differences found")
                     
                     self._load_datatypes_results(df)
                     results.append(("Data Types", count, None))
                     self.validation_results["datatypes"] = df
                 except Exception as e:
+                    import traceback
                     self._log(f"ERROR in datatypes check: {e}", logging.ERROR)
+                    self._log(traceback.format_exc())
                     results.append(("Data Types", "ERROR", str(e)))
             
             # 3. Default Values
@@ -754,21 +843,47 @@ class LegacySchemaValidationTab:
             # Write single consolidated file (errors only) to output_dir
             try:
                 import uuid
+                
+                # Log summary of what was compared BEFORE building consolidated errors
+                total_validations = len([k for k in self.validation_results.keys() if self.validation_results[k] is not None])
+                self._log(f"Completed {total_validations} validation check(s)")
+                for val_type, df in self.validation_results.items():
+                    if df is not None:
+                        count = len(df) if hasattr(df, '__len__') else 0
+                        self._log(f"  {val_type}: {count} results stored")
+                        if count > 0 and val_type == "presence":
+                            # Show sample of presence results
+                            sample = df.head(3) if hasattr(df, 'head') else []
+                            for _, row in sample.iterrows():
+                                change = row.get("ChangeType", "N/A")
+                                self._log(f"    Sample: {change}")
+                
                 errors_df = self._build_consolidated_errors_df()
+                self._log(f"Consolidated errors DataFrame: {len(errors_df)} rows")
+                if not errors_df.empty:
+                    self._log(f"  Error types: {errors_df['ValidationType'].value_counts().to_dict() if 'ValidationType' in errors_df.columns else 'N/A'}")
+                
                 db_name = (self.dest_db_var.get() or "validation").strip().replace("/", "_").replace("\\", "_")
                 host_name = (self.src_server_var.get() or "host").strip().replace(".", "_").replace(":", "_")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 unique_id = uuid.uuid4().hex[:6]
                 single_filename = f"schema_validate_all_{db_name}_{host_name}_{timestamp}_{unique_id}.csv"
                 single_path = os.path.join(output_dir, single_filename)
+                
+                # Always create the file, even if empty (no errors)
+                errors_df.to_csv(single_path, index=False)
                 if not errors_df.empty:
-                    errors_df.to_csv(single_path, index=False)
                     self._log(f"Saved report (errors only) to: {single_path}")
+                    self._log(f"Found {len(errors_df)} error(s) in consolidated report")
                     results = [("Schema validation report (errors only)", len(errors_df), single_path)]
                 else:
-                    results = [("Schema validation report (errors only)", 0, "No errors found")]
+                    self._log(f"Saved report (no errors found) to: {single_path}")
+                    self._log("No validation errors found - schemas match!")
+                    results = [("Schema validation report (errors only)", 0, single_path)]
             except Exception as e:
+                import traceback
                 self._log(f"Failed to write consolidated report: {e}", logging.ERROR)
+                self._log(traceback.format_exc())
                 results = [("Schema validation report", 0, f"ERROR: {e}")]
             
             # Update summary

@@ -1,20 +1,17 @@
+# SQL Server / Azure SQL
 pyodbc>=4.0.0
+
+# Data and Excel export
 pandas>=1.5.0
 openpyxl>=3.0.0
+
+# Entra/MFA and Azure (Schema/Data Migration tabs)
 msal>=1.20.0
 azure-identity>=1.15.0
 azure-mgmt-datafactory>=4.0.0
-# DB2 support (JDBC-based, more portable than ODBC)
+
+# DB2 support (Compare DB2 tabs – JDBC)
 jaydebeapi>=1.2.3
 jpype1>=1.5.0
-
-# Legacy DB2 vs Azure comparisons run without PySpark (Python-only validation)
-
-# Pydantic for data validation models (optional; used by db2_azure_validation if present)
-pydantic>=2.0
-pydantic-settings>=2.0
-
-# Environment variables
-python-dotenv>=1.0.0
 
 

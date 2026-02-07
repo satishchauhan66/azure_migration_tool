@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Schema comparison utilities for comparing source and destination databases.
 Supports both SQL Server and DB2.
@@ -12,7 +14,7 @@ import sys
 import os
 from pathlib import Path
 
-# Add parent directories to path - same approach as schema_tab.py
+# Prefer local backup exporters (backup.exporters); fallback to src.backup.exporters
 current_file = Path(__file__).resolve()
 parent_dir = current_file.parent.parent.parent.parent
 if str(parent_dir) not in sys.path:
@@ -22,30 +24,37 @@ _IMPORTS_SUCCESSFUL = False
 _IMPORT_ERROR = None
 
 try:
-    from src.backup.exporters import (
+    from backup.exporters import (
         fetch_tables, fetch_columns, fetch_primary_key,
         fetch_objects, fetch_triggers, fetch_sequences, fetch_synonyms,
         export_foreign_keys, export_check_constraints, export_default_constraints,
         export_indexes, export_primary_keys, object_definition
     )
-    from src.utils.database import connect_to_database, pick_sql_driver
     _IMPORTS_SUCCESSFUL = True
-except ImportError as e:
-    _IMPORT_ERROR = str(e)
-    # Set all to None if import failed
-    fetch_tables = None
-    fetch_columns = None
-    fetch_primary_key = None
-    fetch_objects = None
-    fetch_triggers = None
-    fetch_sequences = None
-    fetch_synonyms = None
-    export_foreign_keys = None
-    export_check_constraints = None
-    export_default_constraints = None
-    export_indexes = None
-    export_primary_keys = None
-    object_definition = None
+except ImportError as e1:
+    try:
+        from src.backup.exporters import (
+            fetch_tables, fetch_columns, fetch_primary_key,
+            fetch_objects, fetch_triggers, fetch_sequences, fetch_synonyms,
+            export_foreign_keys, export_check_constraints, export_default_constraints,
+            export_indexes, export_primary_keys, object_definition
+        )
+        _IMPORTS_SUCCESSFUL = True
+    except ImportError as e:
+        _IMPORT_ERROR = str(e)
+        fetch_tables = None
+        fetch_columns = None
+        fetch_primary_key = None
+        fetch_objects = None
+        fetch_triggers = None
+        fetch_sequences = None
+        fetch_synonyms = None
+        export_foreign_keys = None
+        export_check_constraints = None
+        export_default_constraints = None
+        export_indexes = None
+        export_primary_keys = None
+        object_definition = None
 
 # Import DB2-specific schema utilities
 try:
@@ -82,7 +91,7 @@ def get_schema_objects(conn: pyodbc.Connection, object_types: List[str], logger:
                 error_msg += f" File exists at: {exporters_path}. "
             else:
                 error_msg += f" File NOT found at: {exporters_path}. "
-        error_msg += " Please ensure src/backup/exporters.py exists and is accessible."
+        error_msg += " Please ensure backup.exporters (or src/backup/exporters.py) is available."
         raise ImportError(error_msg)
     
     cur = conn.cursor()
@@ -325,7 +334,7 @@ def compare_schemas(src_conn, dest_conn,
                     error_msg += f" File exists at: {exporters_path}. "
                 else:
                     error_msg += f" File NOT found at: {exporters_path}. "
-            error_msg += " Please ensure src/backup/exporters.py exists and is accessible."
+            error_msg += " Please ensure backup.exporters (or src/backup/exporters.py) is available."
             raise ImportError(error_msg)
     
     if object_types is None:

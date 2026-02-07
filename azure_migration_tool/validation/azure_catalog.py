@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Thin layer: given a pyodbc connection, run SQL Server catalog queries
 (sys.objects, sys.columns, sys.indexes, sys.foreign_keys, sys.check_constraints, etc.)

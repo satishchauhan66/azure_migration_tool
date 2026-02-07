@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Basic usage example for the db2_azure_validation module.
 

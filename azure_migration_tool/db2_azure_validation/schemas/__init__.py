@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Pydantic schemas for DB2 to Azure Migration Validation.
 

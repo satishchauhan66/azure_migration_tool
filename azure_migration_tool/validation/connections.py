@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Open DB2 (jaydebeapi) and Azure SQL (pyodbc) connections from config.
 Config can be a file path (str) or an in-memory dict (no file stored).
@@ -81,3 +83,68 @@ def connect_azure_sql(config_path_or_dict: Union[str, Dict[str, Any]], logger=No
         password=password,
         db_type="sqlserver",
     )
+
+
+def connect_source_sql(config_path_or_dict: Union[str, Dict[str, Any]], logger=None):
+    """
+    Open SQL Server source connection via gui.utils.database_utils.connect_to_any_database.
+    config_path_or_dict: path to JSON file or in-memory config dict (no file stored).
+    Used when source database is SQL Server instead of DB2.
+    """
+    from gui.utils.database_utils import connect_to_any_database
+
+    config = _get_config(config_path_or_dict)
+    sql = config.get("source_sql", {})
+    server = sql.get("server", "").strip()
+    database = sql.get("database", "").strip()
+    user = sql.get("username", sql.get("user", "")).strip()
+    password = sql.get("password", "")
+    auth_config = sql.get("authentication", "SqlPassword")
+    auth = _map_azure_auth(auth_config)
+    return connect_to_any_database(
+        server=server,
+        database=database,
+        auth=auth,
+        user=user,
+        password=password,
+        db_type="sqlserver",
+    )
+
+
+def connect_source(config_path_or_dict: Union[str, Dict[str, Any]], logger=None):
+    """
+    Connect to the source database based on source_db_type in config.
+    Supports 'db2' and 'sqlserver' source types.
+    """
+    config = _get_config(config_path_or_dict)
+    source_type = config.get("source_db_type", "").strip().lower()
+    
+    # If source_db_type is not set, try to infer from available config sections
+    if not source_type:
+        if "db2" in config and config["db2"]:
+            source_type = "db2"
+        elif "source_sql" in config and config["source_sql"]:
+            source_type = "sqlserver"
+        else:
+            # Default to db2 for backward compatibility, but warn
+            if logger:
+                logger.warning("source_db_type not set in config, defaulting to 'db2'. Set source_db_type explicitly to avoid this warning.")
+            source_type = "db2"
+    
+    if source_type == "db2":
+        return connect_db2(config_path_or_dict, logger)
+    else:
+        # SQL Server source
+        return connect_source_sql(config_path_or_dict, logger)
+
+
+def connect_destination(config_path_or_dict: Union[str, Dict[str, Any]], logger=None):
+    """
+    Connect to the destination database based on destination_db_type in config.
+    Currently supports 'sqlserver' / 'azure_sql'.
+    """
+    config = _get_config(config_path_or_dict)
+    dest_type = config.get("destination_db_type", "sqlserver").lower()
+    
+    # Currently only SQL Server / Azure SQL destination is supported
+    return connect_azure_sql(config_path_or_dict, logger)

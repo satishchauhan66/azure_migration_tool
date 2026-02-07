@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Azure Migration Tool - Main Application
 A comprehensive GUI application for SQL Server/Azure SQL migrations.
@@ -30,8 +32,8 @@ if getattr(sys, 'frozen', False):
     if db2_val_dir.exists():
         sys.path.insert(0, str(db2_val_dir.parent))
     
-    # Add gui, setup modules
-    for subdir in ['gui', 'setup', 'utils']:
+    # Add gui, setup, src, backup modules
+    for subdir in ['gui', 'setup', 'utils', 'src', 'backup']:
         subdir_path = app_dir / subdir
         if subdir_path.exists():
             sys.path.insert(0, str(subdir_path.parent))

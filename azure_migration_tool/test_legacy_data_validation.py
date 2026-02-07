@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Test Legacy Data Validation (DB2 -> Azure SQL) from the command line.
 

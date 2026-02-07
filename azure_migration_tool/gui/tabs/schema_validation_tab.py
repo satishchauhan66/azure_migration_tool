@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Schema Validation Tab
 """
@@ -9,6 +11,7 @@ import threading
 import sys
 import pyodbc
 import json
+import time
 from datetime import datetime
 
 # Add parent directories to path
@@ -43,6 +46,61 @@ except ImportError:
     _TYPE_MAPPING_AVAILABLE = False
     validate_type_mapping = None
     compare_columns_with_type_mapping = None
+
+# Retry helper for deadlock errors
+def retry_on_deadlock(func, max_retries=3, delay=1.0, log_callback=None):
+    """
+    Retry a database operation on deadlock errors (SQL Server error 1205 / 40001).
+    
+    Args:
+        func: Function to execute (should be a lambda or callable)
+        max_retries: Maximum number of retry attempts (default: 3)
+        delay: Initial delay in seconds between retries (default: 1.0, doubles each retry)
+        log_callback: Optional callback function(str) to log retry attempts
+    
+    Returns:
+        Result of func()
+    
+    Raises:
+        Last exception if all retries fail
+    """
+    last_exception = None
+    current_delay = delay
+    
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except pyodbc.Error as e:
+            error_code = e.args[0] if e.args else ""
+            error_msg = str(e.args[1]) if len(e.args) > 1 else str(e)
+            
+            # Check if it's a deadlock error (1205 or 40001)
+            is_deadlock = (
+                "1205" in error_msg or 
+                "40001" in error_code or 
+                "deadlock" in error_msg.lower() or
+                "deadlocked" in error_msg.lower()
+            )
+            
+            if is_deadlock and attempt < max_retries - 1:
+                last_exception = e
+                if log_callback:
+                    log_callback(f"Deadlock detected (attempt {attempt + 1}/{max_retries}), retrying in {current_delay:.1f}s...")
+                time.sleep(current_delay)
+                current_delay *= 2  # Exponential backoff
+                continue
+            else:
+                # Not a deadlock or out of retries
+                raise
+        except Exception as e:
+            # Non-pyodbc exceptions or non-deadlock errors - don't retry
+            raise
+    
+    # If we get here, all retries failed
+    if last_exception:
+        raise last_exception
+    raise Exception("Retry failed for unknown reason")
+
 
 # Import signature-based matching for indexes and constraints
 try:
@@ -1128,13 +1186,21 @@ class SchemaValidationTab:
                         if _DB2_HELPERS_AVAILABLE and src_db_type == 'db2':
                             src_tables_list = fetch_tables_generic(src_cur, 'db2', src_schema_filter)
                         else:
-                            src_cur.execute("""
-                                SELECT TABLE_SCHEMA, TABLE_NAME
-                                FROM INFORMATION_SCHEMA.TABLES
-                                WHERE TABLE_TYPE = 'BASE TABLE'
-                                ORDER BY TABLE_SCHEMA, TABLE_NAME
-                            """)
-                            src_tables_list = [(row[0], row[1]) for row in src_cur.fetchall()]
+                            def query_src_tables():
+                                src_cur.execute("""
+                                    SELECT TABLE_SCHEMA, TABLE_NAME
+                                    FROM INFORMATION_SCHEMA.TABLES
+                                    WHERE TABLE_TYPE = 'BASE TABLE'
+                                    ORDER BY TABLE_SCHEMA, TABLE_NAME
+                                """)
+                                return [(row[0], row[1]) for row in src_cur.fetchall()]
+                            
+                            src_tables_list = retry_on_deadlock(
+                                query_src_tables,
+                                max_retries=3,
+                                delay=1.0,
+                                log_callback=lambda msg: self.validation_log.insert(tk.END, f"  [RETRY] {msg}\n") or self.validation_log.see(tk.END)
+                            )
                         
                         # Helper to convert Java strings (from JDBC) to Python strings
                         def to_py_str(val):
@@ -1152,13 +1218,21 @@ class SchemaValidationTab:
                         if _DB2_HELPERS_AVAILABLE and dest_db_type == 'db2':
                             dest_tables_list = fetch_tables_generic(dest_cur, 'db2', dest_schema_filter)
                         else:
-                            dest_cur.execute("""
-                                SELECT TABLE_SCHEMA, TABLE_NAME
-                                FROM INFORMATION_SCHEMA.TABLES
-                                WHERE TABLE_TYPE = 'BASE TABLE'
-                                ORDER BY TABLE_SCHEMA, TABLE_NAME
-                            """)
-                            dest_tables_list = [(row[0], row[1]) for row in dest_cur.fetchall()]
+                            def query_dest_tables():
+                                dest_cur.execute("""
+                                    SELECT TABLE_SCHEMA, TABLE_NAME
+                                    FROM INFORMATION_SCHEMA.TABLES
+                                    WHERE TABLE_TYPE = 'BASE TABLE'
+                                    ORDER BY TABLE_SCHEMA, TABLE_NAME
+                                """)
+                                return [(row[0], row[1]) for row in dest_cur.fetchall()]
+                            
+                            dest_tables_list = retry_on_deadlock(
+                                query_dest_tables,
+                                max_retries=3,
+                                delay=1.0,
+                                log_callback=lambda msg: self.validation_log.insert(tk.END, f"  [RETRY] {msg}\n") or self.validation_log.see(tk.END)
+                            )
                         
                         # Normalize the table list to Python strings
                         dest_tables_list = [(to_py_str(row[0]), to_py_str(row[1])) for row in dest_tables_list]
@@ -1263,13 +1337,21 @@ class SchemaValidationTab:
                                     })
                                 src_columns = {col['name']: (col['type'], col['length'], col['nullable']) for col in src_cols}
                             else:
-                                src_cur.execute("""
-                                    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
-                                    FROM INFORMATION_SCHEMA.COLUMNS
-                                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-                                    ORDER BY ORDINAL_POSITION
-                                """, schema, name)
-                                src_columns_list = src_cur.fetchall()
+                                def query_src_columns():
+                                    src_cur.execute("""
+                                        SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+                                        FROM INFORMATION_SCHEMA.COLUMNS
+                                        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+                                        ORDER BY ORDINAL_POSITION
+                                    """, schema, name)
+                                    return src_cur.fetchall()
+                                
+                                src_columns_list = retry_on_deadlock(
+                                    query_src_columns,
+                                    max_retries=3,
+                                    delay=1.0,
+                                    log_callback=lambda msg: self.validation_log.insert(tk.END, f"    [RETRY] {msg}\n") or self.validation_log.see(tk.END)
+                                )
                                 src_columns = {row[0]: row[1:] for row in src_columns_list}
                             self.validation_log.insert(tk.END, f"    [OK] Found {len(src_columns)} column(s) in source\n")
                             
@@ -1280,13 +1362,21 @@ class SchemaValidationTab:
                                 dest_cols = fetch_columns_generic(dest_cur, 'db2', schema, name)
                                 dest_columns = {col['name']: (col['type'], col['length'], col['nullable']) for col in dest_cols}
                             else:
-                                dest_cur.execute("""
-                                    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
-                                    FROM INFORMATION_SCHEMA.COLUMNS
-                                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-                                    ORDER BY ORDINAL_POSITION
-                                """, schema, name)
-                                dest_columns_list = dest_cur.fetchall()
+                                def query_dest_columns():
+                                    dest_cur.execute("""
+                                        SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
+                                        FROM INFORMATION_SCHEMA.COLUMNS
+                                        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+                                        ORDER BY ORDINAL_POSITION
+                                    """, schema, name)
+                                    return dest_cur.fetchall()
+                                
+                                dest_columns_list = retry_on_deadlock(
+                                    query_dest_columns,
+                                    max_retries=3,
+                                    delay=1.0,
+                                    log_callback=lambda msg: self.validation_log.insert(tk.END, f"    [RETRY] {msg}\n") or self.validation_log.see(tk.END)
+                                )
                                 dest_columns = {row[0]: row[1:] for row in dest_columns_list}
                             self.validation_log.insert(tk.END, f"    [OK] Found {len(dest_columns)} column(s) in destination\n")
                             
@@ -3150,15 +3240,21 @@ After installation, restart this application.
         
         try:
             try:
-                from schema_backup import (
+                from src.backup.exporters import (
                     fetch_columns, fetch_primary_key, build_create_table_sql,
                     object_definition, wrap_create_or_alter, qident, type_sql, parse_int_or_default
                 )
             except ImportError:
-                from sechma_backup import (
-                    fetch_columns, fetch_primary_key, build_create_table_sql,
-                    object_definition, wrap_create_or_alter, qident, type_sql, parse_int_or_default
-                )
+                try:
+                    from schema_backup import (
+                        fetch_columns, fetch_primary_key, build_create_table_sql,
+                        object_definition, wrap_create_or_alter, qident, type_sql, parse_int_or_default
+                    )
+                except ImportError:
+                    from sechma_backup import (
+                        fetch_columns, fetch_primary_key, build_create_table_sql,
+                        object_definition, wrap_create_or_alter, qident, type_sql, parse_int_or_default
+                    )
         except ImportError:
             return None, None
         
@@ -3917,19 +4013,27 @@ After installation, restart this application.
                 
                 try:
                     try:
-                        from schema_backup import (
+                        from src.backup.exporters import (
                             fetch_tables, fetch_columns, fetch_primary_key,
                             build_create_table_sql, qident, type_sql, parse_int_or_default,
                             fetch_objects, object_definition, wrap_create_or_alter,
                             export_indexes, export_foreign_keys, export_check_constraints
                         )
                     except ImportError:
-                        from sechma_backup import (
-                            fetch_tables, fetch_columns, fetch_primary_key,
-                            build_create_table_sql, qident, type_sql, parse_int_or_default,
-                            fetch_objects, object_definition, wrap_create_or_alter,
-                            export_indexes, export_foreign_keys, export_check_constraints
-                        )
+                        try:
+                            from schema_backup import (
+                                fetch_tables, fetch_columns, fetch_primary_key,
+                                build_create_table_sql, qident, type_sql, parse_int_or_default,
+                                fetch_objects, object_definition, wrap_create_or_alter,
+                                export_indexes, export_foreign_keys, export_check_constraints
+                            )
+                        except ImportError:
+                            from sechma_backup import (
+                                fetch_tables, fetch_columns, fetch_primary_key,
+                                build_create_table_sql, qident, type_sql, parse_int_or_default,
+                                fetch_objects, object_definition, wrap_create_or_alter,
+                                export_indexes, export_foreign_keys, export_check_constraints
+                            )
                     self.validation_log.insert(tk.END, "  ✓ Schema backup functions imported successfully\n")
                     self.validation_log.see(tk.END)
                 except ImportError as import_err:

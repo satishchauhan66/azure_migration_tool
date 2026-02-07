@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Test script for Legacy Data Validation with real DB2 and Azure SQL.
 """

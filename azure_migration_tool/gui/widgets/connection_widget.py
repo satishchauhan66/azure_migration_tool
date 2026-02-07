@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Reusable connection widget for server and database selection.
 """
@@ -188,15 +190,26 @@ class ConnectionWidget:
         self.auth_combo.grid(row=row_start+5, column=1, pady=5, padx=5, sticky=tk.EW)
         self.auth_combo.bind("<<ComboboxSelected>>", self._on_auth_combo_selected)
         self.auth_var.trace_add("write", self._sync_auth_display)
+        self._auth_row_start = row_start
+        
+        # User row (hidden when Windows auth is selected)
+        self.user_label = tk.Label(self.frame, text="User:")
+        self.user_label.grid(row=row_start+6, column=0, sticky=tk.W, pady=5)
+        self.user_entry = ttk.Entry(self.frame, textvariable=self.user_var, width=40)
+        self.user_entry.grid(row=row_start+6, column=1, pady=5, padx=5, sticky=tk.EW)
+        
+        # Password row (hidden when Windows auth is selected)
+        self.password_label = tk.Label(self.frame, text="Password:")
+        self.password_label.grid(row=row_start+7, column=0, sticky=tk.W, pady=5)
+        self.password_entry = ttk.Entry(self.frame, textvariable=self.password_var, width=40, show="*")
+        self.password_entry.grid(row=row_start+7, column=1, pady=5, padx=5, sticky=tk.EW)
+        
+        # Hint when Windows auth: "Using your Windows account" (shown instead of User/Password)
+        self.windows_auth_hint = tk.Label(self.frame, text="Using your Windows account", fg="gray")
+        self.windows_auth_hint.grid(row=row_start+6, column=0, columnspan=2, sticky=tk.W, pady=5, padx=5)
+        self.windows_auth_hint.grid_remove()
+        
         self._update_auth_visibility()
-        
-        # User row
-        tk.Label(self.frame, text="User:").grid(row=row_start+6, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(self.frame, textvariable=self.user_var, width=40).grid(row=row_start+6, column=1, pady=5, padx=5, sticky=tk.EW)
-        
-        # Password row
-        tk.Label(self.frame, text="Password:").grid(row=row_start+7, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(self.frame, textvariable=self.password_var, width=40, show="*").grid(row=row_start+7, column=1, pady=5, padx=5, sticky=tk.EW)
         
         # Configure column weights
         self.frame.columnconfigure(1, weight=1)
@@ -223,11 +236,13 @@ class ConnectionWidget:
         internal = AUTH_TO_INTERNAL.get(display)
         if internal is not None:
             self.auth_var.set(internal)
+        self._update_auth_visibility()
     
     def _sync_auth_display(self, *args):
         """Keep auth combo display in sync when auth_var is set from outside."""
         internal = self.auth_var.get()
         self._auth_display_var.set(AUTH_DISPLAY.get(internal, internal))
+        self._update_auth_visibility()
     
     def _on_db_type_changed(self, event=None):
         """Handle database type change (SQL Server vs DB2)."""
@@ -344,15 +359,38 @@ class ConnectionWidget:
         threading.Thread(target=load_schemas, daemon=True).start()
     
     def _update_auth_visibility(self):
-        """Show/hide auth field based on database type."""
+        """Show/hide auth and user/password fields based on database type and auth."""
+        # Check if widgets exist (they might not be created yet during initialization)
+        if not hasattr(self, 'user_label') or not hasattr(self, 'windows_auth_hint'):
+            return
+        
         db_type = self.db_type_var.get()
+        auth = (self.auth_var.get() or "").strip()
         if db_type == "db2":
-            # DB2 doesn't use auth types like SQL Server
+            # DB2 doesn't use auth types like SQL Server; always show User/Password
             self.auth_label.grid_remove()
             self.auth_combo.grid_remove()
+            self.user_label.grid()
+            self.user_entry.grid()
+            self.password_label.grid()
+            self.password_entry.grid()
+            self.windows_auth_hint.grid_remove()
         else:
             self.auth_label.grid()
             self.auth_combo.grid()
+            if auth == "windows":
+                # Windows auth uses current Windows identity; no username/password
+                self.user_label.grid_remove()
+                self.user_entry.grid_remove()
+                self.password_label.grid_remove()
+                self.password_entry.grid_remove()
+                self.windows_auth_hint.grid()
+            else:
+                self.windows_auth_hint.grid_remove()
+                self.user_label.grid()
+                self.user_entry.grid()
+                self.password_label.grid()
+                self.password_entry.grid()
     
     def _refresh_server_list(self):
         """Refresh the server dropdown with saved servers."""

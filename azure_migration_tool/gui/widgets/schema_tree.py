@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Schema comparison tree widget with checkboxes for object selection.
 """
@@ -189,7 +191,7 @@ class SchemaTree(ttk.Frame):
         """Handle checkbox click."""
         region = self.tree.identify_region(event.x, event.y)
         if region == "cell":
-            item = self.tree.identify_row(event.x, event.y)
+            item = self.tree.identify_row(event.y)
             if item:
                 tags = self.tree.item(item, "tags")
                 if "checkbox" in tags:

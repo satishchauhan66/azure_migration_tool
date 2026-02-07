@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Legacy Data Validation Tab - Python-only (no PySpark).
 Compares DB2 to Azure SQL; same report format as before.
@@ -419,26 +421,61 @@ class LegacyDataValidationTab:
     def _create_database_config(self):
         """Create database_config.json from user inputs."""
         # Map auth types
+        src_auth = self._map_auth_to_pyspark(self.src_auth_var.get())
         dest_auth = self._map_auth_to_pyspark(self.dest_auth_var.get())
         
+        src_db_type = self.src_db_type_var.get().strip().lower()
+        dest_db_type = self.dest_db_type_var.get().strip().lower()
+        
         config = {
-            "db2": {
+            "source_db_type": src_db_type,
+            "destination_db_type": dest_db_type,
+        }
+        
+        # Build source config based on type
+        if src_db_type == "db2":
+            config["db2"] = {
                 "host": self.src_server_var.get().strip(),
                 "port": int(self.src_port_var.get().strip() or "50000"),
                 "database": self.src_db_var.get().strip(),
-                "username": self.src_user_var.get().strip(),  # DB2 expects 'username'
+                "username": self.src_user_var.get().strip(),
                 "password": self.src_password_var.get()
-            },
-            "azure_sql": {
-                "server": self.dest_server_var.get().strip(),
+            }
+        else:
+            # SQL Server source
+            config["source_sql"] = {
+                "server": self.src_server_var.get().strip(),
+                "port": int(self.src_port_var.get().strip() or "1433"),
+                "database": self.src_db_var.get().strip(),
+                "username": self.src_user_var.get().strip(),
+                "password": self.src_password_var.get(),
+                "authentication": src_auth,
+                "encrypt": "yes",
+                "trust_server_certificate": "yes"
+            }
+        
+        # Build destination config based on type
+        if dest_db_type == "db2":
+            config["dest_db2"] = {
+                "host": self.dest_server_var.get().strip(),
+                "port": int(self.dest_port_var.get().strip() or "50000"),
                 "database": self.dest_db_var.get().strip(),
-                "username": self.dest_user_var.get().strip(),  # Azure SQL also expects 'username'
+                "username": self.dest_user_var.get().strip(),
+                "password": self.dest_password_var.get()
+            }
+        else:
+            # SQL Server / Azure SQL destination
+            config["azure_sql"] = {
+                "server": self.dest_server_var.get().strip(),
+                "port": int(self.dest_port_var.get().strip() or "1433"),
+                "database": self.dest_db_var.get().strip(),
+                "username": self.dest_user_var.get().strip(),
                 "password": self.dest_password_var.get(),
                 "authentication": dest_auth,
                 "encrypt": "yes",
-                "trust_server_certificate": "yes"  # Required for Azure SQL MI with custom certs
+                "trust_server_certificate": "yes"
             }
-        }
+        
         return config
     
     def _validate_inputs(self):
@@ -574,14 +611,24 @@ class LegacyDataValidationTab:
             pass
         total_steps = sum([self.row_counts_var.get(), self.null_empty_var.get(), self.distinct_key_var.get()])
         results = []
+        
+        def _safe_len(df):
+            """Get length of DataFrame or return 0 if None/empty."""
+            if df is None:
+                return 0
+            try:
+                return len(df)
+            except Exception:
+                return 0
+        
         if self.row_counts_var.get():
-            n = len(self.validation_results.get("row_counts") or [])
+            n = _safe_len(self.validation_results.get("row_counts"))
             results.append(("Row Counts", n, None))
         if self.null_empty_var.get():
-            n = len(self.validation_results.get("null_values") or [])
+            n = _safe_len(self.validation_results.get("null_values"))
             results.append(("Null Values", n, None))
         if self.distinct_key_var.get():
-            n = len(self.validation_results.get("distinct_key") or [])
+            n = _safe_len(self.validation_results.get("distinct_key"))
             results.append(("Distinct Key", n, None))
         self._update_summary(results, single_csv_path=single_csv_path)
         self._update_progress(total_steps, total_steps, "Validation complete!")

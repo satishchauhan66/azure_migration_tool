@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Schema Backup/Migration Tab
 """
@@ -28,7 +30,7 @@ try:
     from src.utils.database import pick_sql_driver
 except ImportError:
     try:
-        from utils.database import pick_sql_driver
+        from src.utils.database import pick_sql_driver
     except ImportError:
         def pick_sql_driver(logger=None):
             import pyodbc
@@ -37,17 +39,26 @@ except ImportError:
                 return drivers[0]
             return "ODBC Driver 18 for SQL Server"
 
+# Import schema_backup
 try:
-    import schema_backup as sechma_backup
+    from src.backup import schema_backup as sechma_backup
 except ImportError:
     try:
-        import sechma_backup
+        import schema_backup as sechma_backup
     except ImportError:
-        sechma_backup = None
+        try:
+            import sechma_backup
+        except ImportError:
+            sechma_backup = None
+
+# Import restore_schema
 try:
-    import restore_schema
+    from src.restore import schema_restore as restore_schema
 except ImportError:
-    restore_schema = None
+    try:
+        import restore_schema
+    except ImportError:
+        restore_schema = None
 
 
 class SchemaTab:
@@ -292,7 +303,8 @@ class SchemaTab:
                 self.frame.after(0, lambda: self.src_status_label.config(text="Connected", fg="green"))
                 self._update_compare_button()
             except Exception as e:
-                self.frame.after(0, lambda: messagebox.showerror("Connection Error", f"Failed to connect to source: {str(e)}"))
+                err_msg = str(e)
+                self.frame.after(0, lambda msg=err_msg: messagebox.showerror("Connection Error", f"Failed to connect to source: {msg}"))
                 self.frame.after(0, lambda: self.src_status_label.config(text="Connection failed", fg="red"))
         
         threading.Thread(target=connect, daemon=True).start()
@@ -314,7 +326,8 @@ class SchemaTab:
                 self.frame.after(0, lambda: self.dest_status_label.config(text="Connected", fg="green"))
                 self._update_compare_button()
             except Exception as e:
-                self.frame.after(0, lambda: messagebox.showerror("Connection Error", f"Failed to connect to destination: {str(e)}"))
+                err_msg = str(e)
+                self.frame.after(0, lambda msg=err_msg: messagebox.showerror("Connection Error", f"Failed to connect to destination: {msg}"))
                 self.frame.after(0, lambda: self.dest_status_label.config(text="Connection failed", fg="red"))
         
         threading.Thread(target=connect, daemon=True).start()
@@ -366,7 +379,8 @@ class SchemaTab:
                 self.frame.after(0, lambda: self.export_comparison_btn.config(state=tk.NORMAL))
                 self.frame.after(0, lambda: messagebox.showinfo("Success", "Schema comparison completed!"))
             except Exception as e:
-                self.frame.after(0, lambda: messagebox.showerror("Error", f"Comparison failed: {str(e)}"))
+                err_msg = str(e)
+                self.frame.after(0, lambda msg=err_msg: messagebox.showerror("Error", f"Comparison failed: {msg}"))
         
         threading.Thread(target=compare, daemon=True).start()
     
@@ -656,16 +670,22 @@ class SchemaTab:
                 import logging
                 logger = logging.getLogger(__name__)
                 script = generate_script_for_objects(self.src_conn, selected, logger)
-                self.generated_script = script
-                self.script_preview.delete("1.0", tk.END)
-                self.script_preview.insert("1.0", script)
-                # Enable preview/save/execute buttons
-                self.preview_btn.config(state=tk.NORMAL)
-                self.save_btn.config(state=tk.NORMAL)
-                self.execute_btn.config(state=tk.NORMAL)
-                messagebox.showinfo("Success", f"Generated script for {len(selected)} object(s)!")
+                
+                # Schedule UI updates on the main thread
+                def update_ui(script_text=script, count=len(selected)):
+                    self.generated_script = script_text
+                    self.script_preview.delete("1.0", tk.END)
+                    self.script_preview.insert("1.0", script_text)
+                    # Enable preview/save/execute buttons
+                    self.preview_btn.config(state=tk.NORMAL)
+                    self.save_btn.config(state=tk.NORMAL)
+                    self.execute_btn.config(state=tk.NORMAL)
+                    messagebox.showinfo("Success", f"Generated script for {count} object(s)!")
+                
+                self.frame.after(0, update_ui)
             except Exception as e:
-                messagebox.showerror("Error", f"Script generation failed: {str(e)}")
+                err_msg = str(e)
+                self.frame.after(0, lambda msg=err_msg: messagebox.showerror("Error", f"Script generation failed: {msg}"))
         
         threading.Thread(target=generate, daemon=True).start()
     
@@ -674,8 +694,26 @@ class SchemaTab:
         if not self.generated_script:
             messagebox.showwarning("Warning", "No script generated yet!")
             return
-        # Script is already in preview text widget
-        pass
+        
+        # Create a preview dialog window
+        preview_window = tk.Toplevel(self.frame)
+        preview_window.title("Script Preview")
+        preview_window.geometry("900x600")
+        preview_window.transient(self.frame.winfo_toplevel())
+        
+        # Add a text widget with the script
+        text_frame = ttk.Frame(preview_window)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        preview_text = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD, font=("Consolas", 10))
+        preview_text.pack(fill=tk.BOTH, expand=True)
+        preview_text.insert("1.0", self.generated_script)
+        preview_text.config(state=tk.DISABLED)
+        
+        # Add close button
+        btn_frame = ttk.Frame(preview_window)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btn_frame, text="Close", command=preview_window.destroy).pack(side=tk.RIGHT)
     
     def _save_script(self):
         """Save generated script to file."""
@@ -980,7 +1018,10 @@ class SchemaTab:
                     
                     if run_id and server and database:
                         # Create short slugs for server and database
-                        from sechma_backup import short_slug
+                        try:
+                            from src.utils.paths import short_slug
+                        except ImportError:
+                            from src.utils.paths import short_slug
                         server_slug = short_slug(server)
                         db_slug = short_slug(database)
                         backup_path = str(Path(backup_root) / server_slug / db_slug / "runs" / run_id)

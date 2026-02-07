@@ -1,3 +1,5 @@
+# Author: Satish Chauhan
+# Proprietary - 66degrees. All rights reserved.
 """
 Data Validation Tab - Row Comparison
 """
@@ -290,9 +292,23 @@ class DataValidationTab:
         ttk.Checkbutton(options_frame, text="Sample Row Differences (first 100)", 
                        variable=self.sample_rows_var).pack(anchor=tk.W, pady=5)
         
+        sample_size_row = ttk.Frame(options_frame)
+        sample_size_row.pack(anchor=tk.W, pady=5)
+        tk.Label(sample_size_row, text="Sample size (rows) for row comparison:").pack(side=tk.LEFT)
+        self.sample_size_var = tk.IntVar(value=100)
+        sample_size_spin = ttk.Spinbox(sample_size_row, from_=1, to=1000, width=6, textvariable=self.sample_size_var)
+        sample_size_spin.pack(side=tk.LEFT, padx=5)
+        tk.Label(sample_size_row, text="(default 100)").pack(side=tk.LEFT)
+        
         self.use_exact_count_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(options_frame, text="Use Exact COUNT(*) (slower but more accurate)", 
                        variable=self.use_exact_count_var).pack(anchor=tk.W, pady=5)
+        
+        self.check_identity_reseed_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, text="Check identity vs max ID (post-migration reseed risk)", 
+                       variable=self.check_identity_reseed_var).pack(anchor=tk.W, pady=5)
+        tk.Label(options_frame, text="Reseed: After DB2→SQL migration, identity can be lower than max ID in child tables; new inserts then cause duplicate-key errors. This check flags tables that need DBCC CHECKIDENT RESEED.", 
+                 font=("Arial", 8), fg="gray", wraplength=520).pack(anchor=tk.W, padx=(20, 0))
         
         # Excel support frame
         excel_frame = ttk.LabelFrame(scrollable_frame, text="Bulk Processing (Excel)", padding=10)
@@ -361,7 +377,7 @@ class DataValidationTab:
         
         self.status_filter_var = tk.StringVar(value="All")
         status_filter_combo = ttk.Combobox(filter_frame, textvariable=self.status_filter_var,
-                                          values=["All", "✓ Match", "✗ Mismatch", "✗ Error", "✗ Missing"],
+                                          values=["All", "✓ Match", "✗ Mismatch", "✗ Error", "✗ Missing", "⚠ Reseed"],
                                           state="readonly", width=15)
         status_filter_combo.pack(side=tk.LEFT, padx=5)
         status_filter_combo.bind("<<ComboboxSelected>>", lambda e: self._filter_results())
@@ -374,6 +390,15 @@ class DataValidationTab:
         
         ttk.Button(filter_frame, text="Clear Filter", command=self._clear_filter).pack(side=tk.LEFT, padx=5)
         
+        # Detail panel (above tree so it's visible when a row is selected)
+        detail_frame = ttk.LabelFrame(results_frame, text="Detail — select a row below", padding=8)
+        detail_frame.pack(fill=tk.X, pady=(0, 8))
+        self.detail_placeholder = tk.Label(detail_frame, text="Select a row to see details and sample comparison.", fg="gray", font=("Arial", 9))
+        self.detail_placeholder.pack(anchor=tk.W)
+        self.detail_content_frame = ttk.Frame(detail_frame)
+        self.detail_content_frame.pack(fill=tk.X, pady=(4, 0))
+        # Copy reseed script button is added only when an Identity reseed row is selected (see _on_result_select)
+        
         # Store all items for filtering
         self.all_tree_items = []
         
@@ -384,27 +409,31 @@ class DataValidationTab:
         scrollbar = ttk.Scrollbar(tree_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self.results_tree = ttk.Treeview(tree_frame, columns=("DB", "Source", "Destination", "Status", "Differences"), 
-                                         show="tree headings", yscrollcommand=scrollbar.set)
+        # height=12 shows ~12 rows so Validation Results area is visible
+        self.results_tree = ttk.Treeview(tree_frame, columns=("Type", "DB", "Source", "Destination", "Status", "Differences"), 
+                                         show="tree headings", yscrollcommand=scrollbar.set, height=12)
         scrollbar.config(command=self.results_tree.yview)
         
         self.results_tree.heading("#0", text="Table", command=lambda: self._sort_treeview("#0"))
+        self.results_tree.heading("Type", text="Type", command=lambda: self._sort_treeview("Type"))
         self.results_tree.heading("DB", text="Database", command=lambda: self._sort_treeview("DB"))
         self.results_tree.heading("Source", text="Source Rows", command=lambda: self._sort_treeview("Source"))
         self.results_tree.heading("Destination", text="Dest Rows", command=lambda: self._sort_treeview("Destination"))
         self.results_tree.heading("Status", text="Status", command=lambda: self._sort_treeview("Status"))
         self.results_tree.heading("Differences", text="Differences", command=lambda: self._sort_treeview("Differences"))
         
-        self.results_tree.column("#0", width=200)
-        self.results_tree.column("DB", width=250)  # Increased width for database names
-        self.results_tree.column("Source", width=120)
-        self.results_tree.column("Destination", width=120)
+        self.results_tree.column("#0", width=180)
+        self.results_tree.column("Type", width=100)
+        self.results_tree.column("DB", width=220)
+        self.results_tree.column("Source", width=100)
+        self.results_tree.column("Destination", width=100)
         self.results_tree.column("Status", width=100)
-        self.results_tree.column("Differences", width=150)
+        self.results_tree.column("Differences", width=180)
         
         self.treeview_sort_reverse = {}
         
         self.results_tree.pack(fill=tk.BOTH, expand=True)
+        self.results_tree.bind("<<TreeviewSelect>>", self._on_result_select)
         
         # Log output
         log_frame = ttk.LabelFrame(scrollable_frame, text="Validation Log", padding=10)
@@ -414,6 +443,7 @@ class DataValidationTab:
         self.validation_log.pack(fill=tk.BOTH, expand=True)
         
         self.validation_results = {}
+        self._last_sample_export_data = None  # for Export sample (top 100) to Excel
         self._cached_driver = None  # Cache the detected driver
     
     def _get_odbc_driver(self):
@@ -499,6 +529,7 @@ class DataValidationTab:
         self._reset_progress()
         self._log("Starting data validation...")
         self.validation_results = {}
+        self._last_sample_export_data = None
         self._update_status("Starting validation...", "blue")
         
         def run_validation():
@@ -600,6 +631,67 @@ class DataValidationTab:
                 self._update_progress(0, len(tables), f"Starting validation of {len(tables)} tables...")
                 self._log(f"Starting validation of {len(tables)} table(s)...", logging.INFO, context)
                 
+                # Batched fast path: SQL Server to SQL Server — fetch all row counts in 2 queries instead of 2 per table
+                src_counts_batch = {}
+                dest_counts_batch = {}
+                dest_is_sql = (self.dest_db_type_var.get() or "").strip().lower() != "db2"
+                if (
+                    not table_name
+                    and not src_is_db2
+                    and dest_is_sql
+                    and not self.use_exact_count_var.get()
+                    and len(tables) >= 1
+                ):
+                    try:
+                        self._log("Fetching row counts from source and destination in parallel (batch)...", logging.INFO, context)
+                        self._update_status("Fetching row counts (source + destination in parallel)...", "blue")
+                        src_result = [None]  # mutable holder for thread result
+                        dest_result = [None]
+                        batch_sql = """
+                            SELECT s.name, t.name, SUM(p.rows) AS row_count
+                            FROM sys.partitions p
+                            JOIN sys.tables t ON p.object_id = t.object_id
+                            JOIN sys.schemas s ON t.schema_id = s.schema_id
+                            WHERE p.index_id IN (0, 1)
+                            GROUP BY s.name, t.name
+                        """
+                        def fetch_src():
+                            try:
+                                src_cur.execute(batch_sql)
+                                out = {}
+                                for row in src_cur.fetchall():
+                                    key = f"{row[0]}.{row[1]}"
+                                    out[key] = int(row[2] or 0)
+                                src_result[0] = out
+                            except Exception as e:
+                                src_result[0] = {}
+                        def fetch_dest():
+                            try:
+                                dest_cur.execute(batch_sql)
+                                out = {}
+                                for row in dest_cur.fetchall():
+                                    key = f"{row[0]}.{row[1]}"
+                                    out[key] = int(row[2] or 0)
+                                dest_result[0] = out
+                            except Exception as e:
+                                dest_result[0] = {}
+                        t_src = threading.Thread(target=fetch_src, daemon=True)
+                        t_dest = threading.Thread(target=fetch_dest, daemon=True)
+                        t_src.start()
+                        t_dest.start()
+                        t_src.join()
+                        t_dest.join()
+                        src_counts_batch = src_result[0] or {}
+                        dest_counts_batch = dest_result[0] or {}
+                        self._log(f"Source batch: {len(src_counts_batch)} table(s) | Destination batch: {len(dest_counts_batch)} table(s)", logging.INFO, context)
+                    except Exception as batch_err:
+                        self._log(f"Batch row count failed, falling back to per-table: {batch_err}", logging.WARNING, context)
+                        src_counts_batch = {}
+                        dest_counts_batch = {}
+                
+                if src_counts_batch and dest_counts_batch:
+                    self._log("Using fast path: row counts from batch (no per-table queries).", logging.INFO, context)
+                
                 for idx, table in enumerate(tables, 1):
                     schema, name = table.split('.') if '.' in table else ('dbo', table)
                     table_context = {**context, "table": table}
@@ -681,61 +773,51 @@ class DataValidationTab:
                             dest_count = int(dest_count_fast)
                             self._log(f"  Destination fast count: {dest_count:,}", logging.INFO, table_context)
                             
-                            # Compare fast counts
+                            # Compare fast counts; exact COUNT(*) only when "Use exact count" is enabled
                             if src_count == dest_count:
                                 status = "✓ Match"
                                 diff = 0
                                 differences = []
                                 self._log(f"  ✓ MATCH (fast check): Both have {src_count:,} rows", logging.INFO, table_context)
                             else:
-                                # Fast counts differ - verify with exact COUNT(*) for accuracy
-                                self._log(f"  ⚠ Fast check mismatch ({src_count:,} vs {dest_count:,}), verifying...", logging.WARNING, table_context)
-                                
-                                # Only do exact count if difference is significant (>1% or >100 rows)
-                                diff_pct = abs(src_count - dest_count) / max(src_count, dest_count, 1) * 100
-                                if diff_pct > 1 or abs(src_count - dest_count) > 100:
-                                    self._log(f"  Executing exact COUNT(*) for verification...", logging.DEBUG, table_context)
-                                    src_cur.execute(f"SELECT COUNT(*) FROM {src_table_ref}")
-                                    src_count = src_cur.fetchone()[0]
-                                    dest_cur.execute(f"SELECT COUNT(*) FROM {dest_table_ref}")
-                                    dest_count = dest_cur.fetchone()[0]
-                                    self._log(f"  Exact counts: Source={src_count:,}, Dest={dest_count:,}", logging.INFO, table_context)
-                                
-                                status = "✓ Match" if src_count == dest_count else "✗ Mismatch"
+                                status = "✗ Mismatch"
                                 diff = abs(src_count - dest_count)
-                                
-                                if src_count == dest_count:
-                                    self._log(f"  ✓ MATCH (exact check): Both have {src_count:,} rows", logging.INFO, table_context)
-                                else:
-                                    self._log(f"  ✗ MISMATCH: Difference of {diff:,} rows", logging.WARNING, table_context)
-                                
-                                differences = [f"Row count difference: {diff}"] if diff > 0 else []
+                                differences = [f"Row count difference: {diff} (enable 'Use exact count' to verify)"] if diff > 0 else []
+                                self._log(f"  ✗ MISMATCH (fast check): Source {src_count:,} vs Dest {dest_count:,} rows", logging.WARNING, table_context)
                         else:
-                            # FAST CHECK: Get row counts using sys.partitions (metadata, < 1 second)
-                            # Only for SQL Server to SQL Server comparisons
-                            self._log(f"  Fast check: Querying sys.partitions for row count (source)...", logging.DEBUG, table_context)
-                            src_cur.execute("""
-                                SELECT SUM(p.rows) 
-                                FROM sys.partitions p 
-                                JOIN sys.tables t ON p.object_id = t.object_id
-                                JOIN sys.schemas s ON t.schema_id = s.schema_id
-                                WHERE s.name = ? AND t.name = ? AND p.index_id IN (0,1)
-                            """, (schema, name))
-                            src_count_fast = src_cur.fetchone()[0] or 0
-                            self._log(f"  Source fast count: {src_count_fast:,}", logging.DEBUG, table_context)
+                            # FAST CHECK: Use batch counts if available, else sys.partitions per table (SQL Server to SQL Server)
+                            if src_counts_batch and dest_counts_batch:
+                                src_count_fast = src_counts_batch.get(table, -1)
+                                dest_count_fast = dest_counts_batch.get(table, -1)
+                                if src_count_fast < 0:
+                                    src_count_fast = 0
+                                # Batch path: no per-table DB calls; only log at DEBUG to avoid 175 lines
+                                self._log(f"  Source fast count: {src_count_fast:,}", logging.DEBUG, table_context)
+                                self._log(f"  Destination fast count: {dest_count_fast:,}", logging.DEBUG, table_context)
+                            else:
+                                self._log(f"  Fast check: Querying sys.partitions for row count (source)...", logging.DEBUG, table_context)
+                                src_cur.execute("""
+                                    SELECT SUM(p.rows) 
+                                    FROM sys.partitions p 
+                                    JOIN sys.tables t ON p.object_id = t.object_id
+                                    JOIN sys.schemas s ON t.schema_id = s.schema_id
+                                    WHERE s.name = ? AND t.name = ? AND p.index_id IN (0,1)
+                                """, (schema, name))
+                                src_count_fast = src_cur.fetchone()[0] or 0
+                                self._log(f"  Source fast count: {src_count_fast:,}", logging.DEBUG, table_context)
+                                
+                                self._log(f"  Fast check: Querying sys.partitions for row count (destination)...", logging.DEBUG, table_context)
+                                dest_cur.execute("""
+                                    SELECT SUM(p.rows) 
+                                    FROM sys.partitions p 
+                                    JOIN sys.tables t ON p.object_id = t.object_id
+                                    JOIN sys.schemas s ON t.schema_id = s.schema_id
+                                    WHERE s.name = ? AND t.name = ? AND p.index_id IN (0,1)
+                                """, (schema, name))
+                                dest_count_fast = dest_cur.fetchone()[0] or 0
+                                self._log(f"  Destination fast count: {dest_count_fast:,}", logging.DEBUG, table_context)
                             
-                            self._log(f"  Fast check: Querying sys.partitions for row count (destination)...", logging.DEBUG, table_context)
-                            dest_cur.execute("""
-                                SELECT SUM(p.rows) 
-                                FROM sys.partitions p 
-                                JOIN sys.tables t ON p.object_id = t.object_id
-                                JOIN sys.schemas s ON t.schema_id = s.schema_id
-                                WHERE s.name = ? AND t.name = ? AND p.index_id IN (0,1)
-                            """, (schema, name))
-                            dest_count_fast = dest_cur.fetchone()[0] or 0
-                            self._log(f"  Destination fast count: {dest_count_fast:,}", logging.DEBUG, table_context)
-                            
-                            # If fast counts match, we're done (most common case)
+                            # Use fast counts only — exact COUNT(*) runs only when "Use exact count" is checked
                             if src_count_fast == dest_count_fast:
                                 src_count = src_count_fast
                                 dest_count = dest_count_fast
@@ -744,35 +826,17 @@ class DataValidationTab:
                                 differences = []
                                 self._log(f"  ✓ MATCH (fast check): Both have {src_count:,} rows", logging.INFO, table_context)
                             else:
-                                # PRECISE CHECK: Counts differ, do exact COUNT(*) to verify
-                                self._log(f"  ⚠ Fast check mismatch detected, verifying with exact COUNT(*)...", logging.WARNING, table_context)
-                                
-                                self._log(f"  Executing exact COUNT(*) on source: {src_table_ref}", logging.DEBUG, table_context)
-                                src_cur.execute(f"SELECT COUNT(*) FROM {src_table_ref}")
-                                src_count = src_cur.fetchone()[0]
-                                self._log(f"  Source exact count: {src_count:,}", logging.INFO, table_context)
-                                
-                                self._log(f"  Executing exact COUNT(*) on destination: {dest_table_ref}", logging.DEBUG, table_context)
-                                dest_cur.execute(f"SELECT COUNT(*) FROM {dest_table_ref}")
-                                dest_count = dest_cur.fetchone()[0]
-                                self._log(f"  Destination exact count: {dest_count:,}", logging.INFO, table_context)
-                                
-                                # Compare precise counts
-                                status = "✓ Match" if src_count == dest_count else "✗ Mismatch"
+                                # Report mismatch from sys.partitions; no COUNT(*) unless user enables "Use exact count"
+                                src_count = src_count_fast
+                                dest_count = dest_count_fast
+                                status = "✗ Mismatch"
                                 diff = abs(src_count - dest_count)
-                                
-                                if src_count == dest_count:
-                                    self._log(f"  ✓ MATCH (exact check): Both have {src_count:,} rows", logging.INFO, table_context)
-                                else:
-                                    self._log(f"  ✗ MISMATCH: Difference of {diff:,} rows (Source: {src_count:,}, Dest: {dest_count:,})", 
-                                             logging.WARNING, table_context)
-                                
-                                # Sample row differences if requested
-                                differences = []
-                                if self.sample_rows_var.get() and src_count != dest_count:
-                                    differences.append(f"Row count difference: {diff}")
+                                differences = [f"Row count difference: {diff} (from sys.partitions)"] if diff > 0 else []
+                                self._log(f"  ✗ MISMATCH (fast check): Source {src_count:,} vs Dest {dest_count:,} rows (enable 'Use exact count' to verify)", 
+                                         logging.WARNING, table_context)
                         
                         result = {
+                            "type": "row_count",
                             "table": table,
                             "src_count": src_count,
                             "dest_count": dest_count,
@@ -783,16 +847,22 @@ class DataValidationTab:
                         self.validation_results[table] = result
                         
                         db_name = f"{src_db} vs {dest_db}"
-                        # Thread-safe treeview update
+                        # Thread-safe treeview update (use strings for reliable display)
                         def add_result(tbl=table, db=db_name, sc=src_count, dc=dest_count, st=status, d=diff, mismatch=(src_count != dest_count)):
                             try:
-                                item = self.results_tree.insert("", tk.END, text=tbl,
-                                                               values=(db, sc, dc, st, f"{d} rows"))
+                                item = self.results_tree.insert("", tk.END, text=str(tbl),
+                                                               values=("Row count", str(db), str(sc), str(dc), str(st), f"{d} rows"),
+                                                               tags=(tbl,))
                                 self.all_tree_items.append(item)
                                 if mismatch:
                                     self.results_tree.set(item, "Status", "✗ Mismatch")
-                            except Exception:
-                                pass
+                            except Exception as ex:
+                                # Log so we don't silently lose results
+                                try:
+                                    self.validation_log.insert(tk.END, f"  [Warning] Could not add result row for {tbl}: {ex}\n")
+                                    self.validation_log.see(tk.END)
+                                except Exception:
+                                    pass
                         self.frame.after(0, add_result)
                         
                     except Exception as e:
@@ -802,15 +872,29 @@ class DataValidationTab:
                         self._log(f"  Error type: {error_type}", logging.DEBUG, table_context)
                         
                         db_name = f"{src_db} vs {dest_db}"
+                        err_key = f"error:{table}"
+                        self.validation_results[err_key] = {"type": "error", "table": table, "error": error_msg}
                         # Thread-safe treeview update for errors
                         def add_error(tbl=table, db=db_name, err=error_msg):
                             try:
-                                item = self.results_tree.insert("", tk.END, text=tbl,
-                                                       values=(db, "Error", "Error", "✗ Error", err))
+                                item = self.results_tree.insert("", tk.END, text=str(tbl),
+                                                       values=("Row count", str(db), "Error", "Error", "✗ Error", str(err)[:200]),
+                                                       tags=(err_key,))
                                 self.all_tree_items.append(item)
-                            except Exception:
-                                pass
+                            except Exception as ex:
+                                try:
+                                    self.validation_log.insert(tk.END, f"  [Warning] Could not add error row for {tbl}: {ex}\n")
+                                    self.validation_log.see(tk.END)
+                                except Exception:
+                                    pass
                         self.frame.after(0, add_error)
+                
+                # Identity reseed check (destination only, when enabled)
+                if self.check_identity_reseed_var.get() and dest_is_sql:
+                    try:
+                        self._run_identity_reseed_checks(dest_cur, dest_db, context)
+                    except Exception as ident_err:
+                        self._log(f"Identity reseed check failed: {ident_err}", logging.WARNING, context)
                 
                 # Close connections
                 self._log("Closing database connections...", logging.DEBUG, context)
@@ -820,13 +904,22 @@ class DataValidationTab:
                 
                 self._log("\n✓ Validation completed!", logging.INFO, context)
                 
+                # Count successes and failures for stats (include tables that errored and never made it to validation_results)
+                success_count = sum(1 for r in self.validation_results.values() if r.get("status") == "✓ Match")
+                total_count = len(tables)
+                fail_count = total_count - success_count
+                
                 # Thread-safe UI updates
                 def on_success():
                     try:
                         self.export_btn.config(state=tk.NORMAL)
                         self._update_progress(len(tables), len(tables), f"Completed: {len(tables)} tables validated")
                         self._update_status(f"✓ Validation completed! {len(tables)} tables validated", "darkgreen")
-                        messagebox.showinfo("Success", "Data validation completed!")
+                        self._update_stats(success_count, fail_count, total_count)
+                        # Ensure results tree is visible and scroll to top
+                        if hasattr(self, 'results_tree') and self.results_tree.get_children():
+                            self.results_tree.see(self.results_tree.get_children()[0])
+                        messagebox.showinfo("Success", f"Data validation completed!\n\nResults: {total_count} tables ({success_count} match, {fail_count} mismatch/error)")
                     except Exception:
                         pass
                 self.frame.after(0, on_success)
@@ -1010,17 +1103,27 @@ After installation, restart this application.
         try:
             import pandas as pd
             
-            # Collect data from treeview
+            # Collect data from treeview (columns: Type, DB, Source, Destination, Status, Differences)
             data = []
             for item in self.results_tree.get_children():
                 values = self.results_tree.item(item)
                 table = values['text']
                 cols = values['values']
-                
-                # Column order: (DB, Source, Destination, Status, Differences)
-                if len(cols) >= 5:
+                # cols: Type, DB, Source, Destination, Status, Differences
+                if len(cols) >= 6:
                     data.append({
-                        "Database": cols[0] if cols[0] else f"{self.src_db_var.get()} vs {self.dest_db_var.get()}",
+                        "Type": cols[0] or "",
+                        "Database": cols[1] or f"{self.src_db_var.get()} vs {self.dest_db_var.get()}",
+                        "Table": table,
+                        "Source Rows": cols[2] if len(cols) > 2 else "",
+                        "Destination Rows": cols[3] if len(cols) > 3 else "",
+                        "Status": cols[4] if len(cols) > 4 else "",
+                        "Differences": cols[5] if len(cols) > 5 else ""
+                    })
+                elif len(cols) >= 5:
+                    data.append({
+                        "Type": "",
+                        "Database": cols[0] or f"{self.src_db_var.get()} vs {self.dest_db_var.get()}",
                         "Table": table,
                         "Source Rows": cols[1] if len(cols) > 1 else "",
                         "Destination Rows": cols[2] if len(cols) > 2 else "",
@@ -1028,8 +1131,8 @@ After installation, restart this application.
                         "Differences": cols[4] if len(cols) > 4 else ""
                     })
                 elif len(cols) > 0:
-                    # Handle cases with fewer columns (backward compatibility)
                     data.append({
+                        "Type": "",
                         "Database": cols[0] if len(cols) > 0 else f"{self.src_db_var.get()} vs {self.dest_db_var.get()}",
                         "Table": table,
                         "Source Rows": cols[1] if len(cols) > 1 else "",
@@ -1382,22 +1485,22 @@ After installation, restart this application.
                                 self._log(f"  ✗ MISMATCH: Difference of {diff:,} rows (Source: {src_count:,}, Dest: {dest_count:,})", 
                                          logging.WARNING, table_context)
                             
+                            result_key = f"{cfg.get('src_db')}.{table}"
                             result = {
+                                "type": "row_count",
                                 "table": table,
                                 "src_count": src_count,
                                 "dest_count": dest_count,
                                 "status": status,
                                 "differences": [f"Row count difference: {diff}"]
                             }
-                            
-                            self.validation_results[f"{cfg.get('src_db')}.{table}"] = result
-                            
+                            self.validation_results[result_key] = result
                             db_name = f"{src_db} vs {dest_db}"
-                            # Thread-safe treeview update
                             def add_result(tbl=table, db=db_name, sc=src_count, dc=dest_count, st=status, d=diff):
                                 try:
                                     item = self.results_tree.insert("", tk.END, text=tbl,
-                                                                   values=(db, sc, dc, st, f"{d} rows"))
+                                                                   values=("Row count", db, str(sc), str(dc), st, f"{d} rows"),
+                                                                   tags=(result_key,))
                                     self.all_tree_items.append(item)
                                 except Exception:
                                     pass
@@ -1411,11 +1514,13 @@ After installation, restart this application.
                             self._log(f"  Error type: {type(e).__name__}", logging.DEBUG, table_context)
                             
                             db_name = f"{src_db} vs {dest_db}"
-                            # Thread-safe treeview update for errors
+                            err_key = f"error:{cfg.get('src_db')}.{table}"
+                            self.validation_results[err_key] = {"type": "error", "table": table, "error": error_msg}
                             def add_error(tbl=table, db=db_name, err=error_msg):
                                 try:
                                     item = self.results_tree.insert("", tk.END, text=tbl,
-                                                           values=(db, "Error", "Error", "✗ Error", err))
+                                                           values=("Row count", db, "Error", "Error", "✗ Error", err[:200]),
+                                                           tags=(err_key,))
                                     self.all_tree_items.append(item)
                                 except Exception:
                                     pass
@@ -1482,14 +1587,16 @@ After installation, restart this application.
                 table = values['text']
                 db_name = self.results_tree.set(item, "DB")
                 
-                # Check status filter
-                status_match = (status_filter == "All" or status in status_filter)
+                # Check status filter (exact match so "✗ Mismatch" doesn't match "✗ Error")
+                status_match = (status_filter == "All" or status == status_filter)
                 
-                # Check search filter
+                # Check search filter (include Type column)
+                type_val = self.results_tree.set(item, "Type")
                 search_match = (not search_term or 
                                search_term in table.lower() or 
                                search_term in db_name.lower() or
-                               search_term in status.lower())
+                               search_term in status.lower() or
+                               search_term in (type_val or "").lower())
                 
                 # Show or hide item
                 if status_match and search_match:
@@ -1516,4 +1623,436 @@ After installation, restart this application.
                 self.results_tree.reattach(item, "", 0)
             except:
                 pass
+
+    def _on_result_select(self, event=None):
+        """Update detail panel when a result row is selected."""
+        for w in self.detail_content_frame.winfo_children():
+            w.destroy()
+        self.detail_placeholder.pack_forget()
+        self.detail_content_frame.pack(fill=tk.X, pady=(4, 0))
+        self._selected_identity_result_key = None
+        self._selected_row_count_result_key = None
+        sel = self.results_tree.selection()
+        if not sel:
+            self.detail_placeholder.pack(anchor=tk.W)
+            self.detail_content_frame.pack_forget()
+            return
+        item = sel[0]
+        tags = self.results_tree.item(item, "tags")
+        if not tags:
+            self.detail_placeholder.config(text="No detail for this row.")
+            self.detail_placeholder.pack(anchor=tk.W)
+            return
+        result_key = tags[0]
+        result = self.validation_results.get(result_key)
+        if not result:
+            self.detail_placeholder.config(text="Detail not available.")
+            self.detail_placeholder.pack(anchor=tk.W)
+            return
+        self.detail_content_frame.pack(fill=tk.X, pady=(4, 0))
+        kind = result.get("type", "row_count")
+        if kind == "row_count":
+            self.detail_placeholder.pack(anchor=tk.W)
+            self.detail_placeholder.config(text=f"Table: {result.get('table', result_key)}")
+            for label, value in [
+                ("Source rows", str(result.get("src_count", "—"))),
+                ("Destination rows", str(result.get("dest_count", "—"))),
+                ("Difference", str(abs((result.get("src_count") or 0) - (result.get("dest_count") or 0)))),
+            ]:
+                row = ttk.Frame(self.detail_content_frame)
+                row.pack(anchor=tk.W)
+                ttk.Label(row, text=f"{label}: ", font=("Arial", 9, "bold")).pack(side=tk.LEFT)
+                ttk.Label(row, text=value).pack(side=tk.LEFT)
+            diffs = result.get("differences") or []
+            if diffs:
+                tk.Label(self.detail_content_frame, text="Note: " + "; ".join(diffs), font=("Arial", 9), wraplength=500).pack(anchor=tk.W)
+            tk.Label(self.detail_content_frame, text="Sample comparison includes identity columns so rows are compared by actual record identity (avoids false matches after DB2→SQL migration).", 
+                     font=("Arial", 8), fg="gray", wraplength=500).pack(anchor=tk.W, pady=(6, 2))
+            self._selected_row_count_result_key = result_key
+            btn_row = ttk.Frame(self.detail_content_frame)
+            btn_row.pack(anchor=tk.W, pady=4)
+            ttk.Button(btn_row, text="Reload sample comparison (include identity columns)", 
+                       command=self._load_sample_comparison).pack(side=tk.LEFT, padx=(0, 8))
+            try:
+                n_sample = max(1, min(1000, int(self.sample_size_var.get())))
+            except (ValueError, TypeError, AttributeError):
+                n_sample = 100
+            self.detail_export_sample_btn = ttk.Button(btn_row, text=f"Export sample (top {n_sample}) to Excel", 
+                                                      command=self._export_sample_to_excel, state=tk.DISABLED)
+            self.detail_export_sample_btn.pack(side=tk.LEFT)
+            self.detail_sample_result_label = tk.Label(self.detail_content_frame, text="", font=("Arial", 9), fg="darkgreen", wraplength=500)
+            self.detail_sample_result_label.pack(anchor=tk.W)
+            self.detail_sample_data_frame = ttk.Frame(self.detail_content_frame)  # for rendered sample row table
+            self.detail_sample_data_frame.pack(fill=tk.X, pady=(4, 0))
+            # Auto-load sample when row is selected (so user sees sample without hunting for a button)
+            self.frame.after(200, self._load_sample_comparison)
+        elif kind == "identity_reseed":
+            self.detail_placeholder.pack(anchor=tk.W)
+            self.detail_placeholder.config(text=f"Identity check: {result.get('table', result_key)}")
+            ident = result.get("ident_current")
+            ident_str = str(ident) if ident is not None else "NULL"
+            for label, value in [
+                ("Identity current", ident_str),
+                ("Max (parent)", str(result.get("max_parent", "—"))),
+                ("Reseed to (≥)", str(result.get("reseed_to", "—"))),
+            ]:
+                row = ttk.Frame(self.detail_content_frame)
+                row.pack(anchor=tk.W)
+                ttk.Label(row, text=f"{label}: ", font=("Arial", 9, "bold")).pack(side=tk.LEFT)
+                ttk.Label(row, text=value).pack(side=tk.LEFT)
+            max_children = result.get("max_children") or {}
+            if max_children:
+                ttk.Label(self.detail_content_frame, text="Max in child tables:", font=("Arial", 9, "bold")).pack(anchor=tk.W)
+                for child_table, max_id in max_children.items():
+                    ttk.Label(self.detail_content_frame, text=f"  {child_table}: {max_id:,}", font=("Arial", 9)).pack(anchor=tk.W)
+            self._selected_identity_result_key = result_key
+            ttk.Button(self.detail_content_frame, text="Copy reseed script", command=self._copy_reseed_script).pack(anchor=tk.W, pady=(6, 0))
+        elif kind == "error":
+            self.detail_placeholder.pack(anchor=tk.W)
+            self.detail_placeholder.config(text=f"Error: {result.get('table', result_key)}")
+            tk.Label(self.detail_content_frame, text=result.get("error", "—"), font=("Arial", 9), wraplength=500).pack(anchor=tk.W)
+
+    def _safe_display_value(self, val, max_len=50):
+        """Return a safe string for UI display: handle None, bytes, and truncate long values."""
+        if val is None:
+            return "—"
+        if isinstance(val, (bytes, bytearray)):
+            return "<binary>"
+        try:
+            s = str(val)
+        except Exception:
+            return "<non-string>"
+        if len(s) > max_len:
+            return s[:max_len] + "..."
+        return s
+
+    def _load_sample_comparison(self):
+        """Load a sample of rows from source and destination and compare (including identity columns)."""
+        key = getattr(self, "_selected_row_count_result_key", None)
+        if not key:
+            return
+        result = self.validation_results.get(key)
+        if not result or result.get("type") != "row_count":
+            return
+        table = result.get("table", "")
+        if "." in table:
+            schema, name = table.split(".", 1)
+        else:
+            schema, name = "dbo", table
+        if not name:
+            return
+        lbl = getattr(self, "detail_sample_result_label", None)
+        if lbl:
+            lbl.config(text="Loading sample (source & destination, incl. identity columns)...", fg="blue")
+        def run_sample():
+            msg = ""
+            mismatch_display = []
+            export_data = None
+            try:
+                src_conn = connect_to_any_database(
+                    server=self.src_server_var.get(),
+                    database=self.src_db_var.get(),
+                    auth=self.src_auth_var.get(),
+                    user=self.src_user_var.get(),
+                    password=self.src_password_var.get() or None,
+                    db_type=self.src_db_type_var.get(),
+                    port=int(self.src_port_var.get() or 50000),
+                    timeout=15
+                )
+                dest_conn = connect_to_any_database(
+                    server=self.dest_server_var.get(),
+                    database=self.dest_db_var.get(),
+                    auth=self.dest_auth_var.get(),
+                    user=self.dest_user_var.get(),
+                    password=self.dest_password_var.get() or None,
+                    db_type=self.dest_db_type_var.get(),
+                    port=int(self.dest_port_var.get() or 50000),
+                    timeout=15
+                )
+                try:
+                    n_rows = max(1, min(1000, int(self.sample_size_var.get())))
+                except (ValueError, TypeError, AttributeError):
+                    n_rows = 100
+                src_is_db2 = (self.src_db_type_var.get() or "").strip().lower() == "db2"
+                if src_is_db2:
+                    src_table_ref = f'"{schema}"."{name}"'
+                    src_cur = src_conn.cursor()
+                    src_cur.execute(f"SELECT * FROM {src_table_ref} FETCH FIRST {n_rows} ROWS ONLY")
+                else:
+                    src_table_ref = f"[{schema}].[{name}]"
+                    src_cur = src_conn.cursor()
+                    src_cur.execute(f"SELECT TOP {n_rows} * FROM {src_table_ref}")
+                dest_table_ref = f"[{schema}].[{name}]"
+                dest_cur = dest_conn.cursor()
+                dest_cur.execute(f"SELECT TOP {n_rows} * FROM {dest_table_ref}")
+                # Normalize column names to Python str (DB2/JDBC can return java.lang.String)
+                src_cols = [str(d[0]) if d[0] is not None else "" for d in src_cur.description]
+                dest_cols = [str(d[0]) if d[0] is not None else "" for d in dest_cur.description]
+                src_rows = [tuple(r) for r in src_cur.fetchall()]
+                dest_rows = [tuple(r) for r in dest_cur.fetchall()]
+                src_conn.close()
+                dest_conn.close()
+                # Build row dicts by identity or by index
+                def to_dict(cols, row):
+                    return dict(zip(cols, row)) if cols else {}
+                src_list = [to_dict(src_cols, r) for r in src_rows]
+                dest_list = [to_dict(dest_cols, r) for r in dest_rows]
+                common_cols = [c for c in src_cols if c in dest_cols]
+                if not common_cols:
+                    msg = "Sample loaded but no common columns to compare."
+                    mismatch_display = []
+                    export_data = None
+                else:
+                    # Prefer identity-like column as key (first column that ends with _ID or is named *id)
+                    key_col = None
+                    for c in common_cols:
+                        cstr = str(c) if c is not None else ""
+                        if cstr and (cstr.lower().endswith("_id") or cstr.lower() == "id"):
+                            key_col = c
+                            break
+                    if not key_col and common_cols:
+                        key_col = common_cols[0]
+                    dest_by_key = {}
+                    for d in dest_list:
+                        k = d.get(key_col)
+                        if k is not None:
+                            dest_by_key[k] = d
+                    match_count = 0
+                    mismatch_rows = []  # (k, reason, diff_cols_str, source_row, dest_row or None)
+                    export_rows = []  # for Export sample (top 100): safe values, max_len=200
+                    for s in src_list:
+                        k = s.get(key_col)
+                        d = dest_by_key.get(k) if k is not None else None
+                        if d is None:
+                            if len(mismatch_rows) < 5:
+                                mismatch_rows.append((k, "Missing in destination", None, s, None))
+                            status = "Missing in destination"
+                            diff_cols = list(common_cols)
+                            export_row = {"Key": str(k), "Status": status, "Mismatch_Columns": ",".join(diff_cols)[:500]}
+                            for col in common_cols:
+                                export_row["Source_" + str(col)] = self._safe_display_value(s.get(col), max_len=200)
+                                export_row["Dest_" + str(col)] = "—"
+                            export_rows.append(export_row)
+                            continue
+                        same = True
+                        diff_cols = []
+                        for col in common_cols:
+                            sv, dv = s.get(col), d.get(col)
+                            if sv != dv and not (sv is None and dv is None):
+                                same = False
+                                diff_cols.append(str(col))
+                        if same:
+                            match_count += 1
+                            status = "Match"
+                        else:
+                            if len(mismatch_rows) < 5:
+                                mismatch_rows.append((k, "Value mismatch", ", ".join(diff_cols[:5]), s, d))
+                            status = "Value mismatch"
+                        export_row = {"Key": str(k), "Status": status, "Mismatch_Columns": ",".join(diff_cols)[:500]}
+                        for col in common_cols:
+                            export_row["Source_" + str(col)] = self._safe_display_value(s.get(col), max_len=200)
+                            export_row["Dest_" + str(col)] = self._safe_display_value(d.get(col), max_len=200)
+                        export_rows.append(export_row)
+                    total = len(src_list)
+                    export_data = {"table": f"{schema}.{name}", "key_col": key_col, "rows": export_rows} if export_rows else None
+                    msg = f"Sample: {total} rows. Compared including identity/key column '{key_col}'. Matching: {match_count}. Mismatches: {total - match_count}."
+                    if mismatch_rows:
+                        msg += "\nFirst mismatches: " + "; ".join(f"key={m[0]!s} ({m[1]}: {m[2] or ''})" for m in mismatch_rows)
+                    # Build display-safe data for UI (truncate values, max 5 mismatches) + which columns differ
+                    mismatch_display = []
+                    for m in mismatch_rows[:5]:
+                        k, reason, _, s_row, d_row = m
+                        src_d = {str(col): self._safe_display_value(s_row.get(col)) for col in common_cols}
+                        dest_d = {str(col): (self._safe_display_value(d_row.get(col)) if d_row else "—") for col in common_cols} if d_row else {str(col): "—" for col in common_cols}
+                        if d_row is None:
+                            mismatch_cols = set(common_cols)  # all columns "missing" on dest
+                        else:
+                            mismatch_cols = {c for c in common_cols if s_row.get(c) != d_row.get(c)}
+                        mismatch_display.append((str(k), reason, src_d, dest_d, list(common_cols), mismatch_cols))
+            except Exception as e:
+                msg = f"Sample comparison failed: {e}"
+                mismatch_display = []
+                export_data = None
+            def update_ui(m=msg, details=None, export_data=None):
+                if details is None:
+                    details = []
+                l = getattr(self, "detail_sample_result_label", None)
+                if l and l.winfo_exists() and getattr(self, "_selected_row_count_result_key", None) == key:
+                    l.config(text=m, fg="red" if "failed" in m.lower() else "darkgreen")
+                if getattr(self, "_selected_row_count_result_key", None) == key and export_data is not None:
+                    self._last_sample_export_data = export_data
+                    btn = getattr(self, "detail_export_sample_btn", None)
+                    if btn and btn.winfo_exists():
+                        btn.config(state=tk.NORMAL)
+                frame = getattr(self, "detail_sample_data_frame", None)
+                if not frame or not frame.winfo_exists() or getattr(self, "_selected_row_count_result_key", None) != key:
+                    return
+                for w in frame.winfo_children():
+                    w.destroy()
+                if not details:
+                    return
+                tk.Label(frame, text="Sample row data (first 5 mismatches, values truncated). Red = differing value.", font=("Arial", 9, "bold")).pack(anchor=tk.W)
+                for idx, detail_row in enumerate(details, 1):
+                    if len(detail_row) == 6:
+                        key_val, reason, src_d, dest_d, cols, mismatch_cols = detail_row
+                    else:
+                        key_val, reason, src_d, dest_d, cols = detail_row[:5]
+                        mismatch_cols = set()
+                    sub = ttk.LabelFrame(frame, text=f"Mismatch {idx}: key={key_val} — {reason}", padding=4)
+                    sub.pack(fill=tk.X, pady=(4, 0))
+                    # Header row
+                    h_f = ttk.Frame(sub)
+                    h_f.pack(fill=tk.X)
+                    ttk.Label(h_f, text="Column", width=18).pack(side=tk.LEFT, padx=1)
+                    ttk.Label(h_f, text="Source", width=22).pack(side=tk.LEFT, padx=1)
+                    ttk.Label(h_f, text="Destination", width=22).pack(side=tk.LEFT, padx=1)
+                    for col in cols[:20]:
+                        row_f = ttk.Frame(sub)
+                        row_f.pack(fill=tk.X)
+                        is_mismatch = col in mismatch_cols
+                        bg_red = "#ffcccc" if is_mismatch else None
+                        tk.Label(row_f, text=str(col)[:30], width=18, anchor=tk.W, bg=bg_red, font=("Arial", 8)).pack(side=tk.LEFT, padx=1)
+                        tk.Label(row_f, text=src_d.get(col, "—"), width=22, anchor=tk.W, wraplength=200, bg=bg_red, font=("Arial", 8)).pack(side=tk.LEFT, padx=1)
+                        tk.Label(row_f, text=dest_d.get(col, "—"), width=22, anchor=tk.W, wraplength=200, bg=bg_red, font=("Arial", 8)).pack(side=tk.LEFT, padx=1)
+            self.frame.after(0, lambda: update_ui(msg, mismatch_display, export_data))
+        threading.Thread(target=run_sample, daemon=True).start()
+
+    def _export_sample_to_excel(self):
+        """Export the current table's sample (top 100) to Excel. Uses cached data from last sample load."""
+        key = getattr(self, "_selected_row_count_result_key", None)
+        if not key:
+            messagebox.showwarning("Export", "Select a row-count result row first.")
+            return
+        data = getattr(self, "_last_sample_export_data", None)
+        if not data or not data.get("rows"):
+            messagebox.showwarning("Export", "Load sample comparison first (select the row and wait for sample to load).")
+            return
+        result = self.validation_results.get(key)
+        current_table = (result.get("table") or key) if result else key
+        if data.get("table") != current_table:
+            messagebox.showwarning("Export", "Sample data is for another table. Click 'Reload sample comparison' for this table first.")
+            return
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            initialfile=f"Sample_{data.get('table', 'table').replace('.', '_')}.xlsx"
+        )
+        if not filename:
+            return
+        try:
+            import pandas as pd
+            rows = data["rows"]
+            if not rows:
+                messagebox.showwarning("Export", "No sample rows to export.")
+                return
+            df = pd.DataFrame(rows)
+            sheet_name = f"Sample_{len(rows)}"[:31]  # Excel sheet name max 31 chars
+            df.to_excel(filename, index=False, sheet_name=sheet_name)
+            messagebox.showinfo("Success", f"Sample ({len(rows)} rows) exported to:\n{filename}")
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+
+    def _copy_reseed_script(self):
+        """Copy reseed script for the selected identity result to clipboard."""
+        if not getattr(self, "_selected_identity_result_key", None):
+            return
+        result = self.validation_results.get(self._selected_identity_result_key)
+        if not result or result.get("type") != "identity_reseed":
+            return
+        schema_table = result.get("schema_table") or result.get("table", "")
+        reseed_to = result.get("reseed_to")
+        if reseed_to is None:
+            return
+        script = f"DBCC CHECKIDENT ('{schema_table}', RESEED, {reseed_to});"
+        self.frame.clipboard_clear()
+        self.frame.clipboard_append(script)
+        try:
+            messagebox.showinfo("Copied", "Reseed script copied to clipboard.")
+        except Exception:
+            pass
+
+    def _run_identity_reseed_checks(self, dest_cur, dest_db, context):
+        """Check identity columns on destination: flag if IDENT_CURRENT < max in parent or any child (reseed risk)."""
+        self._log("Running identity vs max-ID check (destination)...", logging.INFO, context)
+        dest_cur.execute("""
+            SELECT OBJECT_SCHEMA_NAME(ic.object_id) AS schema_name,
+                   OBJECT_NAME(ic.object_id) AS table_name,
+                   c.name AS column_name
+            FROM sys.identity_columns ic
+            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+            ORDER BY 1, 2
+        """)
+        identity_tables = dest_cur.fetchall()
+        if not identity_tables:
+            self._log("No identity columns found on destination.", logging.INFO, context)
+            return
+        for schema, table, col in identity_tables:
+            schema = (schema or "dbo").strip()
+            table = (table or "").strip()
+            col = (col or "").strip()
+            if not table:
+                continue
+            full_name = f"{schema}.{table}"
+            quoted_table = f"[{schema}].[{table}]"
+            try:
+                dest_cur.execute("SELECT IDENT_CURRENT(?)", (full_name,))
+                row = dest_cur.fetchone()
+                ident_current = row[0] if row and row[0] is not None else None
+                try:
+                    dest_cur.execute(f"SELECT MAX([{col}]) FROM {quoted_table}")
+                    max_parent = dest_cur.fetchone()[0]
+                except Exception:
+                    max_parent = None
+                max_parent = max_parent if max_parent is not None else 0
+                dest_cur.execute("""
+                    SELECT OBJECT_SCHEMA_NAME(fk.parent_object_id),
+                           OBJECT_NAME(fk.parent_object_id),
+                           COL_NAME(fkc.parent_object_id, fkc.parent_column_id)
+                    FROM sys.foreign_keys fk
+                    JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+                    WHERE fkc.referenced_object_id = OBJECT_ID(?)
+                      AND COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) = ?
+                """, (full_name, col))
+                child_rows = dest_cur.fetchall()
+                max_children = {}
+                for child_schema, child_table, child_col in (child_rows or []):
+                    if not child_table or not child_col:
+                        continue
+                    try:
+                        child_quoted = f"[{child_schema or 'dbo'}].[{child_table}]"
+                        dest_cur.execute(f"SELECT MAX([{child_col}]) FROM {child_quoted}")
+                        r = dest_cur.fetchone()
+                        mc = r[0] if r and r[0] is not None else 0
+                        max_children[f"{child_schema or 'dbo'}.{child_table}"] = mc
+                    except Exception:
+                        pass
+                max_in_children = max(max_children.values()) if max_children else 0
+                reseed_to = max((ident_current or 0), max_parent, max_in_children)
+                if (ident_current is None and reseed_to > 0) or (ident_current is not None and ident_current < reseed_to):
+                    result = {
+                        "type": "identity_reseed",
+                        "table": full_name,
+                        "schema_table": full_name,
+                        "ident_current": ident_current,
+                        "max_parent": max_parent,
+                        "max_children": max_children,
+                        "reseed_to": reseed_to,
+                    }
+                    result_key = f"identity_check:{full_name}"
+                    self.validation_results[result_key] = result
+                    diff_msg = f"IDENT={ident_current or 'NULL'}, reseed to ≥{reseed_to:,}"
+                    if max_children:
+                        diff_msg += " (child max: " + ", ".join(f"{t}={v:,}" for t, v in max_children.items()) + ")"
+                    def add_identity_result():
+                        try:
+                            item = self.results_tree.insert("", tk.END, text=full_name,
+                                                           values=("Identity reseed", str(dest_db), "—", "—", "⚠ Reseed", diff_msg[:180]),
+                                                           tags=(result_key,))
+                            self.all_tree_items.append(item)
+                        except Exception:
+                            pass
+                    self.frame.after(0, add_identity_result)
+                    self._log(f"  ⚠ {full_name}: identity current {ident_current}, max child/self {reseed_to}; reseed to ≥ {reseed_to}", logging.WARNING, context)
+            except Exception as e:
+                self._log(f"  Identity check failed for {full_name}: {e}", logging.DEBUG, context)
 
