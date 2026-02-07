@@ -81,6 +81,7 @@ jobs:
       # Push to main: update "latest" tag and create/update release so it shows on Releases page
       - name: Update latest tag (push to main only)
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
