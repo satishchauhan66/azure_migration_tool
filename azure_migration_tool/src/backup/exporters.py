@@ -669,7 +669,7 @@ def export_primary_keys(cur) -> str:
             col_parts.append(col_str)
         col_list = ", ".join(col_parts)
 
-        index_type = "CLUSTERED" if "CLUSTERED" in (r.index_type or "").upper() and "NON" not in (r.index_type or "").upper() else "NONCLUSTERED"
+        index_type = "CLUSTERED" if (r.index_type or "").strip().upper() == "CLUSTERED" else "NONCLUSTERED"
 
         out.append(f"-- {table} ({pk_name})")
         out.append(f"IF NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID(N'{r.schema_name}.{r.table_name}') AND type = 'PK')")
@@ -757,7 +757,7 @@ def export_indexes(cur, logger=None) -> Tuple[str, List[str]]:
 
         table = f"{qident(r.schema_name)}.{qident(r.table_name)}"
         unique = "UNIQUE " if r.is_unique else ""
-        typ = "CLUSTERED" if "CLUSTERED" in (r.type_desc or "").upper() else "NONCLUSTERED"
+        typ = "CLUSTERED" if (r.type_desc or "").strip().upper() == "CLUSTERED" else "NONCLUSTERED"
 
         # Clustered indexes cannot have INCLUDE columns in SQL Server
         # If clustered and has included columns, convert to nonclustered or remove INCLUDE

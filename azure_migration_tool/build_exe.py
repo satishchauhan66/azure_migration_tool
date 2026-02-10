@@ -218,6 +218,11 @@ def main():
         print("  Install: https://adoptium.net/")
         print("• No Python or PySpark needed on target – everything is bundled in the exe")
         print("\nTO USE: Copy the exe to target PC and double-click to run.")
+        scripts_dir = app_dir.parent / 'scripts'
+        if scripts_dir.exists():
+            print("\nFor target PCs that show dependency errors (e.g. VCRUNTIME140.dll missing),")
+            print("  copy the 'scripts' folder next to the exe and run Install-Dependencies-and-Run.bat")
+            print(f"  Scripts: {scripts_dir}")
         
         print("\nBUNDLED DRIVERS:")
         if db2_jar.exists():

@@ -16,6 +16,22 @@ import os
 parent_dir = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(parent_dir))
 
+
+def _get_cached_token_for_mfa(user: str, refresh_if_expiring_soon: bool = True):
+    """Get cached Azure AD token for MFA so List DBs and Validate use the same session. Returns None if unavailable."""
+    try:
+        from azure_migration_tool.azure_token_cache import get_cached_token
+        return get_cached_token(user, refresh_if_expiring_soon=refresh_if_expiring_soon)
+    except ImportError:
+        pass
+    try:
+        from azure_token_cache import get_cached_token
+        return get_cached_token(user, refresh_if_expiring_soon=refresh_if_expiring_soon)
+    except ImportError:
+        pass
+    return None
+
+
 try:
     from src.utils.database import pick_sql_driver, connect_to_database, connect_to_db2_jdbc
 except ImportError:
@@ -307,7 +323,7 @@ def connect_with_msal_cache(
             if not driver:
                 raise RuntimeError("No SQL Server ODBC driver found")
     
-    # Try to use connect_to_database if available (it already has MSAL token support)
+    # Try to use connect_to_database if available (uses token cache for entra_mfa so same session for Validate)
     if connect_to_database:
         try:
             temp_logger = logging.getLogger(__name__)
@@ -335,29 +351,15 @@ def connect_with_msal_cache(
     if auth == "entra_mfa":
         if not user:
             raise ValueError("For entra_mfa auth, user (UPN/email) is required.")
-        
-        # Try to use MSAL token cache first (no MFA prompt if token is cached)
+        # Use cached token when available so List DBs + Validate use same session (no second prompt)
         try:
-            # Import azure_token_cache from root level
-            root_dir = Path(__file__).parent.parent.parent.parent
-            root_str = str(root_dir)
-            if root_str not in sys.path:
-                sys.path.insert(0, root_str)
-            
-            from azure_token_cache import get_cached_token
-            
-            access_token = get_cached_token(user, refresh_if_expiring_soon=True)
+            access_token = _get_cached_token_for_mfa(user, refresh_if_expiring_soon=True)
             if access_token:
-                # Use SQL_COPT_SS_ACCESS_TOKEN (1256) for token-based connection
                 token_bytes = access_token.encode('utf-16-le')
                 token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
-                # Connection string should NOT have UID/PWD/Authentication when using token
                 return pyodbc.connect(base, timeout=timeout, attrs_before={1256: token_struct})
-        except (ImportError, Exception):
-            # MSAL not available or token fetch failed, fall back to interactive
+        except Exception:
             pass
-        
-        # Fallback to interactive authentication (will prompt once, then cache)
         conn_str = base + f"UID={user};Authentication=ActiveDirectoryInteractive;"
         return pyodbc.connect(conn_str, timeout=timeout)
     
@@ -487,32 +489,17 @@ def list_databases(
             base = f"Driver={driver_str};Server={server};Database=master;Encrypt=yes;TrustServerCertificate={trust_cert};"
             
             if auth == "entra_mfa":
-                # Try to use MSAL token cache first (no MFA prompt if token is cached)
+                # Use cached token when available so same session as List DBs / first connection
                 try:
-                    # Import azure_token_cache from root level
-                    import sys
-                    from pathlib import Path
-                    root_dir = Path(__file__).parent.parent.parent.parent
-                    root_str = str(root_dir)
-                    if root_str not in sys.path:
-                        sys.path.insert(0, root_str)
-                    
-                    from azure_token_cache import get_cached_token
-                    import struct
-                    
-                    access_token = get_cached_token(user, refresh_if_expiring_soon=True)
+                    access_token = _get_cached_token_for_mfa(user, refresh_if_expiring_soon=True)
                     if access_token:
-                        # Use SQL_COPT_SS_ACCESS_TOKEN (1256) for token-based connection
                         token_bytes = access_token.encode('utf-16-le')
                         token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
-                        # Connection string should NOT have UID/PWD/Authentication when using token
                         conn = pyodbc.connect(base, timeout=timeout, attrs_before={1256: token_struct})
                     else:
-                        # No cached token, fall back to interactive
                         conn_str = base + f"UID={user};Authentication=ActiveDirectoryInteractive;"
                         conn = pyodbc.connect(conn_str, timeout=timeout)
-                except (ImportError, Exception) as e:
-                    # MSAL not available or token fetch failed, fall back to interactive
+                except Exception:
                     conn_str = base + f"UID={user};Authentication=ActiveDirectoryInteractive;"
                     conn = pyodbc.connect(conn_str, timeout=timeout)
             elif auth == "entra_password":

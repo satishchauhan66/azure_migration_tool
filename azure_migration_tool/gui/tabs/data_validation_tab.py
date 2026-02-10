@@ -504,7 +504,33 @@ class DataValidationTab:
             self._log(f"  Using Windows authentication", logging.DEBUG, {"process": "ConnectionString"})
             
         return conn_str
-        
+
+    def _infer_db_type_and_port(self, cfg: dict, server: str, role: str):
+        """
+        Infer db_type and port for bulk validation when Excel does not specify them.
+        Azure SQL (server contains 'database.windows.net') is always treated as sqlserver on 1433
+        so we never use DB2 JDBC on port 50000 for Azure SQL.
+        role: 'src' or 'dest'
+        """
+        server_str = (server or "").strip().lower()
+        is_azure_sql = "database.windows.net" in server_str
+        db_key = "src_db_type" if role == "src" else "dest_db_type"
+        port_key = "src_port" if role == "src" else "dest_port"
+        ui_db = self.src_db_type_var.get() if role == "src" else self.dest_db_type_var.get()
+        ui_port = self.src_port_var.get() if role == "src" else self.dest_port_var.get()
+        db_type = (cfg.get(db_key) or ui_db or "sqlserver").strip().lower() if isinstance(cfg.get(db_key), str) else (ui_db or "sqlserver")
+        if is_azure_sql and not (cfg.get(db_key) and str(cfg.get(db_key)).strip()):
+            db_type = "sqlserver"
+        port_val = cfg.get(port_key)
+        if port_val is not None and str(port_val).strip() != "":
+            try:
+                port = int(float(port_val))
+            except (ValueError, TypeError):
+                port = 1433 if db_type == "sqlserver" else 50000
+        else:
+            port = 1433 if db_type == "sqlserver" else int(ui_port or 50000)
+        return db_type, port
+
     def _start_validation(self):
         """Start data validation in a separate thread."""
         # Validate inputs
@@ -932,7 +958,7 @@ class DataValidationTab:
                 self._log(f"  Source: {self.src_server_var.get()}/{src_db}", logging.DEBUG, context)
                 self._log(f"  Destination: {self.dest_server_var.get()}/{dest_db}", logging.DEBUG, context)
                 
-                # Check if this is a driver-related error (thread-safe)
+                # Check if this is a driver-related error (thread-safe; catch KeyboardInterrupt during dialog)
                 def show_error(err=error_str):
                     try:
                         self._update_status(f"✗ Validation failed: {err[:50]}...", "red")
@@ -940,6 +966,8 @@ class DataValidationTab:
                             self._handle_driver_missing_error(err)
                         else:
                             messagebox.showerror("Error", f"Validation failed: {err}")
+                    except KeyboardInterrupt:
+                        pass
                     except Exception:
                         pass
                 self.frame.after(0, show_error)
@@ -951,43 +979,48 @@ class DataValidationTab:
     
     def _handle_driver_missing_error(self, error_str: str):
         """Handle ODBC driver missing error - offer installation."""
-        if not DRIVER_UTILS_AVAILABLE:
-            messagebox.showerror("ODBC Driver Not Found", 
-                f"SQL Server ODBC Driver is not installed.\n\n"
-                f"Please install Microsoft ODBC Driver 17 or 18 for SQL Server.\n\n"
-                f"Download from:\n"
-                f"https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server\n\n"
-                f"Error: {error_str}")
-            return
-        
-        # Check current driver status
-        driver_ok, driver_name = check_sql_server_odbc_driver()
-        
-        if driver_ok:
-            # Driver exists but there's still an error - might be a different issue
-            messagebox.showerror("Connection Error", 
-                f"ODBC Driver is installed ({driver_name}) but connection failed.\n\n"
-                f"This might be a configuration issue.\n\n"
-                f"Error: {error_str}")
-            return
-        
-        # Offer to install driver
-        response = messagebox.askyesnocancel(
-            "ODBC Driver Not Found",
-            "SQL Server ODBC Driver is not installed on this machine.\n\n"
-            "This driver is required for database connections.\n\n"
-            "Would you like to install it now?\n\n"
-            "Yes: Install automatically (requires admin rights)\n"
-            "No: Show manual installation instructions\n"
-            "Cancel: Close this dialog"
-        )
-        
-        if response is True:
-            # Yes - Try automatic installation
-            self._install_odbc_driver()
-        elif response is False:
-            # No - Show manual instructions
-            self._show_manual_install_instructions()
+        try:
+            if not DRIVER_UTILS_AVAILABLE:
+                messagebox.showerror("ODBC Driver Not Found", 
+                    f"SQL Server ODBC Driver is not installed.\n\n"
+                    f"Please install Microsoft ODBC Driver 17 or 18 for SQL Server.\n\n"
+                    f"Download from:\n"
+                    f"https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server\n\n"
+                    f"Error: {error_str}")
+                return
+            
+            # Check current driver status
+            driver_ok, driver_name = check_sql_server_odbc_driver()
+            
+            if driver_ok:
+                # Driver exists but there's still an error - might be a different issue
+                messagebox.showerror("Connection Error", 
+                    f"ODBC Driver is installed ({driver_name}) but connection failed.\n\n"
+                    f"This might be a configuration issue.\n\n"
+                    f"Error: {error_str}")
+                return
+            
+            # Offer to install driver
+            response = messagebox.askyesnocancel(
+                "ODBC Driver Not Found",
+                "SQL Server ODBC Driver is not installed on this machine.\n\n"
+                "This driver is required for database connections.\n\n"
+                "Would you like to install it now?\n\n"
+                "Yes: Install automatically (requires admin rights)\n"
+                "No: Show manual installation instructions\n"
+                "Cancel: Close this dialog"
+            )
+            
+            if response is True:
+                # Yes - Try automatic installation
+                self._install_odbc_driver()
+            elif response is False:
+                # No - Show manual instructions
+                self._show_manual_install_instructions()
+        except KeyboardInterrupt:
+            pass
+        except Exception:
+            pass
     
     def _install_odbc_driver(self):
         """Install ODBC driver with progress dialog."""
@@ -1250,7 +1283,8 @@ After installation, restart this application.
         self._reset_progress()
         self._log(f"Starting bulk validation for {len(self.excel_configs)} configuration(s)...")
         self.validation_results = {}
-        
+        self._bulk_connection_map = {}
+
         total_configs = len(self.excel_configs)
         self._update_status("Starting bulk validation...", "blue")
         self._update_progress(0, total_configs, f"Initializing... (0/{total_configs})")
@@ -1299,31 +1333,70 @@ After installation, restart this application.
                     )
                     self._log(f"Destination connection string built (server: {cfg.get('dest_server')})", logging.DEBUG, context)
                     
-                    # Connect to databases
+                    # Infer db_type and port from server when not in Excel (Azure SQL -> sqlserver:1433)
+                    src_db_type, src_port = self._infer_db_type_and_port(cfg, cfg.get("src_server"), "src")
+                    dest_db_type, dest_port = self._infer_db_type_and_port(cfg, cfg.get("dest_server"), "dest")
+                    self._log(f"Source: db_type={src_db_type}, port={src_port}; Dest: db_type={dest_db_type}, port={dest_port}", logging.DEBUG, context)
+
+                    # Resolve source password: Excel (src_password or generic password) then UI
+                    src_auth = (cfg.get("src_auth", self.src_auth_var.get()) or self.src_auth_var.get()) or ""
+                    dest_auth = (cfg.get("dest_auth", self.dest_auth_var.get()) or self.dest_auth_var.get()) or ""
+                    src_user = cfg.get("src_user", cfg.get("user", self.src_user_var.get())) or self.src_user_var.get()
+                    dest_user = cfg.get("dest_user", cfg.get("user", self.dest_user_var.get())) or self.dest_user_var.get()
+                    src_password = cfg.get("src_password") or cfg.get("password") or self.src_password_var.get()
+                    if (src_auth or "").lower() in ("sql", "entra_password") and not (src_password and str(src_password).strip()):
+                        self._log(
+                            "Source uses SQL/auth password but no password found in Excel or UI; login may fail. Add a 'Source Password' (or 'Password') column with values.",
+                            logging.WARNING,
+                            context,
+                        )
+                    src_password = (src_password and str(src_password).strip()) or None
+
+                    # Store connection info for this config so detail/sample comparison can reconnect (bulk mode)
+                    dest_password = cfg.get("dest_password") or cfg.get("password") or self.dest_password_var.get()
+                    dest_password = (dest_password and str(dest_password).strip()) or None
+                    self._bulk_connection_map[src_db] = {
+                        "src_server": cfg.get("src_server"),
+                        "src_db": cfg.get("src_db"),
+                        "src_auth": src_auth,
+                        "src_user": src_user,
+                        "src_password": src_password,
+                        "src_db_type": src_db_type,
+                        "src_port": src_port,
+                        "dest_server": cfg.get("dest_server"),
+                        "dest_db": cfg.get("dest_db"),
+                        "dest_auth": dest_auth,
+                        "dest_user": dest_user,
+                        "dest_password": dest_password,
+                        "dest_db_type": dest_db_type,
+                        "dest_port": dest_port,
+                    }
+
+                    # Connect to databases (use UI user when Excel user empty so bulk MFA reuses same session)
                     self._update_status(f"Connecting to {src_db}...", "orange")
                     self._log("Connecting to source database...", logging.INFO, context)
                     src_conn = connect_to_any_database(
                         server=cfg.get("src_server"),
                         database=cfg.get("src_db"),
-                        auth=cfg.get("src_auth", self.src_auth_var.get()),
-                        user=cfg.get("src_user", cfg.get("user", self.src_user_var.get())),
-                        password=cfg.get("src_password", self.src_password_var.get()) or None,
-                        db_type=cfg.get("src_db_type", self.src_db_type_var.get()),
-                        port=int(cfg.get("src_port", self.src_port_var.get()) or 50000),
+                        auth=src_auth,
+                        user=src_user,
+                        password=src_password,
+                        db_type=src_db_type,
+                        port=src_port,
                         timeout=30
                     )
                     self._log(f"[OK] Connected to source database: {src_db}", logging.INFO, context)
-                    
+
                     self._update_status(f"Connecting to {dest_db}...", "orange")
                     self._log("Connecting to destination database...", logging.INFO, context)
                     dest_conn = connect_to_any_database(
                         server=cfg.get("dest_server"),
                         database=cfg.get("dest_db"),
-                        auth=cfg.get("dest_auth", self.dest_auth_var.get()),
-                        user=cfg.get("dest_user", cfg.get("user", self.dest_user_var.get())),
+                        auth=dest_auth,
+                        user=dest_user,
                         password=cfg.get("dest_password", self.dest_password_var.get()) or None,
-                        db_type=cfg.get("dest_db_type", self.dest_db_type_var.get()),
-                        port=int(cfg.get("dest_port", self.dest_port_var.get()) or 50000),
+                        db_type=dest_db_type,
+                        port=dest_port,
                         timeout=30
                     )
                     self._log(f"[OK] Connected to destination database: {dest_db}", logging.INFO, context)
@@ -1333,7 +1406,7 @@ After installation, restart this application.
                     
                     # Get table list
                     table_name = cfg.get("table_name", "").strip() or self.table_name_var.get().strip()
-                    src_is_db2 = cfg.get("src_db_type", self.src_db_type_var.get()).lower() == "db2"
+                    src_is_db2 = src_db_type.lower() == "db2"
                     src_schema_cfg = cfg.get("src_schema", self.src_schema_var.get()).strip().upper() if src_is_db2 else None
                     
                     if table_name:
@@ -1549,9 +1622,16 @@ After installation, restart this application.
                     self._update_status(f"✗ Config #{idx} failed: {error_str[:50]}...", "red")
                     self._update_stats(total_success, total_fail, total_configs)
                     
-                    # Check if this is a driver error - only show once
+                    # Check if this is a driver error - only show once (wrap so KeyboardInterrupt doesn't crash app)
                     if is_driver_missing_error(error_str) and total_fail == 1:
-                        self.frame.after(0, lambda err=error_str: self._handle_driver_missing_error(err))
+                        def _show_driver_error(err=error_str):
+                            try:
+                                self._handle_driver_missing_error(err)
+                            except KeyboardInterrupt:
+                                pass
+                            except Exception:
+                                pass
+                        self.frame.after(0, _show_driver_error)
                     
             self._log(f"\n{'='*60}")
             self._log(f"Bulk validation completed: {total_success} succeeded, {total_fail} failed")
@@ -1741,6 +1821,11 @@ After installation, restart this application.
             schema, name = "dbo", table
         if not name:
             return
+        # Use bulk connection info if this result came from bulk validation (key is "src_db.schema.table")
+        conn_info = None
+        if "." in key:
+            src_db_from_key = key.split(".", 1)[0]
+            conn_info = getattr(self, "_bulk_connection_map", {}).get(src_db_from_key)
         lbl = getattr(self, "detail_sample_result_label", None)
         if lbl:
             lbl.config(text="Loading sample (source & destination, incl. identity columns)...", fg="blue")
@@ -1749,31 +1834,55 @@ After installation, restart this application.
             mismatch_display = []
             export_data = None
             try:
-                src_conn = connect_to_any_database(
-                    server=self.src_server_var.get(),
-                    database=self.src_db_var.get(),
-                    auth=self.src_auth_var.get(),
-                    user=self.src_user_var.get(),
-                    password=self.src_password_var.get() or None,
-                    db_type=self.src_db_type_var.get(),
-                    port=int(self.src_port_var.get() or 50000),
-                    timeout=15
-                )
-                dest_conn = connect_to_any_database(
-                    server=self.dest_server_var.get(),
-                    database=self.dest_db_var.get(),
-                    auth=self.dest_auth_var.get(),
-                    user=self.dest_user_var.get(),
-                    password=self.dest_password_var.get() or None,
-                    db_type=self.dest_db_type_var.get(),
-                    port=int(self.dest_port_var.get() or 50000),
-                    timeout=15
-                )
+                if conn_info:
+                    src_conn = connect_to_any_database(
+                        server=conn_info.get("src_server"),
+                        database=conn_info.get("src_db"),
+                        auth=conn_info.get("src_auth"),
+                        user=conn_info.get("src_user"),
+                        password=conn_info.get("src_password") or None,
+                        db_type=conn_info.get("src_db_type", "sqlserver"),
+                        port=int(conn_info.get("src_port") or 1433),
+                        timeout=15
+                    )
+                    dest_conn = connect_to_any_database(
+                        server=conn_info.get("dest_server"),
+                        database=conn_info.get("dest_db"),
+                        auth=conn_info.get("dest_auth"),
+                        user=conn_info.get("dest_user"),
+                        password=conn_info.get("dest_password") or None,
+                        db_type=conn_info.get("dest_db_type", "sqlserver"),
+                        port=int(conn_info.get("dest_port") or 1433),
+                        timeout=15
+                    )
+                    src_db_type_val = (conn_info.get("src_db_type") or "sqlserver").strip().lower()
+                else:
+                    src_conn = connect_to_any_database(
+                        server=self.src_server_var.get(),
+                        database=self.src_db_var.get(),
+                        auth=self.src_auth_var.get(),
+                        user=self.src_user_var.get(),
+                        password=self.src_password_var.get() or None,
+                        db_type=self.src_db_type_var.get(),
+                        port=int(self.src_port_var.get() or 50000),
+                        timeout=15
+                    )
+                    dest_conn = connect_to_any_database(
+                        server=self.dest_server_var.get(),
+                        database=self.dest_db_var.get(),
+                        auth=self.dest_auth_var.get(),
+                        user=self.dest_user_var.get(),
+                        password=self.dest_password_var.get() or None,
+                        db_type=self.dest_db_type_var.get(),
+                        port=int(self.dest_port_var.get() or 50000),
+                        timeout=15
+                    )
+                    src_db_type_val = (self.src_db_type_var.get() or "").strip().lower()
                 try:
                     n_rows = max(1, min(1000, int(self.sample_size_var.get())))
                 except (ValueError, TypeError, AttributeError):
                     n_rows = 100
-                src_is_db2 = (self.src_db_type_var.get() or "").strip().lower() == "db2"
+                src_is_db2 = src_db_type_val == "db2"
                 if src_is_db2:
                     src_table_ref = f'"{schema}"."{name}"'
                     src_cur = src_conn.cursor()

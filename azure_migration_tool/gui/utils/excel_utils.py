@@ -11,8 +11,8 @@ import tkinter.filedialog as filedialog
 
 
 def normalize_column_name(col_name: str) -> Optional[str]:
-    """Normalize Excel column name to our standard key"""
-    col_lower = col_name.strip().lower()
+    """Normalize Excel column name to our standard key (collapse spaces for matching)."""
+    col_lower = " ".join((col_name or "").strip().lower().split())
     
     column_mapping = {
         # Source
@@ -36,6 +36,15 @@ def normalize_column_name(col_name: str) -> Optional[str]:
         "src_password": [
             "source password", "src_password", "backup password", "src password"
         ],
+        "src_db_type": [
+            "source db type", "src_db_type", "source database type", "src database type"
+        ],
+        "src_port": [
+            "source port", "src_port", "source port number"
+        ],
+        "src_schema": [
+            "source schema", "src_schema", "source_schema"
+        ],
         
         # Destination
         "dest_server": [
@@ -54,7 +63,17 @@ def normalize_column_name(col_name: str) -> Optional[str]:
             "destination user", "dest_user", "destination_user", "restore user", "dest user"
         ],
         "dest_password": [
-            "destination password", "dest_password", "restore password", "dest password"
+            "destination password", "dest_password", "restore password", "dest password",
+            "destination pwd", "dest pwd", "destination pass", "dest pass", "destinationpassword"
+        ],
+        "dest_db_type": [
+            "destination db type", "dest_db_type", "destination database type", "dest database type"
+        ],
+        "dest_port": [
+            "destination port", "dest_port", "destination port number"
+        ],
+        "dest_schema": [
+            "destination schema", "dest_schema", "destination_schema"
         ],
         
         # Common - these are used when source/dest have the same user/password
@@ -103,6 +122,7 @@ def normalize_column_name(col_name: str) -> Optional[str]:
         
         # Tables filtering
         "tables": ["tables", "table_list", "include_tables"],
+        "table_name": ["table name", "table_name", "table"],
         "exclude": ["exclude", "exclude_tables", "excluded_tables"],
         
         # Performance & Resilience options
@@ -123,6 +143,27 @@ def normalize_column_name(col_name: str) -> Optional[str]:
         if col_lower in [n.lower() for n in possible_names]:
             return key
     return None
+
+
+# Map display names to internal auth values (so bulk Excel with "Microsoft account (with MFA)" works as entra_mfa)
+AUTH_DISPLAY_TO_INTERNAL = {
+    "microsoft account (with mfa)": "entra_mfa",
+    "microsoft account (password)": "entra_password",
+    "sql server login": "sql",
+    "windows login": "windows",
+    "entra_mfa": "entra_mfa",
+    "entra_password": "entra_password",
+    "sql": "sql",
+    "windows": "windows",
+}
+
+
+def normalize_auth_from_excel(auth_value: Optional[str]) -> Optional[str]:
+    """Normalize auth from Excel (display or internal) to internal value so bulk MFA works."""
+    if not auth_value or not str(auth_value).strip():
+        return None
+    key = str(auth_value).strip().lower()
+    return AUTH_DISPLAY_TO_INTERNAL.get(key, auth_value.strip())
 
 
 def clean_server_name(server: str) -> str:
@@ -201,7 +242,7 @@ def read_excel_file(excel_file: str, required_columns: List[str], default_user: 
                 if val_str.lower() not in ['nan', 'none', '']:
                     if key in ["src_server", "dest_server"]:
                         config[key] = clean_server_name(val_str)
-                    elif key in ["batch_size", "parallel_tables", "max_retries", "chunk_threshold", "num_chunks", "chunk_workers"]:
+                    elif key in ["batch_size", "parallel_tables", "max_retries", "chunk_threshold", "num_chunks", "chunk_workers", "src_port", "dest_port"]:
                         try:
                             config[key] = int(float(val))
                         except (ValueError, TypeError):
@@ -252,6 +293,12 @@ def read_excel_file(excel_file: str, required_columns: List[str], default_user: 
         # Also set generic password for backwards compatibility
         if not config.get("password"):
             config["password"] = src_password or dest_password
+        
+        # Normalize auth so bulk MFA works (Excel may have "Microsoft account (with MFA)" or "entra_mfa")
+        if config.get("src_auth"):
+            config["src_auth"] = normalize_auth_from_excel(config["src_auth"]) or config["src_auth"]
+        if config.get("dest_auth"):
+            config["dest_auth"] = normalize_auth_from_excel(config["dest_auth"]) or config["dest_auth"]
         
         # Skip rows with empty required fields
         if not all(config.get(f) for f in required_columns if f != "user"):
@@ -352,12 +399,16 @@ def create_sample_excel(template_type: str, output_path: Optional[str] = None) -
             "Source Authentication": ["entra_mfa", "entra_mfa"],
             "Source User": ["user@domain.com", "user@domain.com"],
             "Source Password": ["", ""],  # Optional: for SQL auth or entra_password
+            "Source DB Type": ["sqlserver", "sqlserver"],  # sqlserver or db2; Azure SQL -> sqlserver
+            "Source Port": [1433, 1433],  # 1433 for SQL Server/Azure SQL, 50000 for DB2
             "Destination Server": ["dest1.database.windows.net", "dest2.database.windows.net"],
             "Destination Database": ["DestDB1", "DestDB2"],
             "Destination Authentication": ["entra_mfa", "entra_mfa"],
             "Destination User": ["user@domain.com", "user@domain.com"],
             "Destination Password": ["", ""],  # Optional: for SQL auth or entra_password
-            "Table Name": ["", ""],  # Empty for all tables
+            "Destination DB Type": ["sqlserver", "sqlserver"],
+            "Destination Port": [1433, 1433],
+            "Table Name": ["", ""],  # Empty for all tables, or single table name per row
         }
     elif template_type == "schema_validation":
         data = {

@@ -574,15 +574,10 @@ class DependencyChecker:
         if not odbc_ok:
             issues.append(f"ODBC: {odbc_msg}")
         
-        # Only check PySpark when running as exe (not bundled)
-        if getattr(sys, 'frozen', False):
-            python_ok, python_msg = self.check_python()
-            if not python_ok:
-                issues.append(f"Python: {python_msg}")
-            
-            pyspark_ok, pyspark_msg = self.check_pyspark()
-            if not pyspark_ok:
-                issues.append(f"PySpark: {pyspark_msg}")
+        # Do NOT require Python/PySpark when running as frozen exe: the built exe uses
+        # Legacy validation (Python-only, no PySpark). Requiring them would show false
+        # "dependency" errors on every PC without Python installed.
+        # (Python/PySpark checks are still used by the full setup flow if user opts in.)
         
         jdbc_ok, jdbc_msg = self.check_jdbc_drivers()
         if not jdbc_ok:

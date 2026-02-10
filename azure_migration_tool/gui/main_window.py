@@ -603,14 +603,9 @@ Make sure to download the version matching your Python architecture (32-bit or 6
                 lines.append(f"[MISSING] Java: {java_msg}")
                 missing_deps.append("Java")
             
-            # Check Python (for exe mode)
+            # Exe build: Python/PySpark not required (Legacy validation is bundled)
             if getattr(sys, 'frozen', False):
-                python_ok, python_msg = checker.check_python()
-                if python_ok:
-                    lines.append(f"[OK] System Python: {python_msg}")
-                else:
-                    lines.append(f"[MISSING] System Python: {python_msg}")
-                    missing_deps.append("Python")
+                lines.append("[OK] This build: no system Python or PySpark required")
             
             # PySpark not required (Legacy validation uses Python-only path)
             lines.append("[OK] Legacy validation: Python-only (no PySpark required)")
@@ -652,15 +647,9 @@ Make sure to download the version matching your Python architecture (32-bit or 6
             
             if "Java" in missing_deps:
                 lines.append("")
-                lines.append("Java 11+ (required for PySpark):")
+                lines.append("Java 11+ (for DB2 Compare tabs only):")
                 lines.append("  Download: https://adoptium.net/")
                 lines.append("  Install and set JAVA_HOME environment variable")
-            
-            if "Python" in missing_deps:
-                lines.append("")
-                lines.append("Python (required for PySpark workers):")
-                lines.append("  Download: https://python.org/downloads/")
-                lines.append("  Make sure to add Python to PATH during install")
             
             lines.append("")
             lines.append("-" * 50)

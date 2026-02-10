@@ -151,20 +151,24 @@ def is_driver_missing_error(error_msg: str) -> bool:
 class BulkSchemaComparisonDialog:
     """Dialog for comparing and fixing multiple missing objects at once."""
     
-    def __init__(self, parent, missing_objects_info, fetch_code_callback, deploy_callback):
+    def __init__(self, parent, missing_objects_info, fetch_code_callback, deploy_callback, get_drop_callback=None, get_table_script_callback=None):
         """
         Initialize bulk comparison dialog.
-        
+
         Args:
             parent: Parent window
-            missing_objects_info: List of tuples (obj_name, db_name, source_status)
+            missing_objects_info: List of tuples (obj_name, db_name, status) with status "Missing" or "Mismatch"
             fetch_code_callback: Function to fetch source/dest code: (obj_name, is_source) -> code
             deploy_callback: Function to deploy script: (obj_name, sql_script) -> (success, message)
+            get_drop_callback: Optional (obj_name, db_name) -> DROP SQL string; used for Mismatch to prepend DROP before source DDL
+            get_table_script_callback: Optional (db_name, schema, table) -> (script, error). Used to replicate full table index/PK layout when index/PK Mismatch.
         """
         self.parent = parent
         self.missing_objects_info = missing_objects_info
         self.fetch_code_callback = fetch_code_callback
         self.deploy_callback = deploy_callback
+        self.get_drop_callback = get_drop_callback
+        self.get_table_script_callback = get_table_script_callback
         self.object_data = {}  # Store code for each object
         
         # Create dialog window
@@ -194,7 +198,7 @@ class BulkSchemaComparisonDialog:
         left_panel.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 5))
         left_panel.pack_propagate(False)
         
-        tk.Label(left_panel, text="Missing Objects", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+        tk.Label(left_panel, text="Objects to fix (Missing / Mismatch)", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
         
         # Listbox with scrollbar
         list_frame = ttk.Frame(left_panel)
@@ -209,9 +213,9 @@ class BulkSchemaComparisonDialog:
         
         self.objects_listbox.bind('<<ListboxSelect>>', self._on_object_select)
         
-        # Populate listbox
-        for obj_name, db_name, source_status in self.missing_objects_info:
-            display_name = f"{obj_name}\n  [{db_name}]"
+        # Populate listbox; each item is (obj_name, db_name, status)
+        for obj_name, db_name, status in self.missing_objects_info:
+            display_name = f"{obj_name}\n  [{db_name}] ({status})"
             self.objects_listbox.insert(tk.END, display_name)
         
         # Right panel - Comparison view
@@ -323,13 +327,22 @@ class BulkSchemaComparisonDialog:
                 self.object_data[self.current_obj_name]['edited'] = True
     
     def _load_object_data(self, obj_name):
-        """Load source and destination code for an object."""
+        """Load source and destination code for an object. For Mismatch, destination panel shows full fix script (DROP + source)."""
         # Check if already loaded
         if obj_name in self.object_data:
             data = self.object_data[obj_name]
             self._display_object_data(data['source_code'], data['dest_code'])
             return
         
+        # Resolve db_name and status for this object (for Mismatch we show DROP + source as dest)
+        db_name = None
+        status = None
+        for o, d, s in self.missing_objects_info:
+            if o == obj_name:
+                db_name = d
+                status = s
+                break
+
         # Fetch from callback
         self.status_label.config(text=f"Loading {obj_name}...", fg="blue")
         self.dialog.update()
@@ -342,13 +355,27 @@ class BulkSchemaComparisonDialog:
             dest_code = ""
             try:
                 dest_code = self.fetch_code_callback(obj_name, False) or ""
-            except Exception as dest_err:
-                # Object doesn't exist in destination - this is expected for missing objects
+            except Exception:
                 dest_code = ""
             
             # If destination code is empty/None and source code exists, use source as template
             if not dest_code or dest_code.strip() == "":
-                dest_code = source_code  # Pre-populate with source code so user can edit
+                dest_code = source_code
+            else:
+                # When object is missing, destination may return a different object type (e.g. index name
+                # matches a column name). Use source script so we deploy the correct object.
+                src_is_index = source_code.strip().startswith("-- Index:") or ("CREATE " in source_code and " INDEX " in source_code)
+                dest_is_column = dest_code.strip().startswith("-- Column:") or ("ALTER TABLE" in dest_code and " ADD " in dest_code)
+                src_is_column = source_code.strip().startswith("-- Column:") or ("ALTER TABLE" in source_code and " ADD " in source_code)
+                dest_is_index = dest_code.strip().startswith("-- Index:") or ("CREATE " in dest_code and " INDEX " in dest_code)
+                if (src_is_index and dest_is_column) or (src_is_column and dest_is_index):
+                    dest_code = source_code
+
+            # For Mismatch: show full fix script (DROP then CREATE from source) in destination panel so user sees what will run
+            if status == "Mismatch" and db_name and getattr(self, "get_drop_callback", None):
+                drop_sql = (self.get_drop_callback(obj_name, db_name) or "").strip()
+                if drop_sql and source_code and source_code.strip():
+                    dest_code = drop_sql + "\n\n" + source_code.strip()
             
             # Store in object_data
             self.object_data[obj_name] = {
@@ -361,7 +388,6 @@ class BulkSchemaComparisonDialog:
             self.status_label.config(text="Ready", fg="green")
         except Exception as e:
             self.status_label.config(text=f"Error: {str(e)}", fg="red")
-            # Still try to show what we have
             source_code = self.object_data.get(obj_name, {}).get('source_code', f"Error loading: {str(e)}")
             self._display_object_data(source_code, "")
     
@@ -428,39 +454,41 @@ class BulkSchemaComparisonDialog:
         self.dest_text.tag_config("diff", background="#ffcccc", foreground="black")
     
     def _load_all_objects(self):
-        """Load all objects in background."""
+        """Load all objects in background. For Mismatch, dest_code = DROP + source (full fix script)."""
         def load_all():
-            for obj_name, _, _ in self.missing_objects_info:
+            for obj_name, db_name, status in self.missing_objects_info:
                 if obj_name not in self.object_data:
                     try:
-                        # Fetch source code
                         source_code = self.fetch_code_callback(obj_name, True) or ""
-                        
-                        # Fetch destination code (may be empty if object doesn't exist)
                         dest_code = ""
                         try:
                             dest_code = self.fetch_code_callback(obj_name, False) or ""
-                        except:
-                            # Object doesn't exist in destination - expected for missing objects
+                        except Exception:
                             dest_code = ""
-                        
-                        # If no destination code, use source as template
                         if not dest_code or not dest_code.strip():
                             dest_code = source_code
-                        
+                        else:
+                            src_is_index = source_code.strip().startswith("-- Index:") or ("CREATE " in source_code and " INDEX " in source_code)
+                            dest_is_column = dest_code.strip().startswith("-- Column:") or ("ALTER TABLE" in dest_code and " ADD " in dest_code)
+                            src_is_column = source_code.strip().startswith("-- Column:") or ("ALTER TABLE" in source_code and " ADD " in source_code)
+                            dest_is_index = dest_code.strip().startswith("-- Index:") or ("CREATE " in dest_code and " INDEX " in dest_code)
+                            if (src_is_index and dest_is_column) or (src_is_column and dest_is_index):
+                                dest_code = source_code
+                        if status == "Mismatch" and db_name and getattr(self, "get_drop_callback", None):
+                            drop_sql = (self.get_drop_callback(obj_name, db_name) or "").strip()
+                            if drop_sql and source_code and source_code.strip():
+                                dest_code = drop_sql + "\n\n" + source_code.strip()
                         self.object_data[obj_name] = {
                             'source_code': source_code,
                             'dest_code': dest_code,
                             'edited': False
                         }
                     except Exception as e:
-                        # Store error info
                         self.object_data[obj_name] = {
                             'source_code': f"-- Error: {str(e)}",
                             'dest_code': "",
                             'edited': False
                         }
-        
         threading.Thread(target=load_all, daemon=True).start()
     
     def _refresh_all(self):
@@ -500,43 +528,94 @@ class BulkSchemaComparisonDialog:
         self._deploy_objects(selected_objects)
     
     def _deploy_objects(self, objects_to_deploy):
-        """Deploy objects to destination."""
+        """Deploy objects to destination. For Mismatch, prepend DROP then use source DDL.
+        Deploy primary keys before other indexes so CLUSTERED index can be created (exact replication).
+        """
         self.status_label.config(text="Deploying...", fg="blue")
         self.dialog.update()
-        
+
+        # Sort so primary keys (PK_*) are deployed first; then CLUSTERED indexes can succeed
+        def _deploy_order(item):
+            obj_name = item[0]
+            parts = obj_name.split(".")
+            last_part = parts[-1] if len(parts) >= 3 else ""
+            is_pk = last_part.startswith("PK_")
+            return (0 if is_pk else 1, obj_name)
+        objects_to_deploy = sorted(objects_to_deploy, key=_deploy_order)
+
         success_count = 0
         fail_count = 0
         errors = []
-        
-        for obj_name, db_name, source_status in objects_to_deploy:
+        # Tables for which we will deploy one combined "table index layout" script (drop FKs, drop indexes/PK, recreate from source, restore FKs)
+        tables_use_table_script = set()
+        for obj_name, db_name, status in objects_to_deploy:
+            p = obj_name.split(".")
+            if len(p) == 3 and status in ("Mismatch", "Missing"):
+                third = p[2]
+                if third.startswith("PK_") or third.startswith("IX_") or third.startswith("IDX_") or third.startswith("AK_"):
+                    tables_use_table_script.add((db_name, p[0], p[1]))
+        deployed_tables = set()  # (db_name, schema, table) already deployed with table script
+
+        for obj_name, db_name, status in objects_to_deploy:
             try:
-                # Get the script (use edited version if available)
+                parts = obj_name.split(".")
+                if len(parts) == 3:
+                    schema, table, third = parts[0], parts[1], parts[2]
+                    table_key = (db_name, schema, table)
+                    is_index_or_pk = third.startswith("PK_") or third.startswith("IX_") or third.startswith("IDX_") or third.startswith("AK_")
+                    if is_index_or_pk and table_key in tables_use_table_script and getattr(self, "get_table_script_callback", None):
+                        if table_key in deployed_tables:
+                            success_count += 1
+                            continue
+                        script, err = self.get_table_script_callback(db_name, schema, table)
+                        if err:
+                            errors.append(f"{schema}.{table} (table index layout): {err}")
+                            fail_count += 1
+                            continue
+                        if not script or not script.strip():
+                            errors.append(f"{schema}.{table}: No table script generated")
+                            fail_count += 1
+                            continue
+                        success, message = self.deploy_callback(obj_name, script)
+                        if success:
+                            deployed_tables.add(table_key)
+                            success_count += 1
+                        else:
+                            fail_count += 1
+                            errors.append(f"{schema}.{table} (table index layout): {message}")
+                        continue
+                    if table_key in deployed_tables:
+                        success_count += 1
+                        continue
+
+                # Per-object deploy
                 if obj_name in self.object_data:
                     script = self.object_data[obj_name].get('dest_code', '')
-                    # Remove placeholder text if present
                     if script and "(Object does not exist in destination" in script:
-                        # Try to get source code instead
                         script = self.object_data[obj_name].get('source_code', '')
-                    # If still empty, try source code
                     if not script or not script.strip():
                         script = self.object_data[obj_name].get('source_code', '')
                 else:
-                    # Fetch fresh if not in cache
                     script = self.fetch_code_callback(obj_name, True) or ""
-                
+
                 if not script or not script.strip():
                     errors.append(f"{obj_name}: No script available")
                     fail_count += 1
                     continue
-                
-                # Deploy
+
+                # For Mismatch (definition differs): prepend DROP on destination then recreate from source
+                if status == "Mismatch" and getattr(self, 'get_drop_callback', None):
+                    drop_sql = self.get_drop_callback(obj_name, db_name)
+                    if drop_sql and drop_sql.strip():
+                        script = drop_sql.strip() + "\n\n" + script.strip()
+
                 success, message = self.deploy_callback(obj_name, script)
                 if success:
                     success_count += 1
                 else:
                     fail_count += 1
                     errors.append(f"{obj_name}: {message}")
-                    
+
             except Exception as e:
                 fail_count += 1
                 errors.append(f"{obj_name}: {str(e)}")
@@ -2909,11 +2988,15 @@ After installation, restart this application.
                 self.validation_log.see(tk.END)
                 
                 try:
+                    src_auth = cfg.get("src_auth", self.src_auth_var.get()) or self.src_auth_var.get()
+                    dest_auth = cfg.get("dest_auth", self.dest_auth_var.get()) or self.dest_auth_var.get()
+                    src_user = cfg.get("src_user", cfg.get("user", self.src_user_var.get())) or self.src_user_var.get()
+                    dest_user = cfg.get("dest_user", cfg.get("user", self.dest_user_var.get())) or self.dest_user_var.get()
                     src_conn = connect_to_any_database(
                         server=cfg.get("src_server"),
                         database=cfg.get("src_db"),
-                        auth=cfg.get("src_auth", self.src_auth_var.get()),
-                        user=cfg.get("src_user", cfg.get("user", self.src_user_var.get())),
+                        auth=src_auth,
+                        user=src_user,
                         password=cfg.get("src_password", self.src_password_var.get()) or None,
                         db_type=cfg.get("src_db_type", self.src_db_type_var.get()),
                         port=int(cfg.get("src_port", self.src_port_var.get()) or 50000),
@@ -2922,8 +3005,8 @@ After installation, restart this application.
                     dest_conn = connect_to_any_database(
                         server=cfg.get("dest_server"),
                         database=cfg.get("dest_db"),
-                        auth=cfg.get("dest_auth", self.dest_auth_var.get()),
-                        user=cfg.get("dest_user", cfg.get("user", self.dest_user_var.get())),
+                        auth=dest_auth,
+                        user=dest_user,
                         password=cfg.get("dest_password", self.dest_password_var.get()) or None,
                         db_type=cfg.get("dest_db_type", self.dest_db_type_var.get()),
                         port=int(cfg.get("dest_port", self.dest_port_var.get()) or 50000),
@@ -3081,6 +3164,104 @@ After installation, restart this application.
                                 item = self.results_tree.insert("", tk.END, text=idx,
                                                        values=(db_name, "Missing", "Exists", "⚠ Extra", "Index not in source"))
                                 self.all_tree_items.append(item)
+                        
+                        # Validate primary keys (CLUSTERED vs NONCLUSTERED, columns) for exact replication
+                        if self.validate_indexes_var.get():
+                            self.validation_log.insert(tk.END, f"[{cfg.get('src_db')}] Validating primary keys...\n")
+                            self.validation_log.see(tk.END)
+                            # Get PK list with type (SQL Server 2016 compatible - no STRING_AGG)
+                            src_cur.execute("""
+                                SELECT s.name AS Schema_Name, t.name AS Table_Name, kc.name AS PK_Name, i.type_desc AS Index_Type
+                                FROM sys.key_constraints kc
+                                JOIN sys.tables t ON t.object_id = kc.parent_object_id
+                                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                                JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id
+                                WHERE kc.type = 'PK' AND t.is_ms_shipped = 0
+                            """)
+                            src_pk_rows = src_cur.fetchall()
+                            src_cur.execute("""
+                                SELECT s.name, t.name, kc.name, c.name AS col_name, ic.key_ordinal
+                                FROM sys.key_constraints kc
+                                JOIN sys.tables t ON t.object_id = kc.parent_object_id
+                                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                                JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id
+                                JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+                                JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                                WHERE kc.type = 'PK' AND t.is_ms_shipped = 0
+                                ORDER BY s.name, t.name, kc.name, ic.key_ordinal
+                            """)
+                            src_pk_cols = {}
+                            for row in src_cur.fetchall():
+                                key = f"{row[0]}.{row[1]}.{row[2]}"
+                                if key not in src_pk_cols:
+                                    src_pk_cols[key] = []
+                                src_pk_cols[key].append(row[3])
+                            src_pks = {}
+                            for row in src_pk_rows:
+                                tbl_key = f"{row[0]}.{row[1]}"
+                                obj_name = f"{row[0]}.{row[1]}.{row[2]}"
+                                col_list = ",".join(src_pk_cols.get(obj_name, []))
+                                src_pks[tbl_key] = (obj_name, (row[3] or "").strip().upper(), col_list)
+                            dest_cur.execute("""
+                                SELECT s.name AS Schema_Name, t.name AS Table_Name, kc.name AS PK_Name, i.type_desc AS Index_Type
+                                FROM sys.key_constraints kc
+                                JOIN sys.tables t ON t.object_id = kc.parent_object_id
+                                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                                JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id
+                                WHERE kc.type = 'PK' AND t.is_ms_shipped = 0
+                            """)
+                            dest_pk_rows = dest_cur.fetchall()
+                            dest_cur.execute("""
+                                SELECT s.name, t.name, kc.name, c.name AS col_name, ic.key_ordinal
+                                FROM sys.key_constraints kc
+                                JOIN sys.tables t ON t.object_id = kc.parent_object_id
+                                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                                JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id
+                                JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+                                JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                                WHERE kc.type = 'PK' AND t.is_ms_shipped = 0
+                                ORDER BY s.name, t.name, kc.name, ic.key_ordinal
+                            """)
+                            dest_pk_cols = {}
+                            for row in dest_cur.fetchall():
+                                key = f"{row[0]}.{row[1]}.{row[2]}"
+                                if key not in dest_pk_cols:
+                                    dest_pk_cols[key] = []
+                                dest_pk_cols[key].append(row[3])
+                            dest_pks = {}
+                            for row in dest_pk_rows:
+                                tbl_key = f"{row[0]}.{row[1]}"
+                                obj_name = f"{row[0]}.{row[1]}.{row[2]}"
+                                col_list = ",".join(dest_pk_cols.get(obj_name, []))
+                                dest_pks[tbl_key] = (obj_name, (row[3] or "").strip().upper(), col_list)
+                            db_name = f"{cfg.get('src_db')} vs {cfg.get('dest_db')}"
+                            all_tables = set(src_pks.keys()) | set(dest_pks.keys())
+                            for tbl in sorted(all_tables):
+                                src_info = src_pks.get(tbl)
+                                dest_info = dest_pks.get(tbl)
+                                if not src_info:
+                                    obj_name = dest_info[0]
+                                    item = self.results_tree.insert("", tk.END, text=obj_name,
+                                                           values=(db_name, "Missing", "Exists", "⚠ Extra", "Primary key not in source"))
+                                    self.all_tree_items.append(item)
+                                elif not dest_info:
+                                    obj_name = src_info[0]
+                                    item = self.results_tree.insert("", tk.END, text=obj_name,
+                                                           values=(db_name, "Exists", "Missing", "✗ Missing", "Primary key not in destination"))
+                                    self.all_tree_items.append(item)
+                                else:
+                                    obj_name = src_info[0]
+                                    src_type, src_cols = src_info[1], src_info[2]
+                                    dest_type, dest_cols = dest_info[1], dest_info[2]
+                                    if src_type != dest_type or src_cols != dest_cols:
+                                        detail = "Primary key type or columns differ"
+                                        if src_type != dest_type:
+                                            detail = f"Primary key type differs ({src_type} vs {dest_type})"
+                                        elif src_cols != dest_cols:
+                                            detail = "Primary key columns differ"
+                                        item = self.results_tree.insert("", tk.END, text=obj_name,
+                                                               values=(db_name, "Different", "Different", "✗ Mismatch", detail))
+                                        self.all_tree_items.append(item)
                         
                         # Validate constraints
                         if self.validate_constraints_var.get():
@@ -3406,6 +3587,32 @@ After installation, restart this application.
                         if default_row:
                             code = f"-- Default Constraint: {obj_name}\nALTER TABLE {qident(schema)}.{qident(table)} ADD CONSTRAINT {qident(default_row.constraint_name)} DEFAULT {default_row.definition} FOR {qident(default_row.column_name)};"
                     
+                    # Check if it's a primary key constraint (for exact replication: CLUSTERED vs NONCLUSTERED)
+                    if not code:
+                        cur.execute("""
+                            SELECT kc.name, i.type_desc
+                            FROM sys.key_constraints kc
+                            JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id
+                            WHERE kc.parent_object_id = OBJECT_ID(?, 'U') AND kc.name = ? AND kc.type = 'PK'
+                        """, f"{schema}.{table}", obj_name_only)
+                        pk_row = cur.fetchone()
+                        if pk_row:
+                            cur.execute("""
+                                SELECT c.name, ic.is_descending_key, ic.key_ordinal
+                                FROM sys.key_constraints kc
+                                JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id
+                                JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+                                JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                                WHERE kc.parent_object_id = OBJECT_ID(?, 'U') AND kc.name = ?
+                                ORDER BY ic.key_ordinal
+                            """, f"{schema}.{table}", obj_name_only)
+                            pk_cols = cur.fetchall()
+                            if pk_cols:
+                                type_desc_val = (pk_row.type_desc or "").strip().upper()
+                                pk_typ = "CLUSTERED" if type_desc_val == "CLUSTERED" else "NONCLUSTERED"
+                                col_list = ", ".join(qident(c.name) + (" DESC" if c.is_descending_key else " ASC") for c in pk_cols)
+                                code = f"-- Primary Key: {obj_name}\nALTER TABLE {qident(schema)}.{qident(table)} ADD CONSTRAINT {qident(pk_row.name)} PRIMARY KEY {pk_typ} (\n\t{col_list}\n);"
+                    
                     # Check if it's an index
                     if not code:
                         cur.execute("""
@@ -3457,8 +3664,8 @@ After installation, restart this application.
                             if key_cols:
                                 table_name = f"{qident(schema)}.{qident(table)}"
                                 unique = "UNIQUE " if idx_row.is_unique else ""
-                                type_desc_value = (idx_row.type_desc or "").upper()
-                                typ = "CLUSTERED" if "CLUSTERED" in type_desc_value else "NONCLUSTERED"
+                                type_desc_value = (idx_row.type_desc or "").strip().upper()
+                                typ = "CLUSTERED" if type_desc_value == "CLUSTERED" else "NONCLUSTERED"
                                 
                                 key_cols_formatted = ',\n\t'.join(key_cols)
                                 code = f"-- Index: {obj_name}\nCREATE {unique}{typ} INDEX {qident(obj_name_only)} ON {table_name}\n(\n\t{key_cols_formatted}\n)"
@@ -3533,7 +3740,288 @@ After installation, restart this application.
             return None, None
         
         return code, None
-    
+
+    def _get_drop_statement(self, cur, obj_name):
+        """
+        Generate DROP statement for an object on destination so it can be recreated from source.
+        Used when fixing Mismatch (definition differs): DROP then CREATE from source.
+        Returns DROP SQL string or None if not applicable.
+        """
+        try:
+            try:
+                from src.backup.exporters import qident
+            except ImportError:
+                try:
+                    from backup.exporters import qident
+                except ImportError:
+                    from utils.paths import qident
+        except ImportError:
+            def qident(n):
+                return n if n is None else f"[{str(n).replace(']', ']]')}]"
+        try:
+            parts = obj_name.split(".")
+            if len(parts) == 2:
+                return None  # Table - we don't drop tables in fix
+            if len(parts) != 3:
+                return None
+            part1, part2, part3 = parts
+            type_map = {
+                "VIEW": ("VIEW", "VIEW"),
+                "SQL_STORED_PROCEDURE": ("PROCEDURE", "PROCEDURE"),
+                "SQL_STOR": ("PROCEDURE", "PROCEDURE"),
+                "SQL_SCALAR_FUNCTION": ("FUNCTION", "FUNCTION"),
+                "SQL_TABLE_VALUED_FUNCTION": ("FUNCTION", "FUNCTION"),
+                "SQL_INLINE_TABLE_VALUED_FUNCTION": ("FUNCTION", "FUNCTION"),
+                "SQL_FUNCTION": ("FUNCTION", "FUNCTION"),
+                "CLR_STORED_PROCEDURE": ("PROCEDURE", "PROCEDURE"),
+                "CLR_SCALAR_FUNCTION": ("FUNCTION", "FUNCTION"),
+                "CLR_TABLE_VALUED_FUNCTION": ("FUNCTION", "FUNCTION"),
+            }
+            if part1 in type_map:
+                kind, _ = type_map[part1]
+                schema, name = part2, part3
+                full = f"{qident(schema)}.{qident(name)}"
+                if kind == "VIEW":
+                    return f"DROP VIEW IF EXISTS {full};\n"
+                if kind == "PROCEDURE":
+                    return f"DROP PROCEDURE IF EXISTS {full};\n"
+                if kind == "FUNCTION":
+                    return f"DROP FUNCTION IF EXISTS {full};\n"
+                return None
+            schema, table, obj_name_only = parts
+            # Index (non-PK, non-unique-constraint)
+            cur.execute("""
+                SELECT 1 FROM sys.indexes i
+                JOIN sys.tables t ON t.object_id = i.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ? AND i.name = ?
+                  AND i.is_primary_key = 0 AND i.is_unique_constraint = 0
+            """, (schema, table, obj_name_only))
+            if cur.fetchone():
+                return f"DROP INDEX IF EXISTS {qident(obj_name_only)} ON {qident(schema)}.{qident(table)};\n"
+            # Primary key: drop dependent FKs first, then PK (so DROP CONSTRAINT PK succeeds)
+            cur.execute("""
+                SELECT 1 FROM sys.key_constraints kc
+                JOIN sys.tables t ON t.object_id = kc.parent_object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ? AND kc.name = ? AND kc.type = 'PK'
+            """, (schema, table, obj_name_only))
+            if cur.fetchone():
+                drops = []
+                cur.execute("""
+                    SELECT fk.name AS fk_name,
+                           OBJECT_SCHEMA_NAME(fk.parent_object_id) AS child_schema,
+                           OBJECT_NAME(fk.parent_object_id) AS child_table
+                    FROM sys.foreign_keys fk
+                    JOIN sys.tables t ON t.object_id = fk.referenced_object_id
+                    JOIN sys.schemas s ON s.schema_id = t.schema_id
+                    WHERE s.name = ? AND t.name = ?
+                """, (schema, table))
+                for row in cur.fetchall():
+                    fk_name, child_schema, child_table = row[0], row[1], row[2]
+                    drops.append(
+                        f"ALTER TABLE {qident(child_schema)}.{qident(child_table)} "
+                        f"DROP CONSTRAINT IF EXISTS {qident(fk_name)};\n"
+                    )
+                drops.append(
+                    f"ALTER TABLE {qident(schema)}.{qident(table)} DROP CONSTRAINT IF EXISTS {qident(obj_name_only)};\n"
+                )
+                return "".join(drops)
+            # Constraint (any other type)
+            cur.execute("""
+                SELECT 1 FROM sys.objects o
+                JOIN sys.tables t ON t.object_id = o.parent_object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ? AND o.name = ?
+            """, (schema, table, obj_name_only))
+            if cur.fetchone():
+                return f"ALTER TABLE {qident(schema)}.{qident(table)} DROP CONSTRAINT IF EXISTS {qident(obj_name_only)};\n"
+            # Column
+            cur.execute("""
+                SELECT 1 FROM sys.columns c
+                JOIN sys.tables t ON t.object_id = c.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ? AND c.name = ?
+            """, (schema, table, obj_name_only))
+            if cur.fetchone():
+                return f"ALTER TABLE {qident(schema)}.{qident(table)} DROP COLUMN {qident(obj_name_only)};\n"
+            return None
+        except Exception:
+            return None
+
+    def _get_table_index_replication_script(self, connection_map, db_name, schema, table):
+        """
+        Build a single script to replicate source table's index/PK layout on destination:
+        1. DROP FKs that reference this table (on destination)
+        2. DROP all non-PK indexes on this table (destination)
+        3. DROP PK on this table (destination)
+        4. ADD PK from source (correct type: CLUSTERED/NONCLUSTERED)
+        5. ADD all indexes from source (order: CLUSTERED then NONCLUSTERED)
+        6. RESTORE FKs from source (ADD CONSTRAINT ... FOREIGN KEY ...)
+        Returns (script_string, None) or (None, error_message). SQL Server only.
+        """
+        try:
+            try:
+                from src.backup.exporters import qident
+            except ImportError:
+                try:
+                    from backup.exporters import qident
+                except ImportError:
+                    from utils.paths import qident
+        except ImportError:
+            def qident(n):
+                return n if n is None else f"[{str(n).replace(']', ']]')}]"
+
+        if db_name not in connection_map:
+            return None, "Database not in connection map"
+        _, _, src_info, dest_info = connection_map[db_name]
+        try:
+            src_conn = connect_to_any_database(
+                server=src_info[0], database=src_info[1], auth=src_info[2],
+                user=src_info[3], password=src_info[4] or None,
+                db_type=self.src_db_type_var.get(),
+                port=int(self.src_port_var.get() or 50000), timeout=30
+            )
+            dest_conn = connect_to_any_database(
+                server=dest_info[0], database=dest_info[1], auth=dest_info[2],
+                user=dest_info[3], password=dest_info[4] or None,
+                db_type=self.dest_db_type_var.get(),
+                port=int(self.dest_port_var.get() or 50000), timeout=30
+            )
+        except Exception as e:
+            return None, str(e)
+
+        src_cur = src_conn.cursor()
+        dest_cur = dest_conn.cursor()
+        parts = []
+
+        try:
+            # ---- 1. DROP FKs that reference this table (on destination) ----
+            dest_cur.execute("""
+                SELECT fk.name AS fk_name,
+                       OBJECT_SCHEMA_NAME(fk.parent_object_id) AS child_schema,
+                       OBJECT_NAME(fk.parent_object_id) AS child_table
+                FROM sys.foreign_keys fk
+                JOIN sys.tables t ON t.object_id = fk.referenced_object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ?
+            """, (schema, table))
+            fks_to_restore = list(dest_cur.fetchall())
+            parts.append("-- 1. DROP foreign keys that reference this table")
+            for row in fks_to_restore:
+                fk_name, child_schema, child_table = row[0], row[1], row[2]
+                parts.append(
+                    f"ALTER TABLE {qident(child_schema)}.{qident(child_table)} "
+                    f"DROP CONSTRAINT IF EXISTS {qident(fk_name)};"
+                )
+            if fks_to_restore:
+                parts.append("")
+
+            # ---- 2. DROP non-PK indexes on this table (destination) ----
+            dest_cur.execute("""
+                SELECT i.name
+                FROM sys.indexes i
+                JOIN sys.tables t ON t.object_id = i.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ?
+                  AND i.is_primary_key = 0 AND i.is_unique_constraint = 0
+                  AND i.type > 0
+            """, (schema, table))
+            dest_indexes = [row[0] for row in dest_cur.fetchall()]
+            parts.append("-- 2. DROP non-PK indexes on this table")
+            for idx_name in dest_indexes:
+                parts.append(
+                    f"DROP INDEX IF EXISTS {qident(idx_name)} ON {qident(schema)}.{qident(table)};"
+                )
+            if dest_indexes:
+                parts.append("")
+
+            # ---- 3. DROP PK on this table (destination) ----
+            dest_cur.execute("""
+                SELECT kc.name
+                FROM sys.key_constraints kc
+                JOIN sys.tables t ON t.object_id = kc.parent_object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ? AND kc.type = 'PK'
+            """, (schema, table))
+            pk_row = dest_cur.fetchone()
+            parts.append("-- 3. DROP primary key on this table")
+            if pk_row:
+                parts.append(
+                    f"ALTER TABLE {qident(schema)}.{qident(table)} "
+                    f"DROP CONSTRAINT IF EXISTS {qident(pk_row[0])};"
+                )
+                parts.append("")
+
+            # ---- 4 & 5. From SOURCE: get PK and all indexes, ordered (PK first, then CLUSTERED, then NONCLUSTERED) ----
+            src_cur.execute("""
+                SELECT kc.name, i.type_desc
+                FROM sys.key_constraints kc
+                JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id
+                JOIN sys.tables t ON t.object_id = kc.parent_object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ? AND kc.type = 'PK'
+            """, (schema, table))
+            src_pk_row = src_cur.fetchone()
+            src_cur.execute("""
+                SELECT i.name, i.type_desc
+                FROM sys.indexes i
+                JOIN sys.tables t ON t.object_id = i.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ?
+                  AND i.is_primary_key = 0 AND i.is_unique_constraint = 0
+                  AND i.type > 0
+            """, (schema, table))
+            src_index_rows = src_cur.fetchall()
+            # Order: PK first, then CLUSTERED indexes, then NONCLUSTERED
+            create_order = []
+            if src_pk_row:
+                create_order.append((src_pk_row[0], "PK"))
+            for r in src_index_rows:
+                create_order.append((r[0], (r[1] or "").strip().upper()))
+            create_order.sort(key=lambda x: (0 if x[1] == "PK" else (1 if x[1] == "CLUSTERED" else 2), x[0]))
+
+            parts.append("-- 4. ADD primary key and indexes from source (exact replication)")
+            for obj_name_only, _ in create_order:
+                full_name = f"{schema}.{table}.{obj_name_only}"
+                code, _ = self._get_object_code(src_cur, full_name)
+                if code and code.strip():
+                    # Strip leading comment line if present for cleaner script
+                    lines = code.strip().split("\n")
+                    if lines and lines[0].strip().startswith("--"):
+                        lines = lines[1:]
+                    parts.append("\n".join(lines).strip())
+                    parts.append("")
+
+            # ---- 6. RESTORE FKs from source ----
+            if fks_to_restore:
+                parts.append("-- 5. RESTORE foreign keys that reference this table")
+                for row in fks_to_restore:
+                    fk_name, child_schema, child_table = row[0], row[1], row[2]
+                    # FK lives on child table: child_schema.child_table.fk_name
+                    full_name = f"{child_schema}.{child_table}.{fk_name}"
+                    code, _ = self._get_object_code(src_cur, full_name)
+                    if code and code.strip():
+                        lines = code.strip().split("\n")
+                        if lines and lines[0].strip().startswith("--"):
+                            lines = lines[1:]
+                        parts.append("\n".join(lines).strip())
+                        parts.append("")
+
+            src_conn.close()
+            dest_conn.close()
+            return "\n".join(parts).strip(), None
+        except Exception as e:
+            try:
+                src_conn.close()
+            except Exception:
+                pass
+            try:
+                dest_conn.close()
+            except Exception:
+                pass
+            return None, str(e)
+
     def _fix_missing_objects(self):
         """Open comparison dialog for missing objects."""
         # Check if we have Excel configs (bulk validation)
@@ -3558,73 +4046,93 @@ After installation, restart this application.
                     "Please enter the destination server and database in the form above, then run validation first.")
                 return
         
-        # Collect missing objects from treeview with their database info
+        # Collect missing and mismatch objects from ALL items (ignore current filter so we always see fixable objects)
         missing_objects = []
         db_configs = {}  # Map database name to config
-        
-        # Check if we have Excel configs (bulk validation)
-        using_excel = bool(self.excel_configs)
-        
+
         if using_excel:
-            # Build a map of database names to configs
             for cfg in self.excel_configs:
                 db_key = f"{cfg.get('src_db')} vs {cfg.get('dest_db')}"
                 db_configs[db_key] = cfg
-        
-        for item in self.results_tree.get_children():
-            status = self.results_tree.set(item, "Status")
-            if "✗ Missing" in status:
-                obj_name = self.results_tree.item(item)['text']
-                source_status = self.results_tree.set(item, "Source")
-                db_name = self.results_tree.set(item, "DB")
-                
-                # Skip if database name is empty (for Excel bulk validation)
-                if using_excel and (not db_name or not db_name.strip()):
-                    # Skip objects without database name in bulk mode
-                    continue
-                elif not db_name or not db_name.strip():
-                    # For single validation, use form fields to construct database name
-                    db_name = f"{self.src_db_var.get()} vs {self.dest_db_var.get()}"
-                
-                missing_objects.append((obj_name, source_status, db_name))
-        
+
+        # Use all_tree_items so filter doesn't hide Missing/Mismatch; if empty, user hasn't run validation
+        items_to_scan = getattr(self, "all_tree_items", None) or []
+        for item in items_to_scan:
+            try:
+                status = self.results_tree.set(item, "Status")
+            except Exception:
+                continue
+            is_missing = status and "✗ Missing" in status
+            is_mismatch = status and "✗ Mismatch" in status
+            if not (is_missing or is_mismatch):
+                continue
+            obj_name = self.results_tree.item(item, "text")
+            db_name = self.results_tree.set(item, "DB")
+            if using_excel and (not db_name or not db_name.strip()):
+                continue
+            if not db_name or not db_name.strip():
+                db_name = f"{self.src_db_var.get()} vs {self.dest_db_var.get()}"
+            row_status = "Mismatch" if is_mismatch else "Missing"
+            missing_objects.append((obj_name, db_name, row_status))
+
         if not missing_objects:
-            messagebox.showinfo("Info", "No missing objects found to fix!")
+            messagebox.showinfo("Info", "No missing or mismatch objects found to fix!\n\n"
+                                "Run validation first, then look for '✗ Missing' or '✗ Mismatch' in the results.\n"
+                                "Clear any status filter (set to 'All') if you expect to see items.")
             return
-        
-        # Get selected items if any, otherwise use all missing objects
+
+        # Sort so fix order is deterministic: PK first, then indexes, then FKs, then columns, then tables/other
+        def _fix_order_key(item):
+            obj_name, db_name, status = item
+            parts = obj_name.split(".")
+            last = parts[-1] if len(parts) >= 3 else (parts[-1] if parts else "")
+            if last.startswith("PK_"):
+                return (0, obj_name)
+            if last.startswith("IX_") or last.startswith("IDX_") or last.startswith("AK_"):
+                return (1, obj_name)
+            if last.startswith("FK_"):
+                return (2, obj_name)
+            if len(parts) == 3:
+                return (3, obj_name)  # e.g. schema.table.column or other
+            if len(parts) == 2:
+                return (4, obj_name)  # table
+            return (5, obj_name)
+        missing_objects.sort(key=_fix_order_key)
+
         selected_items = self.results_tree.selection()
         objects_to_fix = []
-        
         if selected_items:
-            # Only process selected items
             for item in selected_items:
-                status = self.results_tree.set(item, "Status")
-                if "✗ Missing" in status:
-                    obj_name = self.results_tree.item(item)['text']
-                    source_status = self.results_tree.set(item, "Source")
-                    db_name = self.results_tree.set(item, "DB")
-                    if not db_name or not db_name.strip():
-                        if using_excel:
-                            continue
-                        db_name = f"{self.src_db_var.get()} vs {self.dest_db_var.get()}"
-                    objects_to_fix.append((obj_name, source_status, db_name))
+                try:
+                    status = self.results_tree.set(item, "Status")
+                except Exception:
+                    continue
+                if not status or ("✗ Missing" not in status and "✗ Mismatch" not in status):
+                    continue
+                obj_name = self.results_tree.item(item, "text")
+                db_name = self.results_tree.set(item, "DB")
+                if not db_name or not db_name.strip():
+                    if using_excel:
+                        continue
+                    db_name = f"{self.src_db_var.get()} vs {self.dest_db_var.get()}"
+                row_status = "Mismatch" if "✗ Mismatch" in status else "Missing"
+                objects_to_fix.append((obj_name, db_name, row_status))
+            if objects_to_fix:
+                objects_to_fix.sort(key=_fix_order_key)
         else:
-            # Process all missing objects
             objects_to_fix = missing_objects
-        
+
         if not objects_to_fix:
-            messagebox.showinfo("Info", "No missing objects selected to fix!")
+            messagebox.showinfo("Info", "No objects selected to fix!")
             return
-        
-        # Show info about what will be fixed
-        db_count = len(set(db_name for _, _, db_name in objects_to_fix))
-        messagebox.showinfo("Opening Bulk Comparison", 
-                           f"Opening comparison dialog for {len(objects_to_fix)} missing object(s)\n"
-                           f"across {db_count} database pair(s).\n\n"
-                           f"You can view, edit, and deploy all objects at once.")
-        
-        # Open bulk comparison dialog for all objects
+
+        mismatch_count = sum(1 for _o, _d, s in objects_to_fix if s == "Mismatch")
+        msg = f"Opening comparison for {len(objects_to_fix)} object(s)"
+        if mismatch_count:
+            msg += f" ({mismatch_count} with definition difference: will generate DROP then recreate from source)"
+        msg += f"\nacross {len(set(d for _o, d, _s in objects_to_fix))} database pair(s)."
+        messagebox.showinfo("Opening Bulk Comparison", msg)
+
         self._open_bulk_comparison_dialog(objects_to_fix, db_configs, using_excel)
     
     def _open_bulk_comparison_dialog(self, objects_to_fix, db_configs, using_excel):
@@ -3632,12 +4140,12 @@ After installation, restart this application.
         if not objects_to_fix:
             return
         
-        # Group objects by database pair
+        # Group objects by database pair; each item is (obj_name, db_name, status) with status Missing or Mismatch
         objects_by_db = {}
-        for obj_name, source_status, db_name in objects_to_fix:
+        for obj_name, db_name, status in objects_to_fix:
             if db_name not in objects_by_db:
                 objects_by_db[db_name] = []
-            objects_by_db[db_name].append((obj_name, source_status, db_name))
+            objects_by_db[db_name].append((obj_name, db_name, status))
         
         # Create connection info map for each database pair
         connection_map = {}  # db_name -> (src_conn_str, dest_conn_str, src_info, dest_info)
@@ -3690,10 +4198,10 @@ After installation, restart this application.
         
         # Create fetch code callback that uses the correct connection for each object
         def fetch_code(obj_name, is_source):
-            # Find which database pair this object belongs to
+            # Find which database pair this object belongs to; obj_info = (obj_name, db_name, status)
             for obj_info in objects_to_fix:
                 if obj_info[0] == obj_name:
-                    db_name = obj_info[2]
+                    db_name = obj_info[1]
                     if db_name in connection_map:
                         _, _, src_info, dest_info = connection_map[db_name]
                         try:
@@ -3725,23 +4233,52 @@ After installation, restart this application.
         
         # Create deploy callback that uses the correct connection for each object
         def deploy_callback(obj_name, sql_script):
-            # Find which database pair this object belongs to
+            # Find which database pair this object belongs to; obj_info = (obj_name, db_name, status)
             for obj_info in objects_to_fix:
                 if obj_info[0] == obj_name:
-                    db_name = obj_info[2]
+                    db_name = obj_info[1]
                     if db_name in connection_map:
                         _, _, src_info, dest_info = connection_map[db_name]
                         return self._deploy_object(obj_name, sql_script,
                             src_info[0], src_info[1], src_info[2], src_info[3], src_info[4],
                             dest_info[0], dest_info[1], dest_info[2], dest_info[3], dest_info[4])
             return False, "Database configuration not found for object"
-        
+
+        # Callback to get DROP statement for destination object (for Mismatch: DROP then recreate from source)
+        def get_drop_for_object(obj_name, db_name):
+            if db_name not in connection_map:
+                return ""
+            _, _, src_info, dest_info = connection_map[db_name]
+            try:
+                conn = connect_to_any_database(
+                    server=dest_info[0],
+                    database=dest_info[1],
+                    auth=dest_info[2],
+                    user=dest_info[3],
+                    password=dest_info[4] or None,
+                    db_type=self.dest_db_type_var.get(),
+                    port=int(self.dest_port_var.get() or 50000),
+                    timeout=15
+                )
+                cur = conn.cursor()
+                drop_sql = self._get_drop_statement(cur, obj_name)
+                conn.close()
+                return (drop_sql or "").strip()
+            except Exception:
+                return ""
+
+        # Callback to get full table index/PK replication script (drop FKs, drop indexes/PK, recreate from source, restore FKs)
+        def get_table_script_callback(db_name, schema, table):
+            return self._get_table_index_replication_script(connection_map, db_name, schema, table)
+
         # Open bulk dialog
         dialog = BulkSchemaComparisonDialog(
             self.frame.winfo_toplevel(),
             objects_to_fix,
             fetch_code,
-            deploy_callback
+            deploy_callback,
+            get_drop_callback=get_drop_for_object,
+            get_table_script_callback=get_table_script_callback
         )
     
     def _open_comparison_dialog(self, obj_info, all_objects, db_configs, using_excel):
@@ -4207,8 +4744,8 @@ After installation, restart this application.
                                     unique = "UNIQUE " if idx_row.is_unique else ""
                                     
                                     # Get the actual type_desc value and log it for debugging
-                                    type_desc_value = (idx_row.type_desc or "").upper()
-                                    source_typ = "CLUSTERED" if "CLUSTERED" in type_desc_value else "NONCLUSTERED"
+                                    type_desc_value = (idx_row.type_desc or "").strip().upper()
+                                    source_typ = "CLUSTERED" if type_desc_value == "CLUSTERED" else "NONCLUSTERED"
                                     typ = source_typ  # May be changed below if conflicts detected
                                     
                                     # Check if index already exists in destination FIRST (before clustered check)
@@ -4238,13 +4775,11 @@ After installation, restart this application.
                                         self.validation_log.insert(tk.END, f"    ⚠ Error checking destination: {str(check_err)}, proceeding anyway...\n")
                                         self.validation_log.see(tk.END)
                                     
-                                    # Only check for clustered index conflict if THIS index is clustered
-                                    clustered_conflict = False
+                                    # For exact replication: keep CLUSTERED; do not convert to NONCLUSTERED.
+                                    # If destination has a clustered PK, user must fix PK first (Fix Missing Objects, deploy PK then this index).
                                     if typ == "CLUSTERED":
                                         self.validation_log.insert(tk.END, f"    Checking for clustered index conflicts...\n")
                                         self.validation_log.see(tk.END)
-                                        # Check if ANY clustered index already exists on the destination table
-                                        # (including primary keys and unique constraints which are often clustered)
                                         try:
                                             dest_cur.execute("""
                                                 SELECT i.name, i.is_primary_key, i.is_unique_constraint 
@@ -4255,12 +4790,10 @@ After installation, restart this application.
                                             """, schema, table, index_name)
                                             existing_clustered = dest_cur.fetchone()
                                             if existing_clustered:
-                                                clustered_conflict = True
                                                 existing_name = existing_clustered.name
-                                                # Convert to NONCLUSTERED to work around the conflict
-                                                typ = "NONCLUSTERED"
-                                                self.validation_log.insert(tk.END, f"    ⚠ Table already has clustered index '{existing_name}', converting to NONCLUSTERED\n")
+                                                self.validation_log.insert(tk.END, f"    ⚠ Table already has clustered index '{existing_name}' (e.g. primary key). For exact replication: use Fix Missing Objects and deploy primary key first (recreate as NONCLUSTERED), then deploy this index as CLUSTERED.\n")
                                                 self.validation_log.see(tk.END)
+                                                # Keep typ = CLUSTERED so we generate correct script; deploy may fail until PK is fixed
                                             else:
                                                 self.validation_log.insert(tk.END, f"    ✓ No clustered index conflict\n")
                                                 self.validation_log.see(tk.END)
@@ -4588,8 +5121,8 @@ After installation, restart this application.
                                             unique = "UNIQUE " if idx_row.is_unique else ""
                                             
                                             # Get the actual type_desc value and log it for debugging
-                                            type_desc_value = (idx_row.type_desc or "").upper()
-                                            typ = "CLUSTERED" if "CLUSTERED" in type_desc_value else "NONCLUSTERED"
+                                            type_desc_value = (idx_row.type_desc or "").strip().upper()
+                                            typ = "CLUSTERED" if type_desc_value == "CLUSTERED" else "NONCLUSTERED"
                                             
                                             # Debug: Log the index type from source
                                             self.validation_log.insert(tk.END, f"  Source index type: {idx_row.type_desc} -> {typ}\n")
@@ -4613,21 +5146,20 @@ After installation, restart this application.
                                                 success_count += 1
                                                 continue
                                             
-                                            # Only check for clustered index conflict if THIS index is clustered
+                                            # If this index is CLUSTERED and destination has another clustered (e.g. PK), skip with message for exact replication
                                             if typ == "CLUSTERED":
                                                 dest_cur.execute("""
-                                                    SELECT COUNT(*) FROM sys.indexes i
+                                                    SELECT i.name FROM sys.indexes i
                                                     JOIN sys.tables t ON t.object_id = i.object_id
                                                     JOIN sys.schemas s ON s.schema_id = t.schema_id
                                                     WHERE s.name = ? AND t.name = ? AND i.type_desc = 'CLUSTERED' AND i.name != ?
-                                                      AND i.is_primary_key = 0
-                                                      AND i.is_unique_constraint = 0
                                                 """, schema, table, obj_name_only)
-                                                if dest_cur.fetchone()[0] > 0:
-                                                    self.validation_log.insert(tk.END, f"⚠ Skipping clustered index {obj_name_only} (another clustered index already exists on table): {obj_name}\n")
+                                                existing = dest_cur.fetchone()
+                                                if existing:
+                                                    self.validation_log.insert(tk.END, f"⚠ Skipping: table already has clustered index '{existing.name}'. For exact replication use Fix Missing Objects: deploy primary key first (as NONCLUSTERED), then this index: {obj_name}\n")
                                                     error_count += 1
                                                     continue
-                                            # For nonclustered indexes, proceed with creation
+                                            # For nonclustered indexes (or no conflict), proceed with creation
                                             
                                             # Format column list with proper indentation (matching user's example format)
                                             key_cols_formatted = ',\n\t'.join(key_cols)
