@@ -66,6 +66,7 @@ venv.bak/
 # IDEs
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
 *~
@@ -181,6 +182,11 @@ bundle.zip
 # Application data
 app_data/
 *.setup_complete
+
+# Local backup/restore run outputs (schema backups, restore summaries)
+backups/
+restores/
+**/blob_settings.json
 
 # Temporary files
 *.tmp

@@ -10,6 +10,7 @@ from pathlib import Path
 import threading
 import sys
 import os
+import json
 import pandas as pd
 
 # Add parent directories to path
@@ -116,19 +117,39 @@ class SchemaTab:
         # Store reference for later use
         self.scrollable_frame = scrollable_frame
         
-        # Create notebook for tabs: Comparison and Bulk Processing
+        # Create notebook: Backup | Restore | Bulk (Excel) | Compare
         notebook = ttk.Notebook(scrollable_frame)
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Comparison tab
-        comparison_frame = ttk.Frame(notebook)
-        notebook.add(comparison_frame, text="Schema Comparison")
-        self._create_comparison_widgets(comparison_frame)
+        # 1. Backup sub-tab (step-based, single DB only)
+        backup_frame = ttk.Frame(notebook)
+        notebook.add(backup_frame, text="Backup")
+        self._create_backup_widgets(backup_frame)
         
-        # Bulk Processing tab (preserve existing backup/restore functionality)
+        # 2. Restore sub-tab (step-based, single DB only; preview off by default)
+        restore_frame = ttk.Frame(notebook)
+        notebook.add(restore_frame, text="Restore")
+        self._create_restore_widgets(restore_frame)
+        
+        # 3. Bulk (Excel) sub-tab - one view, bulk backup + bulk restore + one log
         bulk_frame = ttk.Frame(notebook)
-        notebook.add(bulk_frame, text="Bulk Processing (Excel)")
-        self._create_bulk_processing_widgets(bulk_frame)
+        notebook.add(bulk_frame, text="Bulk (Excel)")
+        self._create_bulk_tab_widgets(bulk_frame)
+        
+        # 4. .bak to Blob sub-tab (on-prem full backup to Azure Blob)
+        bak_blob_frame = ttk.Frame(notebook)
+        notebook.add(bak_blob_frame, text=".bak to Blob")
+        self._create_bak_to_blob_widgets(bak_blob_frame)
+        
+        # 5. Restore from Blob sub-tab (restore .bak from Azure Blob to SQL Server)
+        restore_from_blob_frame = ttk.Frame(notebook)
+        notebook.add(restore_from_blob_frame, text="Restore from Blob")
+        self._create_restore_from_blob_widgets(restore_from_blob_frame)
+        
+        # 6. Compare sub-tab (schema comparison)
+        comparison_frame = ttk.Frame(notebook)
+        notebook.add(comparison_frame, text="Compare")
+        self._create_comparison_widgets(comparison_frame)
         
         # Store latest backup path for auto-fill
         self.latest_backup_path = None
@@ -270,21 +291,506 @@ class SchemaTab:
         
         self.generated_script = None
     
-    def _create_bulk_processing_widgets(self, parent):
-        """Create bulk processing widgets (preserve existing backup/restore)."""
-        # Create paned window for side-by-side layout
-        paned = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    def _create_bulk_tab_widgets(self, parent):
+        """Bulk (Excel) tab: load configs, Start Bulk Backup / Start Bulk Restore, one log."""
+        tk.Label(parent, text="Bulk Backup & Restore (Excel)", font=("Arial", 12, "bold")).pack(pady=(0, 10))
         
-        # Backup frame (left side)
-        backup_frame = ttk.Frame(paned)
-        paned.add(backup_frame, weight=1)
-        self._create_backup_widgets(backup_frame)
+        # Load config section
+        load_frame = ttk.LabelFrame(parent, text="Load configuration", padding=10)
+        load_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Restore frame (right side)
-        restore_frame = ttk.Frame(paned)
-        paned.add(restore_frame, weight=1)
-        self._create_restore_widgets(restore_frame)
+        row0 = ttk.Frame(load_frame)
+        row0.pack(fill=tk.X)
+        ttk.Button(row0, text="Download backup template", command=lambda: self._download_template("schema_backup")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row0, text="Upload Excel (backup)", command=self._upload_excel_backup).pack(side=tk.LEFT, padx=5)
+        tk.Label(load_frame, textvariable=self.backup_excel_file_var, fg="gray").pack(anchor=tk.W)
+        
+        row1 = ttk.Frame(load_frame)
+        row1.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(row1, text="Download restore template", command=lambda: self._download_template("schema_restore")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row1, text="Upload Excel (restore)", command=self._upload_excel_restore).pack(side=tk.LEFT, padx=5)
+        tk.Label(load_frame, textvariable=self.restore_excel_file_var, fg="gray").pack(anchor=tk.W)
+        
+        # Backup output folder for bulk backup
+        folder_frame = ttk.LabelFrame(parent, text="Backup output folder (for bulk backup)", padding=10)
+        folder_frame.pack(fill=tk.X, padx=5, pady=5)
+        path_row = ttk.Frame(folder_frame)
+        path_row.pack(fill=tk.X)
+        ttk.Entry(path_row, textvariable=self.backup_output_var, width=50).pack(side=tk.LEFT, padx=5)
+        ttk.Button(path_row, text="Browse...", command=self._browse_backup_output).pack(side=tk.LEFT, padx=5)
+        
+        # Buttons
+        btn_frame = ttk.Frame(parent)
+        btn_frame.pack(pady=10)
+        self.backup_bulk_btn = ttk.Button(btn_frame, text="Start Bulk Backup", command=self._start_bulk_backup, width=20, state=tk.DISABLED)
+        self.backup_bulk_btn.pack(side=tk.LEFT, padx=5)
+        self.restore_bulk_btn = ttk.Button(btn_frame, text="Start Bulk Restore", command=self._start_bulk_restore, width=20, state=tk.DISABLED)
+        self.restore_bulk_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Single log for bulk operations
+        log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.bulk_log = scrolledtext.ScrolledText(log_frame, height=12, wrap=tk.WORD)
+        self.bulk_log.pack(fill=tk.BOTH, expand=True)
+    
+    def _create_bak_to_blob_widgets(self, parent):
+        """On-prem .bak backup to Azure Blob (BACKUP TO URL). Folder: container / db_name / run_id / db_name.bak"""
+        tk.Label(parent, text=".bak Backup to Azure Blob (on-prem → blob)", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        tk.Label(parent, text="Full database backup (including data) to blob. Folder: container / db_name / run_id / db_name.bak",
+                 fg="gray", wraplength=600).pack(anchor=tk.W, pady=(0, 5))
+        tk.Label(parent, text="RoundhouseE: Backup includes all data. To skip RoundhouseE, drop that schema after restore.",
+                 fg="gray", wraplength=600).pack(anchor=tk.W, pady=(0, 10))
+        
+        # When running from source (not frozen exe), show install button so user can install dependency
+        if not getattr(sys, "frozen", False):
+            dep_frame = ttk.Frame(parent)
+            dep_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+            ttk.Button(dep_frame, text="Install azure-storage-blob (required for this tab)", command=self._install_azure_storage_blob).pack(side=tk.LEFT, padx=5)
+        
+        # Step 1: On-prem source
+        step1 = ttk.LabelFrame(parent, text="Step 1: On-prem source database", padding=10)
+        step1.pack(fill=tk.X, padx=5, pady=5)
+        self.bak_server_var = tk.StringVar()
+        self.bak_db_var = tk.StringVar()
+        self.bak_auth_var = tk.StringVar(value="windows")
+        self.bak_user_var = tk.StringVar()
+        self.bak_password_var = tk.StringVar()
+        ConnectionWidget(
+            parent=step1,
+            server_var=self.bak_server_var,
+            db_var=self.bak_db_var,
+            auth_var=self.bak_auth_var,
+            user_var=self.bak_user_var,
+            password_var=self.bak_password_var,
+            label_text="",
+            row_start=0
+        )
+        
+        # Step 2: Blob storage
+        step2 = ttk.LabelFrame(parent, text="Step 2: Azure Blob storage", padding=10)
+        step2.pack(fill=tk.X, padx=5, pady=5)
+        tk.Label(step2, text="Connection string (AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net):").pack(anchor=tk.W)
+        self.bak_blob_conn_var = tk.StringVar()
+        conn_entry = ttk.Entry(step2, textvariable=self.bak_blob_conn_var, width=70)
+        conn_entry.pack(fill=tk.X, pady=2)
+        tk.Label(step2, text="Container name (e.g. db2-stage):").pack(anchor=tk.W, pady=(8, 0))
+        self.bak_container_var = tk.StringVar(value="db2-stage")
+        ttk.Entry(step2, textvariable=self.bak_container_var, width=30).pack(fill=tk.X, pady=2)
+        blob_btn_row = ttk.Frame(step2)
+        blob_btn_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(blob_btn_row, text="Save connection string", command=self._save_bak_blob_settings).pack(side=tk.LEFT, padx=5)
+        self._load_bak_blob_settings()
+        
+        # Buttons
+        btn_frame = ttk.Frame(parent)
+        btn_frame.pack(pady=10)
+        self.bak_to_blob_btn = ttk.Button(btn_frame, text="Start .bak Backup to Blob", command=self._start_bak_to_blob, width=25)
+        self.bak_to_blob_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Log
+        log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.bak_to_blob_log = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
+        self.bak_to_blob_log.pack(fill=tk.BOTH, expand=True)
+    
+    def _get_bak_blob_config_path(self):
+        """Path to saved blob connection string (per-user app data)."""
+        if os.name == "nt":
+            base = os.environ.get("APPDATA", os.path.expanduser("~"))
+            base = Path(base) / "AzureMigrationTool"
+        else:
+            base = Path(os.path.expanduser("~")) / ".azure_migration_tool"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "blob_settings.json"
+    
+    def _load_bak_blob_settings(self):
+        """Load saved blob connection string and container into the form."""
+        try:
+            path = self._get_bak_blob_config_path()
+            if not path.exists():
+                return
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data.get("blob_connection_string"), str):
+                self.bak_blob_conn_var.set(data["blob_connection_string"])
+            if isinstance(data.get("container"), str):
+                self.bak_container_var.set(data["container"])
+        except Exception:
+            pass
+    
+    def _save_bak_blob_settings(self):
+        """Save current blob connection string and container to disk."""
+        try:
+            path = self._get_bak_blob_config_path()
+            data = {
+                "blob_connection_string": self.bak_blob_conn_var.get().strip(),
+                "container": (self.bak_container_var.get() or "db2-stage").strip() or "db2-stage",
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            messagebox.showinfo("Saved", "Blob connection string and container have been saved.\nThey will be loaded next time you open this tab.")
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+    
+    def _install_azure_storage_blob(self):
+        """Install azure-storage-blob using the same Python that runs this app."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "azure-storage-blob"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode == 0:
+                messagebox.showinfo("Installed", "azure-storage-blob was installed successfully.\nYou can run .bak Backup to Blob now.")
+            else:
+                err = (result.stderr or result.stdout or "").strip() or "Unknown error"
+                messagebox.showerror("Install failed", f"pip install failed:\n{err[:500]}")
+        except subprocess.TimeoutExpired:
+            messagebox.showerror("Timeout", "Install timed out. Try running in a terminal:\npip install azure-storage-blob")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not run pip: {e}\n\nRun manually in a terminal:\n  pip install azure-storage-blob")
+    
+    def _start_bak_to_blob(self):
+        """Run .bak backup to Azure Blob (BACKUP TO URL)."""
+        try:
+            from src.backup.bak_to_blob import run_bak_backup_to_blob
+        except ImportError:
+            try:
+                from azure_migration_tool.src.backup.bak_to_blob import run_bak_backup_to_blob
+            except ImportError:
+                run_bak_backup_to_blob = None
+        if not run_bak_backup_to_blob:
+            messagebox.showerror("Error", "Backup to blob module not available. Install: pip install azure-storage-blob")
+            return
+        server = (self.bak_server_var.get() or "").strip()
+        database = (self.bak_db_var.get() or "").strip()
+        if not server or not database:
+            messagebox.showerror("Error", "Server and database are required.")
+            return
+        conn_str = (self.bak_blob_conn_var.get() or "").strip()
+        if not conn_str:
+            messagebox.showerror("Error", "Blob connection string is required.")
+            return
+        container = (self.bak_container_var.get() or "db2-stage").strip()
+        
+        self.bak_to_blob_btn.config(state=tk.DISABLED)
+        self.bak_to_blob_log.delete("1.0", tk.END)
+        
+        def run():
+            def log(msg):
+                self.bak_to_blob_log.insert(tk.END, msg + "\n")
+                self.bak_to_blob_log.see(tk.END)
+            try:
+                summary = run_bak_backup_to_blob(
+                    server=server,
+                    database=database,
+                    auth=self.bak_auth_var.get() or "windows",
+                    user=self.bak_user_var.get() or None,
+                    password=self.bak_password_var.get() or None,
+                    blob_connection_string=conn_str,
+                    container=container,
+                    log_callback=log,
+                )
+                if summary.get("status") == "success":
+                    log(f"Blob path: {summary.get('container')}/{summary.get('blob_path')}")
+                    size_mb = summary.get("blob_size")
+                    size_msg = f" ({size_mb / (1024*1024):.1f} MB)" if size_mb is not None else ""
+                    self.frame.after(0, lambda m=size_msg: messagebox.showinfo("Success", f"Backup to blob completed successfully.{m}"))
+                else:
+                    err = summary.get("error") or "Unknown error"
+                    if "azure-storage-blob" in err.lower():
+                        err = err + "\n\nClick 'Install azure-storage-blob' above, then try again."
+                    self.frame.after(0, lambda msg=err: messagebox.showerror("Backup failed", msg))
+            except Exception as e:
+                log(str(e))
+                msg = str(e)
+                if "azure-storage-blob" in msg.lower():
+                    msg = msg + "\n\nClick 'Install azure-storage-blob' above, then try again."
+                self.frame.after(0, lambda m=msg: messagebox.showerror("Error", m))
+            finally:
+                self.frame.after(0, lambda: self.bak_to_blob_btn.config(state=tk.NORMAL))
+        threading.Thread(target=run, daemon=True).start()
+    
+    def _create_restore_from_blob_widgets(self, parent):
+        """Restore database from Azure Blob (.bak). List backups in container, pick one, restore to target server."""
+        tk.Label(parent, text="Restore from Azure Blob (.bak → SQL Server)", font=("Arial", 12, "bold")).pack(pady=(0, 5))
+        tk.Label(parent, text="Pick the database (backed-up name), then list backups for that DB only. Select one and restore to target server.",
+                 fg="gray", wraplength=600).pack(anchor=tk.W, pady=(0, 10))
+        
+        if not getattr(sys, "frozen", False):
+            dep_frame = ttk.Frame(parent)
+            dep_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+            ttk.Button(dep_frame, text="Install azure-storage-blob (required)", command=self._install_azure_storage_blob).pack(side=tk.LEFT, padx=5)
+        
+        # Step 1: Blob storage (reuse same settings as .bak to Blob)
+        step1 = ttk.LabelFrame(parent, text="Step 1: Azure Blob storage", padding=10)
+        step1.pack(fill=tk.X, padx=5, pady=5)
+        tk.Label(step1, text="Connection string (same as .bak to Blob; load/save shared):").pack(anchor=tk.W)
+        self.restore_blob_conn_var = tk.StringVar()
+        ttk.Entry(step1, textvariable=self.restore_blob_conn_var, width=70).pack(fill=tk.X, pady=2)
+        tk.Label(step1, text="Container name (e.g. db2-stage):").pack(anchor=tk.W, pady=(8, 0))
+        self.restore_container_var = tk.StringVar(value="db2-stage")
+        ttk.Entry(step1, textvariable=self.restore_container_var, width=30).pack(fill=tk.X, pady=2)
+        blob_btn_row = ttk.Frame(step1)
+        blob_btn_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(blob_btn_row, text="Save connection string", command=self._save_restore_blob_settings).pack(side=tk.LEFT, padx=5)
+        self._load_restore_blob_settings()
+        
+        # Database filter: path is DbName/run_id/DbName.bak — filter by DbName so we only list relevant backups
+        tk.Label(step1, text="Database to restore (backed-up name, e.g. SentimentAnalysis_QA):").pack(anchor=tk.W, pady=(12, 0))
+        db_filter_row = ttk.Frame(step1)
+        db_filter_row.pack(fill=tk.X, pady=2)
+        self.restore_db_filter_var = tk.StringVar()
+        self.restore_db_filter_combo = ttk.Combobox(db_filter_row, textvariable=self.restore_db_filter_var, width=40)
+        self.restore_db_filter_combo.pack(side=tk.LEFT, padx=(0, 5))
+        self.restore_db_filter_combo.bind("<<ComboboxSelected>>", self._on_restore_db_filter_selected)
+        ttk.Button(db_filter_row, text="List databases", command=self._list_restore_databases).pack(side=tk.LEFT, padx=2)
+        tk.Label(step1, text="(Lists top-level folders in container; pick one to see only that database's backups.)", fg="gray").pack(anchor=tk.W, pady=(0, 4))
+        
+        # List backups: only .bak under the chosen database folder (DbName/run_id/DbName.bak)
+        tk.Label(step1, text="Backups for this database (pick one):").pack(anchor=tk.W, pady=(8, 0))
+        list_frame = ttk.Frame(step1)
+        list_frame.pack(fill=tk.X, pady=2)
+        self.restore_backups_listbox = tk.Listbox(list_frame, height=6, width=70, selectmode=tk.SINGLE)
+        scroll_list = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.restore_backups_listbox.yview)
+        self.restore_backups_listbox.configure(yscrollcommand=scroll_list.set)
+        self.restore_backups_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll_list.pack(side=tk.RIGHT, fill=tk.Y)
+        self.restore_backups_listbox.bind("<<ListboxSelect>>", self._on_restore_backup_selected)
+        btn_list_frame = ttk.Frame(step1)
+        btn_list_frame.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(btn_list_frame, text="List backups", command=self._list_restore_backups).pack(side=tk.LEFT, padx=5)
+        self.restore_blob_path_var = tk.StringVar()
+        tk.Label(step1, textvariable=self.restore_blob_path_var, fg="gray").pack(anchor=tk.W, pady=(2, 0))
+        
+        # Step 2: Target SQL Server
+        step2 = ttk.LabelFrame(parent, text="Step 2: Target SQL Server", padding=10)
+        step2.pack(fill=tk.X, padx=5, pady=5)
+        self.restore_server_var = tk.StringVar()
+        self.restore_db_var = tk.StringVar()
+        self.restore_auth_var = tk.StringVar(value="windows")
+        self.restore_user_var = tk.StringVar()
+        self.restore_password_var = tk.StringVar()
+        self.restore_managed_instance_var = tk.BooleanVar(value=False)
+        ConnectionWidget(
+            parent=step2,
+            server_var=self.restore_server_var,
+            db_var=self.restore_db_var,
+            auth_var=self.restore_auth_var,
+            user_var=self.restore_user_var,
+            password_var=self.restore_password_var,
+            label_text="Target database (auto-filled from selection; created if not present, replaced if present):",
+            row_start=0,
+        )
+        ttk.Checkbutton(
+            step2,
+            text="Target is Azure SQL Managed Instance (use RESTORE without REPLACE/STATS)",
+            variable=self.restore_managed_instance_var,
+        ).grid(row=8, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 0))
+        
+        # Buttons and log
+        btn_frame = ttk.Frame(parent)
+        btn_frame.pack(pady=10)
+        self.restore_from_blob_btn = ttk.Button(btn_frame, text="Start Restore from Blob", command=self._start_restore_from_blob, width=25)
+        self.restore_from_blob_btn.pack(side=tk.LEFT, padx=5)
+        
+        log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.restore_from_blob_log = scrolledtext.ScrolledText(log_frame, height=8, wrap=tk.WORD)
+        self.restore_from_blob_log.pack(fill=tk.BOTH, expand=True)
+    
+    def _load_restore_blob_settings(self):
+        """Load blob connection string and container into restore fields (same file as .bak to Blob)."""
+        try:
+            path = self._get_bak_blob_config_path()
+            if not path.exists():
+                return
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data.get("blob_connection_string"), str):
+                self.restore_blob_conn_var.set(data["blob_connection_string"])
+            if isinstance(data.get("container"), str):
+                self.restore_container_var.set(data["container"])
+        except Exception:
+            pass
+    
+    def _save_restore_blob_settings(self):
+        """Save restore blob connection string and container (same file as .bak to Blob)."""
+        try:
+            path = self._get_bak_blob_config_path()
+            data = {
+                "blob_connection_string": self.restore_blob_conn_var.get().strip(),
+                "container": (self.restore_container_var.get() or "db2-stage").strip() or "db2-stage",
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            messagebox.showinfo("Saved", "Blob connection string and container have been saved.")
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+    
+    def _on_restore_db_filter_selected(self, event=None):
+        """Sync target database to the selected backup database name (correct config for that DB)."""
+        db = (self.restore_db_filter_var.get() or "").strip()
+        if db and not db.startswith("(") and db != "Listing...":
+            self.restore_db_var.set(db)
+
+    def _on_restore_backup_selected(self, event):
+        """Set blob path when user selects a backup from the list; keep target DB in sync with backup DB."""
+        sel = self.restore_backups_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        items = self.restore_backups_listbox.get(0, tk.END)
+        if idx < len(items):
+            path = items[idx]
+            self.restore_blob_path_var.set(path)
+            # Target database = backup DB (first segment: DbName/run_id/DbName.bak) for correct config
+            if "/" in path:
+                self.restore_db_var.set(path.split("/", 1)[0])
+    
+    def _list_restore_databases(self):
+        """Discover top-level folder names in container (DbName in DbName/run_id/DbName.bak) and populate combobox."""
+        conn_str = (self.restore_blob_conn_var.get() or "").strip()
+        container = (self.restore_container_var.get() or "db2-stage").strip()
+        if not conn_str:
+            messagebox.showerror("Error", "Enter blob connection string first.")
+            return
+        self.restore_db_filter_var.set("Listing...")
+        
+        def run():
+            try:
+                from azure.storage.blob import BlobServiceClient
+                client = BlobServiceClient.from_connection_string(conn_str)
+                container_client = client.get_container_client(container)
+                # Top-level folder = first path segment (e.g. SentimentAnalysis_QA from SentimentAnalysis_QA/20260210_121730/...)
+                seen = set()
+                for b in container_client.list_blobs(name_starts_with=None):
+                    if "/" in b.name:
+                        top = b.name.split("/", 1)[0]
+                        if top and top not in seen:
+                            seen.add(top)
+                names = sorted(seen)
+                self.frame.after(0, lambda: self._populate_restore_databases_combo(names))
+            except Exception as e:
+                self.frame.after(0, lambda: self._populate_restore_databases_combo([], str(e)))
+        threading.Thread(target=run, daemon=True).start()
+    
+    def _populate_restore_databases_combo(self, names, error=None):
+        """Update database filter combobox and sync target database (called on UI thread)."""
+        if error:
+            self.restore_db_filter_var.set("")
+            self.restore_db_filter_combo["values"] = []
+            messagebox.showerror("List databases failed", error)
+            return
+        self.restore_db_filter_combo["values"] = names
+        if names:
+            self.restore_db_filter_var.set(names[0])
+            self.restore_db_var.set(names[0])  # target database = selected backup DB (correct config)
+        else:
+            self.restore_db_filter_var.set("(no folders found)")
+    
+    def _list_restore_backups(self):
+        """List .bak blobs under the chosen database folder only (DbName/run_id/DbName.bak)."""
+        conn_str = (self.restore_blob_conn_var.get() or "").strip()
+        container = (self.restore_container_var.get() or "db2-stage").strip()
+        db_name = (self.restore_db_filter_var.get() or "").strip()
+        if not conn_str:
+            messagebox.showerror("Error", "Enter blob connection string first.")
+            return
+        if not db_name or db_name.startswith("(") or db_name == "Listing...":
+            messagebox.showerror("Error", "Choose a database first: click 'List databases' and pick one (or type the backed-up DB name).")
+            return
+        self.restore_backups_listbox.delete(0, tk.END)
+        self.restore_backups_listbox.insert(tk.END, "Listing...")
+        prefix = db_name.strip().rstrip("/") + "/"
+        
+        def run():
+            try:
+                from azure.storage.blob import BlobServiceClient
+                client = BlobServiceClient.from_connection_string(conn_str)
+                container_client = client.get_container_client(container)
+                names = [b.name for b in container_client.list_blobs(name_starts_with=prefix) if b.name.endswith(".bak")]
+                names.sort(reverse=True)  # newest first (run_id in path)
+                self.frame.after(0, lambda: self._populate_restore_backups_list(names))
+            except Exception as e:
+                self.frame.after(0, lambda: self._populate_restore_backups_list([], str(e)))
+        threading.Thread(target=run, daemon=True).start()
+    
+    def _populate_restore_backups_list(self, names, error=None):
+        """Update listbox with backup names (called on UI thread)."""
+        self.restore_backups_listbox.delete(0, tk.END)
+        if error:
+            self.restore_backups_listbox.insert(tk.END, f"Error: {error}")
+            return
+        if not names:
+            self.restore_backups_listbox.insert(tk.END, "(no .bak files found)")
+            return
+        for n in names:
+            self.restore_backups_listbox.insert(tk.END, n)
+    
+    def _start_restore_from_blob(self):
+        """Run RESTORE DATABASE FROM URL (Azure Blob)."""
+        try:
+            from src.restore.restore_from_blob import run_restore_from_blob
+        except ImportError:
+            try:
+                from azure_migration_tool.src.restore.restore_from_blob import run_restore_from_blob
+            except ImportError:
+                run_restore_from_blob = None
+        if not run_restore_from_blob:
+            messagebox.showerror("Error", "Restore module not available. Install: pip install azure-storage-blob")
+            return
+        blob_path = (self.restore_blob_path_var.get() or "").strip()
+        if not blob_path or blob_path.startswith("(") or blob_path.startswith("Error"):
+            messagebox.showerror("Error", "Select a backup from the list (click 'List backups' then select a .bak).")
+            return
+        conn_str = (self.restore_blob_conn_var.get() or "").strip()
+        container = (self.restore_container_var.get() or "db2-stage").strip()
+        server = (self.restore_server_var.get() or "").strip()
+        database = (self.restore_db_var.get() or "").strip()
+        if not conn_str or not server or not database:
+            messagebox.showerror("Error", "Blob connection string, target server, and target database are required.")
+            return
+        
+        self.restore_from_blob_btn.config(state=tk.DISABLED)
+        self.restore_from_blob_log.delete("1.0", tk.END)
+        
+        def log(msg):
+            self.frame.after(0, lambda: self.restore_from_blob_log.insert(tk.END, msg + "\n"))
+            self.frame.after(0, lambda: self.restore_from_blob_log.see(tk.END))
+        
+        def run():
+            try:
+                summary = run_restore_from_blob(
+                    server=server,
+                    database=database,
+                    auth=self.restore_auth_var.get() or "windows",
+                    user=self.restore_user_var.get() or None,
+                    password=self.restore_password_var.get() or None,
+                    blob_connection_string=conn_str,
+                    container=container,
+                    blob_path=blob_path,
+                    log_callback=log,
+                    target_managed_instance=self.restore_managed_instance_var.get(),
+                )
+                if summary.get("status") == "success":
+                    self.frame.after(0, lambda: messagebox.showinfo("Success", "Restore from blob completed successfully."))
+                else:
+                    err = summary.get("error") or "Unknown error"
+                    if "azure-storage-blob" in err.lower():
+                        err = err + "\n\nClick 'Install azure-storage-blob' above, then try again."
+                    self.frame.after(0, lambda msg=err: messagebox.showerror("Restore failed", msg))
+            except Exception as e:
+                log(str(e))
+                msg = str(e)
+                if "azure-storage-blob" in msg.lower():
+                    msg = msg + "\n\nClick 'Install azure-storage-blob' above, then try again."
+                self.frame.after(0, lambda m=msg: messagebox.showerror("Error", m))
+            finally:
+                self.frame.after(0, lambda: self.restore_from_blob_btn.config(state=tk.NORMAL))
+        threading.Thread(target=run, daemon=True).start()
     
     def _connect_source(self):
         """Connect to source database."""
@@ -760,23 +1266,19 @@ class SchemaTab:
         threading.Thread(target=execute, daemon=True).start()
     
     def _create_backup_widgets(self, parent):
-        """Create backup widgets."""
-        # Section title
-        title_label = tk.Label(parent, text="Backup Schema from Source", font=("Arial", 12, "bold"))
-        title_label.pack(pady=(0, 10))
+        """Backup sub-tab: Step 1 Source, Step 2 What to backup, Step 3 Where to save, Start Backup, Log."""
+        tk.Label(parent, text="Schema Backup", font=("Arial", 12, "bold")).pack(pady=(0, 10))
         
-        # Connection frame
-        conn_frame = ttk.LabelFrame(parent, text="Source Database Connection", padding=10)
+        # Step 1: Source database
+        conn_frame = ttk.LabelFrame(parent, text="Step 1: Source database", padding=10)
         conn_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Create StringVars for connection widget
         self.backup_server_var = tk.StringVar()
         self.backup_db_var = tk.StringVar()
         self.backup_auth_var = tk.StringVar(value="entra_mfa")
         self.backup_user_var = tk.StringVar()
         self.backup_password_var = tk.StringVar()
         
-        # Use ConnectionWidget for consistent UI with other tabs
         self.backup_connection_widget = ConnectionWidget(
             parent=conn_frame,
             server_var=self.backup_server_var,
@@ -788,104 +1290,69 @@ class SchemaTab:
             row_start=0
         )
         
-        # Options frame
-        options_frame = ttk.LabelFrame(parent, text="Backup Options", padding=10)
+        # Step 2: What to backup
+        options_frame = ttk.LabelFrame(parent, text="Step 2: What to backup", padding=10)
         options_frame.pack(fill=tk.X, padx=5, pady=5)
         
         self.backup_tables_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="Backup Tables", variable=self.backup_tables_var).pack(anchor=tk.W)
-        
+        ttk.Checkbutton(options_frame, text="Tables", variable=self.backup_tables_var).pack(anchor=tk.W)
         self.backup_programmables_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="Backup Programmables (Views, Procedures, Functions)", 
-                       variable=self.backup_programmables_var).pack(anchor=tk.W)
-        
+        ttk.Checkbutton(options_frame, text="Programmables (Views, Procedures, Functions)", variable=self.backup_programmables_var).pack(anchor=tk.W)
         self.backup_constraints_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="Backup Constraints (Foreign Keys, Check Constraints)", 
-                       variable=self.backup_constraints_var).pack(anchor=tk.W)
-        
+        ttk.Checkbutton(options_frame, text="Constraints (Foreign Keys, Check)", variable=self.backup_constraints_var).pack(anchor=tk.W)
         self.backup_indexes_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="Backup Indexes", variable=self.backup_indexes_var).pack(anchor=tk.W)
+        ttk.Checkbutton(options_frame, text="Indexes", variable=self.backup_indexes_var).pack(anchor=tk.W)
         
-        # Output folder
-        tk.Label(options_frame, text="Output Folder:").pack(anchor=tk.W, pady=5)
-        output_frame = ttk.Frame(options_frame)
-        output_frame.pack(fill=tk.X, pady=5)
-        
+        # Step 3: Where to save
+        out_frame = ttk.LabelFrame(parent, text="Step 3: Where to save", padding=10)
+        out_frame.pack(fill=tk.X, padx=5, pady=5)
         self.backup_output_var = tk.StringVar()
-        ttk.Entry(output_frame, textvariable=self.backup_output_var, width=40).pack(side=tk.LEFT, padx=5)
-        ttk.Button(output_frame, text="Browse...", command=self._browse_backup_output).pack(side=tk.LEFT, padx=5)
-        
-        # Excel support frame
-        excel_frame = ttk.LabelFrame(parent, text="Bulk Processing (Excel)", padding=10)
-        excel_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        excel_btn_frame = ttk.Frame(excel_frame)
-        excel_btn_frame.pack(fill=tk.X)
-        
-        ttk.Button(excel_btn_frame, text="📥 Download Sample Template", 
-                  command=lambda: self._download_template("schema_backup")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(excel_btn_frame, text="📤 Upload Excel File", 
-                  command=self._upload_excel_backup).pack(side=tk.LEFT, padx=5)
+        output_row = ttk.Frame(out_frame)
+        output_row.pack(fill=tk.X)
+        ttk.Entry(output_row, textvariable=self.backup_output_var, width=50).pack(side=tk.LEFT, padx=5)
+        ttk.Button(output_row, text="Browse...", command=self._browse_backup_output).pack(side=tk.LEFT, padx=5)
+        tk.Label(out_frame, text="(Leave empty to use project folder / backups)", fg="gray").pack(anchor=tk.W)
         
         self.backup_excel_file_var = tk.StringVar()
-        tk.Label(excel_frame, textvariable=self.backup_excel_file_var, fg="gray").pack(anchor=tk.W, pady=5)
-        
         self.backup_configs = []
         
-        # Buttons
+        # Start Backup
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(pady=10)
-        
         self.backup_btn = ttk.Button(btn_frame, text="Start Backup", command=self._start_backup, width=20)
         self.backup_btn.pack(side=tk.LEFT, padx=5)
         
-        self.backup_bulk_btn = ttk.Button(btn_frame, text="Start Bulk Backup", command=self._start_bulk_backup, 
-                                          width=20, state=tk.DISABLED)
-        self.backup_bulk_btn.pack(side=tk.LEFT, padx=5)
-        
-        # Log output
-        log_frame = ttk.LabelFrame(parent, text="Backup Log", padding=10)
+        # Log
+        log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
         self.backup_log = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
         self.backup_log.pack(fill=tk.BOTH, expand=True)
         
     def _create_restore_widgets(self, parent):
-        """Create restore widgets."""
-        # Section title
-        title_label = tk.Label(parent, text="Restore Schema to Destination", font=("Arial", 12, "bold"))
-        title_label.pack(pady=(0, 10))
+        """Restore sub-tab: Step 1 Backup path, Step 2 Destination, Step 3 Options (preview off by default), Start Restore, Log."""
+        tk.Label(parent, text="Schema Restore", font=("Arial", 12, "bold")).pack(pady=(0, 10))
         
-        # Info label
-        info_label = tk.Label(parent, 
-                            text="💡 Tip: After backup completes, the backup path will be auto-filled.",
-                            font=("Arial", 9), fg="blue", wraplength=300)
-        info_label.pack(anchor=tk.W, pady=(0, 5))
-        
-        # Backup path frame
-        backup_path_frame = ttk.LabelFrame(parent, text="Backup Path", padding=10)
+        # Step 1: Backup to restore
+        backup_path_frame = ttk.LabelFrame(parent, text="Step 1: Backup to restore", padding=10)
         backup_path_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        tk.Label(backup_path_frame, text="Backup Folder:").pack(anchor=tk.W)
+        tk.Label(backup_path_frame, text="Backup folder (run folder from a completed backup):").pack(anchor=tk.W)
         path_frame = ttk.Frame(backup_path_frame)
         path_frame.pack(fill=tk.X, pady=5)
-        
         self.restore_backup_path_var = tk.StringVar()
-        ttk.Entry(path_frame, textvariable=self.restore_backup_path_var, width=40).pack(side=tk.LEFT, padx=5)
+        ttk.Entry(path_frame, textvariable=self.restore_backup_path_var, width=50).pack(side=tk.LEFT, padx=5)
         ttk.Button(path_frame, text="Browse...", command=self._browse_restore_backup).pack(side=tk.LEFT, padx=5)
+        tk.Label(backup_path_frame, text="Tip: Use the path shown in Backup log after a successful run.", fg="gray").pack(anchor=tk.W)
         
-        # Destination frame
-        dest_frame = ttk.LabelFrame(parent, text="Destination Database Connection", padding=10)
+        # Step 2: Destination database
+        dest_frame = ttk.LabelFrame(parent, text="Step 2: Destination database", padding=10)
         dest_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Create StringVars for connection widget
         self.restore_server_var = tk.StringVar()
         self.restore_db_var = tk.StringVar()
         self.restore_auth_var = tk.StringVar(value="entra_mfa")
         self.restore_user_var = tk.StringVar()
         self.restore_password_var = tk.StringVar()
         
-        # Use ConnectionWidget for consistent UI with other tabs
         self.restore_connection_widget = ConnectionWidget(
             parent=dest_frame,
             server_var=self.restore_server_var,
@@ -897,61 +1364,36 @@ class SchemaTab:
             row_start=0
         )
         
-        # Restore options
-        restore_options_frame = ttk.LabelFrame(parent, text="Restore Options", padding=10)
+        # Step 3: What to restore + options
+        restore_options_frame = ttk.LabelFrame(parent, text="Step 3: What to restore", padding=10)
         restore_options_frame.pack(fill=tk.X, padx=5, pady=5)
         
         self.restore_tables_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Restore Tables", variable=self.restore_tables_var).pack(anchor=tk.W)
-        
+        ttk.Checkbutton(restore_options_frame, text="Tables", variable=self.restore_tables_var).pack(anchor=tk.W)
         self.restore_programmables_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Restore Programmables", 
-                       variable=self.restore_programmables_var).pack(anchor=tk.W)
-        
+        ttk.Checkbutton(restore_options_frame, text="Programmables", variable=self.restore_programmables_var).pack(anchor=tk.W)
         self.restore_constraints_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Restore Constraints", 
-                       variable=self.restore_constraints_var).pack(anchor=tk.W)
-        
+        ttk.Checkbutton(restore_options_frame, text="Constraints", variable=self.restore_constraints_var).pack(anchor=tk.W)
         self.restore_indexes_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Restore Indexes", 
-                       variable=self.restore_indexes_var).pack(anchor=tk.W)
-        
+        ttk.Checkbutton(restore_options_frame, text="Indexes", variable=self.restore_indexes_var).pack(anchor=tk.W)
         self.restore_continue_on_error_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Continue on Error", 
-                       variable=self.restore_continue_on_error_var).pack(anchor=tk.W)
-        
-        # Excel support frame
-        excel_frame = ttk.LabelFrame(parent, text="Bulk Processing (Excel)", padding=10)
-        excel_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        excel_btn_frame = ttk.Frame(excel_frame)
-        excel_btn_frame.pack(fill=tk.X)
-        
-        ttk.Button(excel_btn_frame, text="📥 Download Sample Template", 
-                  command=lambda: self._download_template("schema_restore")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(excel_btn_frame, text="📤 Upload Excel File", 
-                  command=self._upload_excel_restore).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(restore_options_frame, text="Continue on error (recommended)", variable=self.restore_continue_on_error_var).pack(anchor=tk.W)
+        self.restore_show_preview_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(restore_options_frame, text="Show preview before each batch (FKs, indexes, etc.) — for debugging", 
+                       variable=self.restore_show_preview_var).pack(anchor=tk.W)
         
         self.restore_excel_file_var = tk.StringVar()
-        tk.Label(excel_frame, textvariable=self.restore_excel_file_var, fg="gray").pack(anchor=tk.W, pady=5)
-        
         self.restore_configs = []
         
-        # Buttons
+        # Start Restore
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(pady=10)
-        
         self.restore_btn = ttk.Button(btn_frame, text="Start Restore", command=self._start_restore, width=20)
         self.restore_btn.pack(side=tk.LEFT, padx=5)
         
-        self.restore_bulk_btn = ttk.Button(btn_frame, text="Start Bulk Restore", command=self._start_bulk_restore, 
-                                           width=20, state=tk.DISABLED)
-        self.restore_bulk_btn.pack(side=tk.LEFT, padx=5)
-        
-        # Log output
-        log_frame = ttk.LabelFrame(parent, text="Restore Log", padding=10)
+        # Log
+        log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
         self.restore_log = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
         self.restore_log.pack(fill=tk.BOTH, expand=True)
         
@@ -1017,11 +1459,10 @@ class SchemaTab:
                     database = summary.get('database', '')
                     
                     if run_id and server and database:
-                        # Create short slugs for server and database
                         try:
                             from src.utils.paths import short_slug
                         except ImportError:
-                            from src.utils.paths import short_slug
+                            from utils.paths import short_slug
                         server_slug = short_slug(server)
                         db_slug = short_slug(database)
                         backup_path = str(Path(backup_root) / server_slug / db_slug / "runs" / run_id)
@@ -1029,20 +1470,19 @@ class SchemaTab:
                         self.latest_backup_path = backup_path
                         # Update restore backup path field
                         self.restore_backup_path_var.set(backup_path)
-                        self.backup_log.insert(tk.END, f"\n💡 Backup path auto-filled in Step 2 (Restore) below!\n")
+                        self.backup_log.insert(tk.END, f"\n💡 Backup path auto-filled in the Restore tab.\n")
                         self.backup_log.insert(tk.END, f"   Path: {backup_path}\n")
                     
-                    messagebox.showinfo("Success", "Backup completed successfully!\n\nYou can now proceed to Step 2: Restore below.")
+                    self.frame.after(0, lambda: messagebox.showinfo("Success", "Backup completed successfully!\n\nSwitch to the Restore tab to restore to a destination."))
                 else:
                     self.backup_log.insert(tk.END, f"\n✗ Backup failed!\n")
                     self.backup_log.insert(tk.END, f"Errors: {summary.get('errors', [])}\n")
-                    messagebox.showerror("Error", "Backup failed! Check log for details.")
-                    
+                    self.frame.after(0, lambda: messagebox.showerror("Error", "Backup failed! Check log for details."))
             except Exception as e:
                 self.backup_log.insert(tk.END, f"\n✗ Error: {str(e)}\n")
-                messagebox.showerror("Error", f"Backup failed: {str(e)}")
+                self.frame.after(0, lambda msg=str(e): messagebox.showerror("Error", f"Backup failed: {msg}"))
             finally:
-                self.backup_btn.config(state=tk.NORMAL)
+                self.frame.after(0, lambda: self.backup_btn.config(state=tk.NORMAL))
                 
         threading.Thread(target=run_backup, daemon=True).start()
         
@@ -1069,12 +1509,13 @@ class SchemaTab:
         
         def run_restore():
             try:
-                # Import preview dialog (only for GUI mode, not bulk/Excel)
-                try:
-                    from gui.dialogs.restore_preview_dialog import create_preview_callback
-                    preview_callback = create_preview_callback(self.frame.winfo_toplevel())
-                except ImportError:
-                    preview_callback = None  # Not available, skip preview
+                preview_callback = None
+                if self.restore_show_preview_var.get():
+                    try:
+                        from gui.dialogs.restore_preview_dialog import create_preview_callback
+                        preview_callback = create_preview_callback(self.frame.winfo_toplevel())
+                    except ImportError:
+                        pass
                 
                 cfg = {
                     "backup_path": self.restore_backup_path_var.get(),
@@ -1089,27 +1530,42 @@ class SchemaTab:
                     "restore_indexes": self.restore_indexes_var.get(),
                     "continue_on_error": self.restore_continue_on_error_var.get(),
                     "dry_run": False,
-                    "preview_callback": preview_callback  # Add preview callback for GUI mode
+                    "preview_callback": preview_callback,
                 }
                 
-                self.restore_log.insert(tk.END, f"Restoring to {cfg['dest_server']}...\n")
-                self.restore_log.see(tk.END)
+                def log(msg):
+                    self.restore_log.insert(tk.END, msg)
+                    self.restore_log.see(tk.END)
+                
+                log(f"Restoring to {cfg['dest_server']} / {cfg['dest_db']}...\n")
                 
                 summary = restore_schema.run_restore(cfg)
                 
+                # Append per-type summary if available
+                stats = summary.get("statistics") or {}
+                if stats:
+                    log("\n--- Summary ---\n")
+                    log(f"  Batches executed: {stats.get('batches_executed', 0)}\n")
+                    log(f"  Already existed (skipped): {stats.get('batches_already_existed', 0)}\n")
+                    log(f"  Failed: {stats.get('batches_failed', 0)}\n")
+                    log(f"  Other skips: {stats.get('batches_skipped', 0) - stats.get('batches_already_existed', 0)}\n")
+                
                 if summary["status"] == "success":
-                    self.restore_log.insert(tk.END, f"\n✓ Restore completed successfully!\n")
-                    messagebox.showinfo("Success", "Restore completed successfully!")
+                    log("\n✓ Restore completed successfully!\n")
+                    self.frame.after(0, lambda: messagebox.showinfo("Success", "Restore completed successfully!"))
                 else:
-                    self.restore_log.insert(tk.END, f"\n✗ Restore completed with errors!\n")
-                    self.restore_log.insert(tk.END, f"Errors: {summary.get('errors', [])}\n")
-                    messagebox.showwarning("Warning", "Restore completed with errors! Check log for details.")
-                    
+                    log("\n✗ Restore completed with errors.\n")
+                    for err in (summary.get("errors") or [])[:20]:
+                        log(f"  {err}\n")
+                    if len(summary.get("errors") or []) > 20:
+                        log(f"  ... and {len(summary['errors']) - 20} more\n")
+                    self.frame.after(0, lambda: messagebox.showwarning("Warning", "Restore completed with errors. Check log for details."))
             except Exception as e:
                 self.restore_log.insert(tk.END, f"\n✗ Error: {str(e)}\n")
-                messagebox.showerror("Error", f"Restore failed: {str(e)}")
+                self.restore_log.see(tk.END)
+                self.frame.after(0, lambda msg=str(e): messagebox.showerror("Error", f"Restore failed: {msg}"))
             finally:
-                self.restore_btn.config(state=tk.NORMAL)
+                self.frame.after(0, lambda: self.restore_btn.config(state=tk.NORMAL))
                 
         threading.Thread(target=run_restore, daemon=True).start()
         
@@ -1169,30 +1625,30 @@ class SchemaTab:
             messagebox.showerror("Error", f"Failed to read Excel file: {str(e)}")
             
     def _start_bulk_backup(self):
-        """Start bulk backup from Excel configurations."""
+        """Start bulk backup from Excel configurations (uses Bulk tab log)."""
         if not self.backup_configs:
-            messagebox.showwarning("Warning", "No configurations loaded! Please upload an Excel file first.")
+            messagebox.showwarning("Warning", "No configurations loaded! Upload an Excel file in the Bulk (Excel) tab first.")
             return
-            
         if not sechma_backup:
             messagebox.showerror("Error", "Schema backup module not available!")
             return
-            
+        
         self.backup_bulk_btn.config(state=tk.DISABLED)
-        self.backup_log.delete("1.0", tk.END)
-        self.backup_log.insert(tk.END, f"Starting bulk backup for {len(self.backup_configs)} configuration(s)...\n")
+        log_widget = getattr(self, "bulk_log", self.backup_log)
+        log_widget.delete("1.0", tk.END)
+        log_widget.insert(tk.END, f"Starting bulk backup for {len(self.backup_configs)} configuration(s)...\n")
+        log_widget.see(tk.END)
         
         def run_bulk_backup():
             success_count = 0
             fail_count = 0
-            
             for idx, cfg in enumerate(self.backup_configs, 1):
-                self.backup_log.insert(tk.END, f"\n[{idx}/{len(self.backup_configs)}] Processing {cfg.get('src_server')}/{cfg.get('src_db')}...\n")
-                self.backup_log.see(tk.END)
-                
+                def log(msg):
+                    log_widget.insert(tk.END, msg)
+                    log_widget.see(tk.END)
+                log(f"\n[{idx}/{len(self.backup_configs)}] {cfg.get('src_server')}/{cfg.get('src_db')}...\n")
                 try:
                     backup_root = self.backup_output_var.get() or (self.project_path / "backups" if self.project_path else "backups")
-                    
                     backup_cfg = {
                         "server": cfg.get("src_server"),
                         "database": cfg.get("src_db"),
@@ -1203,48 +1659,44 @@ class SchemaTab:
                         "log_table_sample": 20,
                         "export_defaults_separately": True
                     }
-                    
                     summary = sechma_backup.run_backup(backup_cfg)
-                    
                     if summary["status"] == "success":
-                        self.backup_log.insert(tk.END, f"✓ Success: {cfg.get('src_db')}\n")
+                        log(f"✓ {cfg.get('src_db')}\n")
                         success_count += 1
                     else:
-                        self.backup_log.insert(tk.END, f"✗ Failed: {cfg.get('src_db')} - {summary.get('errors', [])}\n")
+                        log(f"✗ {cfg.get('src_db')}: {summary.get('errors', [])}\n")
                         fail_count += 1
                 except Exception as e:
-                    self.backup_log.insert(tk.END, f"✗ Error: {cfg.get('src_db')} - {str(e)}\n")
+                    log(f"✗ {cfg.get('src_db')}: {str(e)}\n")
                     fail_count += 1
-                    
-            self.backup_log.insert(tk.END, f"\n{'='*60}\n")
-            self.backup_log.insert(tk.END, f"Bulk backup completed: {success_count} succeeded, {fail_count} failed\n")
-            messagebox.showinfo("Bulk Backup Complete", f"Completed: {success_count} succeeded, {fail_count} failed")
-            self.backup_bulk_btn.config(state=tk.NORMAL)
-            
+            log(f"\n{'='*60}\nBulk backup: {success_count} succeeded, {fail_count} failed\n")
+            self.frame.after(0, lambda: messagebox.showinfo("Bulk Backup Complete", f"Completed: {success_count} succeeded, {fail_count} failed"))
+            self.frame.after(0, lambda: self.backup_bulk_btn.config(state=tk.NORMAL))
         threading.Thread(target=run_bulk_backup, daemon=True).start()
         
     def _start_bulk_restore(self):
-        """Start bulk restore from Excel configurations."""
+        """Start bulk restore from Excel configurations (uses Bulk tab log; no preview)."""
         if not self.restore_configs:
-            messagebox.showwarning("Warning", "No configurations loaded! Please upload an Excel file first.")
+            messagebox.showwarning("Warning", "No configurations loaded! Upload an Excel file in the Bulk (Excel) tab first.")
             return
-            
         if not restore_schema:
             messagebox.showerror("Error", "Schema restore module not available!")
             return
-            
+        
         self.restore_bulk_btn.config(state=tk.DISABLED)
-        self.restore_log.delete("1.0", tk.END)
-        self.restore_log.insert(tk.END, f"Starting bulk restore for {len(self.restore_configs)} configuration(s)...\n")
+        log_widget = getattr(self, "bulk_log", self.restore_log)
+        log_widget.delete("1.0", tk.END)
+        log_widget.insert(tk.END, f"Starting bulk restore for {len(self.restore_configs)} configuration(s)...\n")
+        log_widget.see(tk.END)
         
         def run_bulk_restore():
             success_count = 0
             fail_count = 0
-            
             for idx, cfg in enumerate(self.restore_configs, 1):
-                self.restore_log.insert(tk.END, f"\n[{idx}/{len(self.restore_configs)}] Processing {cfg.get('dest_server')}/{cfg.get('dest_db')}...\n")
-                self.restore_log.see(tk.END)
-                
+                def log(msg):
+                    log_widget.insert(tk.END, msg)
+                    log_widget.see(tk.END)
+                log(f"\n[{idx}/{len(self.restore_configs)}] {cfg.get('dest_server')}/{cfg.get('dest_db')}...\n")
                 try:
                     restore_cfg = {
                         "backup_path": cfg.get("backup_path"),
@@ -1258,25 +1710,22 @@ class SchemaTab:
                         "restore_constraints": cfg.get("restore_constraints", self.restore_constraints_var.get()),
                         "restore_indexes": cfg.get("restore_indexes", self.restore_indexes_var.get()),
                         "continue_on_error": cfg.get("continue_on_error", self.restore_continue_on_error_var.get()),
-                        "dry_run": False
+                        "dry_run": False,
+                        "preview_callback": None,
                     }
-                    
                     summary = restore_schema.run_restore(restore_cfg)
-                    
                     if summary["status"] == "success":
-                        self.restore_log.insert(tk.END, f"✓ Success: {cfg.get('dest_db')}\n")
+                        log(f"✓ {cfg.get('dest_db')}\n")
                         success_count += 1
                     else:
-                        self.restore_log.insert(tk.END, f"✗ Completed with errors: {cfg.get('dest_db')} - {summary.get('errors', [])}\n")
+                        errs = summary.get("errors", [])
+                        log(f"✗ {cfg.get('dest_db')}: {len(errs)} error(s)\n")
                         fail_count += 1
                 except Exception as e:
-                    self.restore_log.insert(tk.END, f"✗ Error: {cfg.get('dest_db')} - {str(e)}\n")
+                    log(f"✗ {cfg.get('dest_db')}: {str(e)}\n")
                     fail_count += 1
-                    
-            self.restore_log.insert(tk.END, f"\n{'='*60}\n")
-            self.restore_log.insert(tk.END, f"Bulk restore completed: {success_count} succeeded, {fail_count} failed\n")
-            messagebox.showinfo("Bulk Restore Complete", f"Completed: {success_count} succeeded, {fail_count} failed")
-            self.restore_bulk_btn.config(state=tk.NORMAL)
-            
+            log(f"\n{'='*60}\nBulk restore: {success_count} succeeded, {fail_count} failed\n")
+            self.frame.after(0, lambda: messagebox.showinfo("Bulk Restore Complete", f"Completed: {success_count} succeeded, {fail_count} failed"))
+            self.frame.after(0, lambda: self.restore_bulk_btn.config(state=tk.NORMAL))
         threading.Thread(target=run_bulk_restore, daemon=True).start()
 

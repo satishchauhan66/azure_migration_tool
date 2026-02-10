@@ -10,6 +10,9 @@ msal>=1.20.0
 azure-identity>=1.15.0
 azure-mgmt-datafactory>=4.0.0
 
+# .bak backup to Azure Blob (on-prem to blob)
+azure-storage-blob>=12.19.0
+
 # DB2 support (Compare DB2 tabs – JDBC)
 jaydebeapi>=1.2.3
 jpype1>=1.5.0
