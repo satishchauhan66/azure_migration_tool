@@ -565,29 +565,29 @@ class SchemaTab:
         self.restore_blob_path_var = tk.StringVar()
         tk.Label(step1, textvariable=self.restore_blob_path_var, fg="gray").pack(anchor=tk.W, pady=(2, 0))
         
-        # Step 2: Target SQL Server
+        # Step 2: Target SQL Server (use restore_blob_* vars so we don't overwrite Schema Restore tab vars)
         step2 = ttk.LabelFrame(parent, text="Step 2: Target SQL Server", padding=10)
         step2.pack(fill=tk.X, padx=5, pady=5)
-        self.restore_server_var = tk.StringVar()
-        self.restore_db_var = tk.StringVar()
-        self.restore_auth_var = tk.StringVar(value="windows")
-        self.restore_user_var = tk.StringVar()
-        self.restore_password_var = tk.StringVar()
-        self.restore_managed_instance_var = tk.BooleanVar(value=False)
+        self.restore_blob_server_var = tk.StringVar()
+        self.restore_blob_db_var = tk.StringVar()
+        self.restore_blob_auth_var = tk.StringVar(value="windows")
+        self.restore_blob_user_var = tk.StringVar()
+        self.restore_blob_password_var = tk.StringVar()
+        self.restore_blob_managed_instance_var = tk.BooleanVar(value=False)
         ConnectionWidget(
             parent=step2,
-            server_var=self.restore_server_var,
-            db_var=self.restore_db_var,
-            auth_var=self.restore_auth_var,
-            user_var=self.restore_user_var,
-            password_var=self.restore_password_var,
+            server_var=self.restore_blob_server_var,
+            db_var=self.restore_blob_db_var,
+            auth_var=self.restore_blob_auth_var,
+            user_var=self.restore_blob_user_var,
+            password_var=self.restore_blob_password_var,
             label_text="Target database (auto-filled from selection; created if not present, replaced if present):",
             row_start=0,
         )
         ttk.Checkbutton(
             step2,
             text="Target is Azure SQL Managed Instance (use RESTORE without REPLACE/STATS)",
-            variable=self.restore_managed_instance_var,
+            variable=self.restore_blob_managed_instance_var,
         ).grid(row=8, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 0))
         
         # Buttons and log
@@ -634,7 +634,7 @@ class SchemaTab:
         """Sync target database to the selected backup database name (correct config for that DB)."""
         db = (self.restore_db_filter_var.get() or "").strip()
         if db and not db.startswith("(") and db != "Listing...":
-            self.restore_db_var.set(db)
+            self.restore_blob_db_var.set(db)
 
     def _on_restore_backup_selected(self, event):
         """Set blob path when user selects a backup from the list; keep target DB in sync with backup DB."""
@@ -648,7 +648,7 @@ class SchemaTab:
             self.restore_blob_path_var.set(path)
             # Target database = backup DB (first segment: DbName/run_id/DbName.bak) for correct config
             if "/" in path:
-                self.restore_db_var.set(path.split("/", 1)[0])
+                self.restore_blob_db_var.set(path.split("/", 1)[0])
     
     def _list_restore_databases(self):
         """Discover top-level folder names in container (DbName in DbName/run_id/DbName.bak) and populate combobox."""
@@ -687,7 +687,7 @@ class SchemaTab:
         self.restore_db_filter_combo["values"] = names
         if names:
             self.restore_db_filter_var.set(names[0])
-            self.restore_db_var.set(names[0])  # target database = selected backup DB (correct config)
+            self.restore_blob_db_var.set(names[0])  # target database = selected backup DB (correct config)
         else:
             self.restore_db_filter_var.set("(no folders found)")
     
@@ -748,8 +748,8 @@ class SchemaTab:
             return
         conn_str = (self.restore_blob_conn_var.get() or "").strip()
         container = (self.restore_container_var.get() or "db2-stage").strip()
-        server = (self.restore_server_var.get() or "").strip()
-        database = (self.restore_db_var.get() or "").strip()
+        server = (self.restore_blob_server_var.get() or "").strip()
+        database = (self.restore_blob_db_var.get() or "").strip()
         if not conn_str or not server or not database:
             messagebox.showerror("Error", "Blob connection string, target server, and target database are required.")
             return
@@ -766,14 +766,14 @@ class SchemaTab:
                 summary = run_restore_from_blob(
                     server=server,
                     database=database,
-                    auth=self.restore_auth_var.get() or "windows",
-                    user=self.restore_user_var.get() or None,
-                    password=self.restore_password_var.get() or None,
+                    auth=self.restore_blob_auth_var.get() or "windows",
+                    user=self.restore_blob_user_var.get() or None,
+                    password=self.restore_blob_password_var.get() or None,
                     blob_connection_string=conn_str,
                     container=container,
                     blob_path=blob_path,
                     log_callback=log,
-                    target_managed_instance=self.restore_managed_instance_var.get(),
+                    target_managed_instance=self.restore_blob_managed_instance_var.get(),
                 )
                 if summary.get("status") == "success":
                     self.frame.after(0, lambda: messagebox.showinfo("Success", "Restore from blob completed successfully."))
@@ -1378,6 +1378,12 @@ class SchemaTab:
         ttk.Checkbutton(restore_options_frame, text="Indexes", variable=self.restore_indexes_var).pack(anchor=tk.W)
         self.restore_continue_on_error_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(restore_options_frame, text="Continue on error (recommended)", variable=self.restore_continue_on_error_var).pack(anchor=tk.W)
+        self.restore_mirror_source_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            restore_options_frame,
+            text="Mirror source (attempt all batches; no Azure filter — use for on-prem or when target supports all objects)",
+            variable=self.restore_mirror_source_var,
+        ).pack(anchor=tk.W)
         self.restore_show_preview_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(restore_options_frame, text="Show preview before each batch (FKs, indexes, etc.) — for debugging", 
                        variable=self.restore_show_preview_var).pack(anchor=tk.W)
@@ -1529,6 +1535,7 @@ class SchemaTab:
                     "restore_constraints": self.restore_constraints_var.get(),
                     "restore_indexes": self.restore_indexes_var.get(),
                     "continue_on_error": self.restore_continue_on_error_var.get(),
+                    "mirror_source": self.restore_mirror_source_var.get(),
                     "dry_run": False,
                     "preview_callback": preview_callback,
                 }
@@ -1549,6 +1556,12 @@ class SchemaTab:
                     log(f"  Already existed (skipped): {stats.get('batches_already_existed', 0)}\n")
                     log(f"  Failed: {stats.get('batches_failed', 0)}\n")
                     log(f"  Other skips: {stats.get('batches_skipped', 0) - stats.get('batches_already_existed', 0)}\n")
+                    filtered_azure = stats.get("batches_filtered_azure", 0)
+                    if filtered_azure > 0:
+                        log(f"  Azure-incompatible (not restored): {filtered_azure}\n")
+                        note = summary.get("azure_filter_note")
+                        if note:
+                            log(f"  Note: {note}\n")
                 
                 if summary["status"] == "success":
                     log("\n✓ Restore completed successfully!\n")
@@ -1710,6 +1723,7 @@ class SchemaTab:
                         "restore_constraints": cfg.get("restore_constraints", self.restore_constraints_var.get()),
                         "restore_indexes": cfg.get("restore_indexes", self.restore_indexes_var.get()),
                         "continue_on_error": cfg.get("continue_on_error", self.restore_continue_on_error_var.get()),
+                        "mirror_source": cfg.get("mirror_source", self.restore_mirror_source_var.get()),
                         "dry_run": False,
                         "preview_callback": None,
                     }

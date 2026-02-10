@@ -230,6 +230,7 @@ def execute_sql_file(
     continue_on_error: bool,
     dry_run: bool,
     preview_callback=None,  # Optional callback to preview SQL before execution
+    mirror_source: bool = False,  # If True, attempt all batches (no Azure filter); get mirror of source
 ) -> dict:
     """Execute a SQL file. Returns dict with status, batches_executed, errors."""
     result = {
@@ -272,15 +273,19 @@ def execute_sql_file(
             result["duration_seconds"] = round(time.time() - t0, 3)
             return result
 
-        logger.info("Executing %s: %d batches", sql_file.name, len(batches))
+        logger.info("Executing %s: %d batches (mirror_source=%s)", sql_file.name, len(batches), mirror_source)
 
-        # Filter out Azure SQL incompatible batches before execution
-        compatible_batches = filter_azure_incompatible_batches(batches, logger)
-        result["batches_filtered"] = len(batches) - len(compatible_batches)
-        if result["batches_filtered"] > 0:
-            logger.info("After Azure compatibility filter: %d/%d batches compatible (%d filtered)", 
-                       len(compatible_batches), len(batches), result["batches_filtered"])
-        
+        # Optionally filter out Azure SQL incompatible batches (when mirror_source=False)
+        if mirror_source:
+            compatible_batches = [(i, batch.strip(), []) for i, batch in enumerate(batches, 1) if batch and batch.strip()]
+            result["batches_filtered"] = 0
+        else:
+            compatible_batches = filter_azure_incompatible_batches(batches, logger)
+            result["batches_filtered"] = len(batches) - len(compatible_batches)
+            if result["batches_filtered"] > 0:
+                logger.info("After Azure compatibility filter: %d/%d batches compatible (%d filtered)",
+                            len(compatible_batches), len(batches), result["batches_filtered"])
+
         for orig_idx, batch, issues in compatible_batches:
             # Show preview dialog if callback provided (GUI mode, not bulk/Excel)
             if preview_callback and not dry_run:
@@ -512,6 +517,7 @@ def run_restore(cfg: dict):
     logger.info("Restore constraints: %s", cfg["restore_constraints"])
     logger.info("Restore indexes: %s", cfg["restore_indexes"])
     logger.info("Continue on error: %s", cfg["continue_on_error"])
+    logger.info("Mirror source (no Azure filter): %s", cfg.get("mirror_source", False))
     logger.info("Dry run: %s", cfg["dry_run"])
     logger.info("Python exe: %s", sys.executable)
     logger.info("Log file: %s", str(log_file.resolve()))
@@ -526,28 +532,69 @@ def run_restore(cfg: dict):
     try:
         driver = pick_sql_driver(logger)
         password = cfg.get("dest_password")
-        
-        # Check if database exists, create if missing
-        logger.info("Checking if destination database exists...")
-        db_exists = ensure_database_exists(
-            cfg["dest_server"], cfg["dest_db"], cfg["dest_user"], 
-            driver, cfg["dest_auth"], password, logger
-        )
-        if not db_exists:
-            logger.warning("Database may not exist. Connection attempt will show actual error.")
-        
-        logger.info("Connecting to destination (auth=%s)...", cfg["dest_auth"])
-        # Use connect_to_database which handles MSAL token caching automatically
-        with connect_to_database(
-            server=cfg["dest_server"],
-            db=cfg["dest_db"],
-            user=cfg["dest_user"],
-            driver=driver,
-            auth=cfg["dest_auth"],
-            password=password,
-            timeout=30,
-            logger=logger,
-        ) as conn:
+        auth = (cfg.get("dest_auth") or "windows").strip().lower()
+
+        # For MFA (entra_mfa), use a single connection: connect to target DB first. If that fails
+        # (DB does not exist), connect to master to create it, then connect to target. This avoids
+        # two connections in quick succession which can cause "connection forcibly closed" /
+        # "Login failed for token-identified principal" on Azure SQL.
+        conn = None
+        if auth == "entra_mfa":
+            logger.info("MFA auth: connecting to target database (single connection)...")
+            try:
+                conn = connect_to_database(
+                    server=cfg["dest_server"],
+                    db=cfg["dest_db"],
+                    user=cfg["dest_user"],
+                    driver=driver,
+                    auth=cfg["dest_auth"],
+                    password=password,
+                    timeout=60,
+                    logger=logger,
+                )
+                logger.info("Connected to target database.")
+            except Exception as e:
+                err_str = str(e).lower()
+                if "4060" in err_str or "cannot open database" in err_str or "does not exist" in err_str:
+                    logger.info("Target database not found; creating via master then reconnecting.")
+                    ensure_database_exists(
+                        cfg["dest_server"], cfg["dest_db"], cfg["dest_user"],
+                        driver, cfg["dest_auth"], password, logger
+                    )
+                    time.sleep(2)
+                    conn = connect_to_database(
+                        server=cfg["dest_server"],
+                        db=cfg["dest_db"],
+                        user=cfg["dest_user"],
+                        driver=driver,
+                        auth=cfg["dest_auth"],
+                        password=password,
+                        timeout=60,
+                        logger=logger,
+                    )
+                else:
+                    raise
+
+        if conn is None:
+            # Non-MFA: ensure DB exists then connect
+            logger.info("Checking if destination database exists...")
+            ensure_database_exists(
+                cfg["dest_server"], cfg["dest_db"], cfg["dest_user"],
+                driver, cfg["dest_auth"], password, logger
+            )
+            logger.info("Connecting to destination (auth=%s)...", cfg["dest_auth"])
+            conn = connect_to_database(
+                server=cfg["dest_server"],
+                db=cfg["dest_db"],
+                user=cfg["dest_user"],
+                driver=driver,
+                auth=cfg["dest_auth"],
+                password=password,
+                timeout=30,
+                logger=logger,
+            )
+
+        with conn:
             conn.timeout = 0
             cur = conn.cursor()
 
@@ -679,6 +726,7 @@ def run_restore(cfg: dict):
                     continue_on_error=cfg["continue_on_error"],
                     dry_run=cfg.get("dry_run", False),
                     preview_callback=cfg.get("preview_callback"),  # Optional preview callback for GUI mode
+                    mirror_source=cfg.get("mirror_source", False),
                 )
                 summary["files_restored"][file_key] = result
 
@@ -694,6 +742,7 @@ def run_restore(cfg: dict):
         total_already_existed = 0
         total_failed = 0
         total_skipped = 0
+        total_filtered = 0
         
         for file_result in summary["files_restored"].values():
             total_batches += file_result.get("batches_total", 0)
@@ -701,6 +750,7 @@ def run_restore(cfg: dict):
             total_already_existed += file_result.get("batches_already_existed", 0)
             total_failed += file_result.get("batches_failed", 0)
             total_skipped += file_result.get("batches_skipped", 0)
+            total_filtered += file_result.get("batches_filtered", 0)
         
         summary["statistics"] = {
             "total_batches": total_batches,
@@ -708,7 +758,13 @@ def run_restore(cfg: dict):
             "batches_already_existed": total_already_existed,
             "batches_failed": total_failed,
             "batches_skipped": total_skipped,
+            "batches_filtered_azure": total_filtered,
         }
+        if total_filtered > 0:
+            summary["azure_filter_note"] = (
+                f"{total_filtered} batch(es) were skipped as Azure SQL incompatible (e.g. CREATE LOGIN, USE master, "
+                "syslogins). Missing stored procedures in schema comparison (e.g. RoundhousE.AddSqlUserAndLogin) are expected."
+            )
         
         summary["status"] = "success" if not summary["errors"] else "completed_with_errors"
 
@@ -717,6 +773,14 @@ def run_restore(cfg: dict):
         logger.exception("Restore failed: %s", msg)
         summary["status"] = "failed"
         summary["errors"].append(msg)
+        if "token-identified principal" in msg or ("18456" in msg and "Login failed" in msg):
+            hint = (
+                "Hint: For Azure SQL with Microsoft account (MFA), try: "
+                "(1) ensure server firewall allows your IP, (2) retry (token may have expired), "
+                "(3) use SQL Server authentication if available."
+            )
+            summary["errors"].append(hint)
+            logger.warning("%s", hint)
 
     finally:
         summary["ended_utc"] = utc_iso()
@@ -737,6 +801,10 @@ def run_restore(cfg: dict):
             logger.info("  Already existed (skipped): %d", stats["batches_already_existed"])
             logger.info("  Failed: %d", stats["batches_failed"])
             logger.info("  Other skips: %d", stats["batches_skipped"] - stats["batches_already_existed"])
+            if stats.get("batches_filtered_azure", 0) > 0:
+                logger.info("  Azure-incompatible (filtered): %d", stats["batches_filtered_azure"])
+                if summary.get("azure_filter_note"):
+                    logger.info("  Note: %s", summary["azure_filter_note"])
         
         logger.info("Summary JSON: %s", str(summary_file.resolve()))
 

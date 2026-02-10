@@ -65,7 +65,8 @@ def fetch_columns(cur, schema_name: str, table_name: str):
             c.is_identity,
             CAST(ic.seed_value AS NVARCHAR(100)) AS seed_value_str,
             CAST(ic.increment_value AS NVARCHAR(100)) AS increment_value_str,
-            CAST(dc.definition AS NVARCHAR(MAX)) AS default_definition_str
+            CAST(dc.definition AS NVARCHAR(MAX)) AS default_definition_str,
+            dc.name AS default_constraint_name
         FROM sys.columns c
         JOIN sys.types ty ON c.user_type_id = ty.user_type_id
         LEFT JOIN sys.identity_columns ic
@@ -161,10 +162,13 @@ def build_create_table_sql(schema_name: str, table_name: str, cols, pk_rows) -> 
 
         col_def += " NULL" if r.is_nullable else " NOT NULL"
 
-        # Defaults inline (convenient for table creation)
+        # Defaults inline: use source constraint name so restore is a mirror (no "renamed" defaults)
         if r.default_definition_str and str(r.default_definition_str).strip():
-            df_name = f"DF_{table_name}_{r.column_name}"
-            col_def += f" CONSTRAINT {qident(df_name)} DEFAULT {r.default_definition_str}"
+            df_name = getattr(r, "default_constraint_name", None) or f"DF_{table_name}_{r.column_name}"
+            if df_name and str(df_name).strip():
+                col_def += f" CONSTRAINT {qident(str(df_name).strip())} DEFAULT {r.default_definition_str}"
+            else:
+                col_def += f" DEFAULT {r.default_definition_str}"
 
         col_lines.append(col_def)
 

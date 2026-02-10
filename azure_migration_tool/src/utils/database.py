@@ -322,24 +322,36 @@ def connect_to_database(
                         logger.info("Successfully connected using MSAL token via SQL_COPT_SS_ACCESS_TOKEN")
                     return conn
                 except Exception as conn_err:
-                    # Token connection failed - log error and fall through to ActiveDirectoryInteractive
+                    # Token connection failed - retry once with refreshed token, then fail with clear message (do not trigger interactive in background)
                     if logger:
-                        logger.error(f"Token-based connection failed: {type(conn_err).__name__}: {conn_err}")
-                        logger.error(f"Connection string was: {conn_str}")
-                        logger.warning("Will fall back to ActiveDirectoryInteractive authentication")
-                    # Don't re-raise - let it fall through to ActiveDirectoryInteractive fallback below
-                    pass
+                        logger.warning(f"Token-based connection failed: {type(conn_err).__name__}: {conn_err}; retrying with refreshed token")
+                    access_token_2 = get_cached_token(user, refresh_if_expiring_soon=True)
+                    if access_token_2 and access_token_2 != access_token:
+                        token_bytes_2 = access_token_2.encode('utf-16-le')
+                        token_struct_2 = struct.pack(f"<I{len(token_bytes_2)}s", len(token_bytes_2), token_bytes_2)
+                        try:
+                            conn = pyodbc.connect(conn_str, timeout=timeout, attrs_before={1256: token_struct_2})
+                            if logger:
+                                logger.info("Connected using refreshed MSAL token")
+                            return conn
+                        except Exception:
+                            pass
+                    raise RuntimeError(
+                        "Cached token was rejected or expired. Use 'Test Connection' (or sign in from another tab) to sign in again, then retry. Do not cancel the sign-in when it appears."
+                    ) from conn_err
         except ImportError:
             # MSAL library not available, fall back to interactive authentication
             if logger:
                 logger.debug("MSAL not available, using ActiveDirectoryInteractive")
+        except RuntimeError:
+            raise
         except Exception as e:
-            # Token fetch failed
+            # Token fetch failed (e.g. no cache yet)
             if logger:
                 logger.warning(f"Could not get cached MSAL token for {user}: {e}, falling back to interactive auth")
                 logger.debug(f"Token fetch exception details: {type(e).__name__}: {e}", exc_info=True)
         
-        # Fallback to interactive authentication (ODBC will cache in Windows Credential Manager)
+        # Fallback to interactive authentication only when we had no token (first-time sign-in)
         if logger:
             logger.info(f"Using ActiveDirectoryInteractive authentication for {user}")
         conn_str = base + f"UID={user};Authentication=ActiveDirectoryInteractive;"
