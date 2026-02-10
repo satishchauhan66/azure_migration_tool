@@ -101,6 +101,133 @@ def delete_table(cur, schema: str, table: str):
     cur.execute(f"DELETE FROM {qident(schema)}.{qident(table)};")
 
 
+# ----------------------------
+# CONSTRAINT / INDEX / TRIGGER HELPERS (for BCP path)
+# ----------------------------
+def disable_all_foreign_keys(cur, logger: Optional[logging.Logger] = None):
+    """Disable all foreign key constraints on user tables."""
+    cur.execute("""
+        SELECT OBJECT_SCHEMA_NAME(fk.parent_object_id) AS sch, OBJECT_NAME(fk.parent_object_id) AS tbl, fk.name AS fk_name
+        FROM sys.foreign_keys fk
+        WHERE fk.is_disabled = 0
+        ORDER BY OBJECT_SCHEMA_NAME(fk.parent_object_id), OBJECT_NAME(fk.parent_object_id);
+    """)
+    for r in cur.fetchall():
+        sql = f"ALTER TABLE {qident(r.sch)}.{qident(r.tbl)} NOCHECK CONSTRAINT {qident(r.fk_name)};"
+        try:
+            cur.execute(sql)
+            if logger:
+                logger.info("Disabled FK: %s.%s.%s", r.sch, r.tbl, r.fk_name)
+        except Exception as e:
+            if logger:
+                logger.warning("Could not disable FK %s: %s", r.fk_name, e)
+
+
+def enable_all_foreign_keys(cur, logger: Optional[logging.Logger] = None):
+    """Re-enable all foreign key constraints."""
+    cur.execute("""
+        SELECT OBJECT_SCHEMA_NAME(fk.parent_object_id) AS sch, OBJECT_NAME(fk.parent_object_id) AS tbl, fk.name AS fk_name
+        FROM sys.foreign_keys fk
+        WHERE fk.is_disabled = 1
+        ORDER BY OBJECT_SCHEMA_NAME(fk.parent_object_id), OBJECT_NAME(fk.parent_object_id);
+    """)
+    for r in cur.fetchall():
+        sql = f"ALTER TABLE {qident(r.sch)}.{qident(r.tbl)} WITH CHECK CHECK CONSTRAINT {qident(r.fk_name)};"
+        try:
+            cur.execute(sql)
+            if logger:
+                logger.info("Enabled FK: %s.%s.%s", r.sch, r.tbl, r.fk_name)
+        except Exception as e:
+            if logger:
+                logger.warning("Could not enable FK %s: %s", r.fk_name, e)
+
+
+def disable_nonclustered_indexes(cur, logger: Optional[logging.Logger] = None):
+    """Disable all non-clustered indexes on user tables."""
+    cur.execute("""
+        SELECT s.name AS sch, t.name AS tbl, i.name AS idx_name
+        FROM sys.indexes i
+        JOIN sys.tables t ON i.object_id = t.object_id
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE i.type_desc = 'NONCLUSTERED' AND i.is_disabled = 0 AND i.name IS NOT NULL AND t.is_ms_shipped = 0;
+    """)
+    for r in cur.fetchall():
+        sql = f"ALTER INDEX {qident(r.idx_name)} ON {qident(r.sch)}.{qident(r.tbl)} DISABLE;"
+        try:
+            cur.execute(sql)
+            if logger:
+                logger.info("Disabled index: %s.%s.%s", r.sch, r.tbl, r.idx_name)
+        except Exception as e:
+            if logger:
+                logger.warning("Could not disable index %s: %s", r.idx_name, e)
+
+
+def rebuild_indexes(cur, logger: Optional[logging.Logger] = None):
+    """Rebuild all disabled non-clustered indexes."""
+    cur.execute("""
+        SELECT s.name AS sch, t.name AS tbl, i.name AS idx_name
+        FROM sys.indexes i
+        JOIN sys.tables t ON i.object_id = t.object_id
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE i.type_desc = 'NONCLUSTERED' AND i.is_disabled = 1 AND i.name IS NOT NULL AND t.is_ms_shipped = 0;
+    """)
+    for r in cur.fetchall():
+        sql = f"ALTER INDEX {qident(r.idx_name)} ON {qident(r.sch)}.{qident(r.tbl)} REBUILD;"
+        try:
+            cur.execute(sql)
+            if logger:
+                logger.info("Rebuilt index: %s.%s.%s", r.sch, r.tbl, r.idx_name)
+        except Exception as e:
+            if logger:
+                logger.warning("Could not rebuild index %s: %s", r.idx_name, e)
+
+
+def disable_all_triggers(cur, logger: Optional[logging.Logger] = None):
+    """Disable all triggers on user tables."""
+    cur.execute("""
+        SELECT OBJECT_SCHEMA_NAME(tr.parent_id) AS sch, OBJECT_NAME(tr.parent_id) AS tbl
+        FROM sys.triggers tr
+        WHERE tr.parent_id > 0 AND tr.is_disabled = 0;
+    """)
+    seen = set()
+    for r in cur.fetchall():
+        key = (r.sch, r.tbl)
+        if key in seen:
+            continue
+        seen.add(key)
+        sql = f"ALTER TABLE {qident(r.sch)}.{qident(r.tbl)} DISABLE TRIGGER ALL;"
+        try:
+            cur.execute(sql)
+            if logger:
+                logger.info("Disabled triggers: %s.%s", r.sch, r.tbl)
+        except Exception as e:
+            if logger:
+                logger.warning("Could not disable triggers on %s.%s: %s", r.sch, r.tbl, e)
+
+
+def enable_all_triggers(cur, logger: Optional[logging.Logger] = None):
+    """Re-enable all triggers on user tables."""
+    cur.execute("""
+        SELECT OBJECT_SCHEMA_NAME(tr.parent_id) AS sch, OBJECT_NAME(tr.parent_id) AS tbl
+        FROM sys.triggers tr
+        WHERE tr.parent_id > 0 AND tr.is_disabled = 1;
+    """)
+    seen = set()
+    for r in cur.fetchall():
+        key = (r.sch, r.tbl)
+        if key in seen:
+            continue
+        seen.add(key)
+        sql = f"ALTER TABLE {qident(r.sch)}.{qident(r.tbl)} ENABLE TRIGGER ALL;"
+        try:
+            cur.execute(sql)
+            if logger:
+                logger.info("Enabled triggers: %s.%s", r.sch, r.tbl)
+        except Exception as e:
+            if logger:
+                logger.warning("Could not enable triggers on %s.%s: %s", r.sch, r.tbl, e)
+
+
 def build_insert_statement(schema: str, table: str, col_names: List[str]) -> str:
     """Build INSERT statement with placeholders"""
     cols = ", ".join(qident(c) for c in col_names)
@@ -355,8 +482,10 @@ def migrate_one_table(
         return result
 
 
-def run_migration(cfg: dict):
-    """Run data migration with provided configuration"""
+def run_migration(cfg: dict, log_callback=None):
+    """Run data migration with provided configuration.
+    log_callback: optional callable(msg: str) to stream log messages (e.g. to GUI).
+    """
     if cfg["truncate_dest"] and cfg["delete_dest"]:
         raise ValueError("Choose only one: truncate_dest OR delete_dest")
 
@@ -374,6 +503,17 @@ def run_migration(cfg: dict):
 
     log_file = logs_dir / f"migrate_{run_id}.log"
     logger = setup_logger(log_file, "data_migration")
+    if log_callback:
+        class CallbackHandler(logging.Handler):
+            def emit(self, record):
+                try:
+                    log_callback(self.format(record))
+                except Exception:
+                    pass
+        cb_handler = CallbackHandler()
+        cb_handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(cb_handler)
+        logger.setLevel(logging.INFO)
 
     logger.info("Starting data migration run: %s", run_id)
     logger.info("Source: %s | %s | auth=%s | user=%s", cfg["src_server"], cfg["src_db"], cfg["src_auth"], cfg["src_user"])
@@ -508,6 +648,8 @@ def run_migration(cfg: dict):
 
         ok = sum(1 for t in report["tables"] if t.get("status") in ("success", "dry_run"))
         failed = sum(1 for t in report["tables"] if t.get("status") == "failed")
+        report["tables_ok"] = ok
+        report["tables_failed"] = failed
         logger.info("Summary: tables_ok=%d tables_failed=%d total_tables=%d errors=%d",
                     ok, failed, len(report["tables"]), len(report["errors"]))
 

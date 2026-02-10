@@ -26,11 +26,24 @@ from gui.utils.excel_utils import read_excel_file, create_sample_excel
 from gui.widgets.connection_widget import ConnectionWidget
 
 try:
-    import migrate_data
     import pyodbc
 except ImportError:
-    migrate_data = None
     pyodbc = None
+
+# Use real data migration module (no top-level migrate_data package)
+migrate_data = None
+try:
+    from azure_migration_tool.src.migration import data_migration as migrate_data
+except ImportError:
+    try:
+        from src.migration import data_migration as migrate_data
+    except ImportError:
+        try:
+            import sys
+            sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+            from src.migration import data_migration as migrate_data
+        except ImportError:
+            migrate_data = None
 
 try:
     import msal

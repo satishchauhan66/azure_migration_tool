@@ -16,10 +16,22 @@ sys.path.insert(0, str(parent_dir))
 
 from gui.utils.excel_utils import read_excel_file, create_sample_excel
 
+# Use real full migration orchestration module (no top-level run_full_migration package)
+run_full_migration = None
 try:
-    import run_full_migration
+    from azure_migration_tool.src.orchestration import full_migration as run_full_migration
 except ImportError:
-    run_full_migration = None
+    try:
+        from src.orchestration import full_migration as run_full_migration
+    except ImportError:
+        try:
+            import sys
+            _pkg_root = Path(__file__).resolve().parents[2]
+            if str(_pkg_root) not in sys.path:
+                sys.path.insert(0, str(_pkg_root))
+            from src.orchestration import full_migration as run_full_migration
+        except ImportError:
+            run_full_migration = None
 
 
 class FullMigrationTab:
