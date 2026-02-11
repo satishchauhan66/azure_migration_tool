@@ -6,9 +6,10 @@ import json
 import logging
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pyodbc
 
@@ -60,6 +61,81 @@ def count_rows(cur, schema: str, table: str) -> int:
     """Count rows in table"""
     cur.execute(f"SELECT COUNT_BIG(1) FROM {qident(schema)}.{qident(table)};")
     return int(cur.fetchone()[0])
+
+
+def fetch_sequence_column(cur, schema: str, table: str) -> Optional[str]:
+    """Return a column suitable for ordering/slicing: first identity, else first PK column. None if none."""
+    obj_id = f"{schema}.{table}"
+    # First try identity column
+    cur.execute(
+        """
+        SELECT c.name
+        FROM sys.columns c
+        WHERE c.object_id = OBJECT_ID(?, 'U') AND c.is_identity = 1
+        ORDER BY c.column_id;
+        """,
+        obj_id,
+    )
+    row = cur.fetchone()
+    if row:
+        while cur.fetchone() is not None:
+            pass  # Drain rest so connection is not busy for next command
+        return row[0]
+    # Drain identity result set before next execute
+    while cur.fetchone() is not None:
+        pass
+    # Else first column of primary key (query returns one row per PK column)
+    cur.execute(
+        """
+        SELECT c.name
+        FROM sys.index_columns ic
+        JOIN sys.indexes i ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+        JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+        WHERE i.object_id = OBJECT_ID(?, 'U') AND i.is_primary_key = 1
+        ORDER BY ic.key_ordinal;
+        """,
+        obj_id,
+    )
+    row = cur.fetchone()
+    while cur.fetchone() is not None:
+        pass  # Drain rest (composite PK returns multiple rows)
+    return row[0] if row else None
+
+
+def build_slice_boundaries(
+    cur,
+    schema: str,
+    table: str,
+    sequence_col: str,
+    num_slices: int,
+    logger: Optional[logging.Logger] = None,
+) -> List[Dict[str, Any]]:
+    """Use NTILE to split table into equal-sized slices; return list of {slice_id, min_val, max_val, row_count}."""
+    qual = f"{qident(schema)}.{qident(table)}"
+    seq_q = qident(sequence_col)
+    # Single pass: NTILE then aggregate to get min/max per slice
+    sql = f"""
+    WITH t AS (
+        SELECT {seq_q} AS seq_val, NTILE(?) OVER (ORDER BY {seq_q}) AS slice_id
+        FROM {qual}
+    )
+    SELECT slice_id, MIN(seq_val) AS min_val, MAX(seq_val) AS max_val, COUNT_BIG(1) AS row_count
+    FROM t
+    GROUP BY slice_id
+    ORDER BY slice_id;
+    """
+    cur.execute(sql, (num_slices,))
+    rows = cur.fetchall()
+    boundaries = [
+        {"slice_id": r.slice_id, "min_val": r.min_val, "max_val": r.max_val, "row_count": int(r.row_count)}
+        for r in rows
+    ]
+    # Avoid duplicate key: slice i (i>=2) uses exclusive lower bound = previous slice's max, so no row is in two slices
+    for i in range(1, len(boundaries)):
+        boundaries[i]["exclusive_min"] = boundaries[i - 1]["max_val"]
+    if boundaries:
+        boundaries[0]["exclusive_min"] = None
+    return boundaries
 
 
 # ----------------------------
@@ -182,6 +258,56 @@ def rebuild_indexes(cur, logger: Optional[logging.Logger] = None):
                 logger.warning("Could not rebuild index %s: %s", r.idx_name, e)
 
 
+def disable_nonclustered_indexes_for_table(
+    cur, schema: str, table: str, logger: Optional[logging.Logger] = None
+) -> None:
+    """Disable non-clustered indexes on a single table (faster bulk insert)."""
+    cur.execute(
+        """
+        SELECT i.name AS idx_name
+        FROM sys.indexes i
+        JOIN sys.tables t ON i.object_id = t.object_id
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE s.name = ? AND t.name = ? AND i.type_desc = 'NONCLUSTERED' AND i.is_disabled = 0 AND i.name IS NOT NULL;
+        """,
+        (schema, table),
+    )
+    for r in cur.fetchall():
+        sql = f"ALTER INDEX {qident(r.idx_name)} ON {qident(schema)}.{qident(table)} DISABLE;"
+        try:
+            cur.execute(sql)
+            if logger:
+                logger.info("Disabled index: %s.%s.%s", schema, table, r.idx_name)
+        except Exception as e:
+            if logger:
+                logger.warning("Could not disable index %s: %s", r.idx_name, e)
+
+
+def rebuild_indexes_for_table(
+    cur, schema: str, table: str, logger: Optional[logging.Logger] = None
+) -> None:
+    """Rebuild disabled non-clustered indexes on a single table."""
+    cur.execute(
+        """
+        SELECT i.name AS idx_name
+        FROM sys.indexes i
+        JOIN sys.tables t ON i.object_id = t.object_id
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE s.name = ? AND t.name = ? AND i.type_desc = 'NONCLUSTERED' AND i.is_disabled = 1 AND i.name IS NOT NULL;
+        """,
+        (schema, table),
+    )
+    for r in cur.fetchall():
+        sql = f"ALTER INDEX {qident(r.idx_name)} ON {qident(schema)}.{qident(table)} REBUILD;"
+        try:
+            cur.execute(sql)
+            if logger:
+                logger.info("Rebuilt index: %s.%s.%s", schema, table, r.idx_name)
+        except Exception as e:
+            if logger:
+                logger.warning("Could not rebuild index %s: %s", r.idx_name, e)
+
+
 def disable_all_triggers(cur, logger: Optional[logging.Logger] = None):
     """Disable all triggers on user tables."""
     cur.execute("""
@@ -235,6 +361,319 @@ def build_insert_statement(schema: str, table: str, col_names: List[str]) -> str
     return f"INSERT INTO {qident(schema)}.{qident(table)} ({cols}) VALUES ({placeholders});"
 
 
+def delete_slice_on_dest(
+    dest_cur,
+    schema: str,
+    table: str,
+    sequence_col: str,
+    min_val: Any,
+    max_val: Any,
+    exclusive_min: Any = None,
+) -> None:
+    """Delete rows on destination in the given sequence range (for retry). Use exclusive_min to match non-overlapping slice."""
+    seq_q = qident(sequence_col)
+    if exclusive_min is None:
+        sql = f"DELETE FROM {qident(schema)}.{qident(table)} WHERE {seq_q} >= ? AND {seq_q} <= ?;"
+        dest_cur.execute(sql, (min_val, max_val))
+    else:
+        sql = f"DELETE FROM {qident(schema)}.{qident(table)} WHERE {seq_q} > ? AND {seq_q} <= ?;"
+        dest_cur.execute(sql, (exclusive_min, max_val))
+
+
+def fetch_slice_batches(
+    src_cur,
+    schema: str,
+    table: str,
+    col_names: List[str],
+    sequence_col: str,
+    min_val: Any,
+    max_val: Any,
+    batch_size: int,
+    exclusive_min: Any = None,
+):
+    """Execute SELECT for slice range once, then yield batches. Use exclusive_min to avoid boundary overlap (no duplicate key)."""
+    cols = ", ".join(qident(c) for c in col_names)
+    seq_q = qident(sequence_col)
+    qual = f"{qident(schema)}.{qident(table)}"
+    if exclusive_min is None:
+        sql = f"SELECT {cols} FROM {qual} WHERE {seq_q} >= ? AND {seq_q} <= ? ORDER BY {seq_q};"
+        params = (min_val, max_val)
+    else:
+        sql = f"SELECT {cols} FROM {qual} WHERE {seq_q} > ? AND {seq_q} <= ? ORDER BY {seq_q};"
+        params = (exclusive_min, max_val)
+    src_cur.arraysize = min(batch_size, 10000)  # Larger fetch for faster chunked reads
+    src_cur.execute(sql, params)
+    while True:
+        rows = src_cur.fetchmany(batch_size)
+        if not rows:
+            break
+        yield rows
+
+
+def copy_one_slice(
+    logger: logging.Logger,
+    src_conn,
+    dest_conn,
+    schema: str,
+    table: str,
+    col_names: List[str],
+    has_identity: bool,
+    insert_sql: str,
+    slice_info: Dict[str, Any],
+    sequence_col: str,
+    batch_size: int,
+    max_retries: int = 3,
+    continue_on_error: bool = False,
+) -> Tuple[int, Optional[str]]:
+    """Copy one slice (min_val..max_val) from source to dest. On failure, DELETE that range on dest and retry. Returns (inserted_count, error_msg)."""
+    slice_id = slice_info["slice_id"]
+    min_val = slice_info["min_val"]
+    max_val = slice_info["max_val"]
+    exclusive_min = slice_info.get("exclusive_min")  # Avoid boundary overlap (no duplicate key)
+    table_fqn = f"{schema}.{table}"
+    total_inserted = 0
+    last_error: Optional[str] = None
+
+    src_cur = src_conn.cursor()
+    dest_cur = dest_conn.cursor()
+    dest_cur.fast_executemany = True
+
+    # Each worker has its own connection; IDENTITY_INSERT is session-scoped, so set it ON on this connection
+    if has_identity:
+        set_identity_insert(dest_cur, schema, table, True)
+        dest_conn.commit()
+
+    try:
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    # Previous attempt failed: delete this slice's range on dest and retry
+                    logger.warning("Slice %s %s: retry %d/%d – deleting slice range on dest and retrying", table_fqn, slice_id, attempt + 1, max_retries)
+                    delete_slice_on_dest(dest_cur, schema, table, sequence_col, min_val, max_val, exclusive_min)
+                    dest_conn.commit()
+
+                inserted = 0
+                for rows in fetch_slice_batches(
+                    src_cur, schema, table, col_names, sequence_col, min_val, max_val, batch_size, exclusive_min
+                ):
+                    dest_cur.executemany(insert_sql, rows)
+                    dest_conn.commit()
+                    inserted += len(rows)
+                total_inserted = inserted
+                last_error = None
+                break
+            except Exception as ex:
+                last_error = f"{type(ex).__name__}: {ex}"
+                try:
+                    dest_conn.rollback()
+                except Exception:
+                    pass
+                logger.warning("Slice %s %s attempt %d/%d failed: %s", table_fqn, slice_id, attempt + 1, max_retries, last_error)
+                if not continue_on_error and attempt == max_retries - 1:
+                    return (total_inserted, last_error)
+
+        return (total_inserted, last_error)
+    finally:
+        # Turn IDENTITY_INSERT OFF on this worker's connection
+        if has_identity:
+            try:
+                set_identity_insert(dest_cur, schema, table, False)
+                dest_conn.commit()
+            except Exception:
+                pass
+
+
+def migrate_one_table_chunked(
+    logger: logging.Logger,
+    cfg: dict,
+    src_conn,
+    dest_conn,
+    schema: str,
+    table: str,
+    batch_size: int,
+    truncate_dest: bool,
+    delete_dest: bool,
+    continue_on_error: bool,
+    dry_run: bool,
+    num_chunks: int,
+    chunk_workers: int,
+    disable_indexes: bool = False,
+) -> dict:
+    """Migrate a single table by splitting into slices (control table), copying in parallel (up to 32 workers), with per-slice DELETE and retry on failure."""
+    t0 = time.time()
+    table_fqn = f"{schema}.{table}"
+    result = {
+        "table": table_fqn,
+        "status": "started",
+        "src_count": None,
+        "dest_count_before": None,
+        "dest_count_after": None,
+        "inserted": 0,
+        "batches": 0,
+        "batches_retried": 0,
+        "identity_insert": False,
+        "duration_seconds": None,
+        "error": None,
+        "chunked": True,
+        "slices_ok": 0,
+        "slices_failed": 0,
+    }
+
+    src_cur = src_conn.cursor()
+    dest_cur = dest_conn.cursor()
+
+    try:
+        cols = fetch_columns_ordered(src_cur, schema, table)
+        col_names = [c for (c, _) in cols]
+        has_identity = any(is_id for (_, is_id) in cols)
+        result["identity_insert"] = has_identity
+        result["src_count"] = count_rows(src_cur, schema, table)
+        result["dest_count_before"] = count_rows(dest_cur, schema, table)
+
+        sequence_col = fetch_sequence_column(src_cur, schema, table)
+        if not sequence_col:
+            result["status"] = "failed"
+            result["error"] = "Chunked migration requires an identity or primary key column; none found"
+            result["duration_seconds"] = round(time.time() - t0, 3)
+            return result
+
+        num_slices = min(32, max(1, num_chunks))
+        workers = min(32, max(1, chunk_workers), num_slices)
+        logger.info(
+            "Chunked migration %s: sequence_col=%s slices=%d workers=%d",
+            table_fqn, sequence_col, num_slices, workers,
+        )
+
+        if dry_run:
+            logger.info("DRY RUN: skipping chunked data move for %s", table_fqn)
+            result["status"] = "dry_run"
+            result["duration_seconds"] = round(time.time() - t0, 3)
+            return result
+
+        # Build slice boundaries (control table in memory)
+        boundaries = build_slice_boundaries(src_cur, schema, table, sequence_col, num_slices, logger)
+        if not boundaries:
+            result["status"] = "failed"
+            result["error"] = "Failed to build slice boundaries"
+            result["duration_seconds"] = round(time.time() - t0, 3)
+            return result
+
+        # Prep destination: truncate/delete when requested, or when row count mismatch (clean reload)
+        dest_count = result["dest_count_before"]
+        src_count = result["src_count"]
+        if truncate_dest and dest_count > 0:
+            logger.info("Truncating destination table: %s", table_fqn)
+            truncate_table(dest_cur, schema, table, conn=dest_conn, logger=logger)
+            dest_conn.commit()
+        elif delete_dest and dest_count > 0:
+            logger.info("Deleting destination rows: %s", table_fqn)
+            delete_table(dest_cur, schema, table)
+            dest_conn.commit()
+        elif dest_count > 0 and dest_count != src_count:
+            logger.info("Row count mismatch (src=%s dest=%s): truncating destination for clean reload: %s", src_count, dest_count, table_fqn)
+            truncate_table(dest_cur, schema, table, conn=dest_conn, logger=logger)
+            dest_conn.commit()
+
+        if disable_indexes:
+            logger.info("Disabling non-clustered indexes on %s (faster insert)", table_fqn)
+            disable_nonclustered_indexes_for_table(dest_cur, schema, table, logger)
+            dest_conn.commit()
+
+        if has_identity:
+            logger.info("IDENTITY_INSERT ON: %s", table_fqn)
+            set_identity_insert(dest_cur, schema, table, True)
+            dest_conn.commit()
+
+        insert_sql = build_insert_statement(schema, table, col_names)
+        driver = pick_sql_driver(logger)
+
+        def run_slice(slice_info: Dict[str, Any]) -> Tuple[Dict[str, Any], int, Optional[str]]:
+            with connect_to_database(
+                server=cfg["src_server"], db=cfg["src_db"], user=cfg["src_user"], driver=driver,
+                auth=cfg["src_auth"], password=cfg["src_password"], timeout=30, logger=logger,
+            ) as w_src:
+                w_src.timeout = 0
+                with connect_to_database(
+                    server=cfg["dest_server"], db=cfg["dest_db"], user=cfg["dest_user"], driver=driver,
+                    auth=cfg["dest_auth"], password=cfg["dest_password"], timeout=30, logger=logger,
+                ) as w_dest:
+                    w_dest.timeout = 0
+                    inserted, err = copy_one_slice(
+                        logger, w_src, w_dest, schema, table, col_names, has_identity,
+                        insert_sql, slice_info, sequence_col, batch_size, max_retries=3,
+                        continue_on_error=continue_on_error,
+                    )
+            return (slice_info, inserted, err)
+
+        inserted_total = 0
+        slices_ok = 0
+        slices_failed = 0
+        errors: List[str] = []
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(run_slice, s): s for s in boundaries}
+            for future in as_completed(futures):
+                slice_info = futures[future]
+                try:
+                    _, inserted, err = future.result()
+                    inserted_total += inserted
+                    if err:
+                        slices_failed += 1
+                        errors.append(f"Slice {slice_info['slice_id']}: {err}")
+                    else:
+                        slices_ok += 1
+                except Exception as ex:
+                    slices_failed += 1
+                    errors.append(f"Slice {slice_info['slice_id']}: {ex}")
+
+        if has_identity:
+            logger.info("IDENTITY_INSERT OFF: %s", table_fqn)
+            set_identity_insert(dest_cur, schema, table, False)
+            dest_conn.commit()
+
+        if disable_indexes:
+            logger.info("Rebuilding non-clustered indexes on %s", table_fqn)
+            rebuild_indexes_for_table(dest_cur, schema, table, logger)
+            dest_conn.commit()
+
+        result["inserted"] = inserted_total
+        result["slices_ok"] = slices_ok
+        result["slices_failed"] = slices_failed
+        result["dest_count_after"] = count_rows(dest_cur, schema, table)
+        result["batches"] = num_slices
+
+        if slices_failed:
+            result["status"] = "completed_with_errors" if slices_ok else "failed"
+            result["error"] = "; ".join(errors[:5])
+            if len(errors) > 5:
+                result["error"] += f" ... ({len(errors)} total)"
+        else:
+            result["status"] = "success"
+
+        result["duration_seconds"] = round(time.time() - t0, 3)
+        logger.info(
+            "Done %s (chunked) | inserted=%d | slices_ok=%d slices_failed=%d | duration=%.3fs",
+            table_fqn, result["inserted"], slices_ok, slices_failed, result["duration_seconds"],
+        )
+        return result
+
+    except Exception as ex:
+        try:
+            if result.get("identity_insert"):
+                set_identity_insert(dest_cur, schema, table, False)
+                dest_conn.commit()
+            if disable_indexes:
+                rebuild_indexes_for_table(dest_cur, schema, table, logger)
+                dest_conn.commit()
+        except Exception:
+            pass
+        result["status"] = "failed"
+        result["error"] = f"{type(ex).__name__}: {ex}"
+        result["duration_seconds"] = round(time.time() - t0, 3)
+        logger.exception("Chunked migration failed: %s", table_fqn)
+        return result
+
+
 def fetch_source_rows_in_batches(src_cur, schema: str, table: str, col_names: List[str], batch_size: int, logger: Optional[logging.Logger] = None):
     """Generator: fetch rows in batches with memory-efficient streaming"""
     cols = ", ".join(qident(c) for c in col_names)
@@ -273,8 +712,15 @@ def migrate_one_table(
     delete_dest: bool,
     continue_on_error: bool,
     dry_run: bool,
+    enable_chunking: bool = False,
+    chunk_threshold: int = 500_000,
+    num_chunks: int = 10,
+    chunk_workers: int = 4,
+    disable_indexes: bool = False,
+    skip_completed: bool = False,
+    cfg: Optional[dict] = None,
 ) -> dict:
-    """Migrate a single table"""
+    """Migrate a single table. If enable_chunking and row count >= chunk_threshold and table has identity/PK, use parallel slice copy with retry. If skip_completed and src_count == dest_count, skip."""
     t0 = time.time()
     table_fqn = f"{schema}.{table}"
     result = {
@@ -312,20 +758,66 @@ def migrate_one_table(
             has_identity,
         )
 
+        # Skip if already completed (row counts match)
+        if skip_completed and result["src_count"] == result["dest_count_before"]:
+            logger.info("Skipping %s (row counts match: %d)", table_fqn, result["src_count"])
+            result["status"] = "skipped"
+            result["dest_count_after"] = result["dest_count_before"]
+            result["duration_seconds"] = round(time.time() - t0, 3)
+            return result
+
+        # Use chunked path when enabled, table is large enough, and we have cfg + sequence column
+        if (
+            enable_chunking
+            and result["src_count"] >= chunk_threshold
+            and cfg is not None
+        ):
+            sequence_col = fetch_sequence_column(src_cur, schema, table)
+            if sequence_col:
+                return migrate_one_table_chunked(
+                    logger=logger,
+                    cfg=cfg,
+                    src_conn=src_conn,
+                    dest_conn=dest_conn,
+                    schema=schema,
+                    table=table,
+                    batch_size=batch_size,
+                    truncate_dest=truncate_dest,
+                    delete_dest=delete_dest,
+                    continue_on_error=continue_on_error,
+                    dry_run=dry_run,
+                    num_chunks=num_chunks,
+                    chunk_workers=chunk_workers,
+                    disable_indexes=disable_indexes,
+                )
+            else:
+                logger.info("Chunking enabled but no identity/PK for %s; using full-table copy", table_fqn)
+
         if dry_run:
             logger.info("DRY RUN: skipping data move for %s", table_fqn)
             result["status"] = "dry_run"
             result["duration_seconds"] = round(time.time() - t0, 3)
             return result
 
-        # Prep dest
-        if truncate_dest and result["dest_count_before"] > 0:
+        # Prep dest: truncate/delete when requested, or when row count mismatch (clean reload)
+        dest_count = result["dest_count_before"]
+        src_count = result["src_count"]
+        if truncate_dest and dest_count > 0:
             logger.info("Truncating destination table: %s", table_fqn)
             truncate_table(dest_cur, schema, table, conn=dest_conn, logger=logger)
             dest_conn.commit()
-        elif delete_dest and result["dest_count_before"] > 0:
+        elif delete_dest and dest_count > 0:
             logger.info("Deleting destination rows: %s", table_fqn)
             delete_table(dest_cur, schema, table)
+            dest_conn.commit()
+        elif dest_count > 0 and dest_count != src_count:
+            logger.info("Row count mismatch (src=%s dest=%s): truncating destination for clean reload: %s", src_count, dest_count, table_fqn)
+            truncate_table(dest_cur, schema, table, conn=dest_conn, logger=logger)
+            dest_conn.commit()
+
+        if disable_indexes:
+            logger.info("Disabling non-clustered indexes on %s (faster insert)", table_fqn)
+            disable_nonclustered_indexes_for_table(dest_cur, schema, table, logger)
             dest_conn.commit()
 
         if has_identity:
@@ -451,6 +943,11 @@ def migrate_one_table(
             set_identity_insert(dest_cur, schema, table, False)
             dest_conn.commit()
 
+        if disable_indexes:
+            logger.info("Rebuilding non-clustered indexes on %s", table_fqn)
+            rebuild_indexes_for_table(dest_cur, schema, table, logger)
+            dest_conn.commit()
+
         result["dest_count_after"] = count_rows(dest_cur, schema, table)
 
         logger.info(
@@ -470,6 +967,9 @@ def migrate_one_table(
         try:
             if result["identity_insert"]:
                 set_identity_insert(dest_cur, schema, table, False)
+                dest_conn.commit()
+            if disable_indexes:
+                rebuild_indexes_for_table(dest_cur, schema, table, logger)
                 dest_conn.commit()
         except Exception:
             pass
@@ -521,6 +1021,13 @@ def run_migration(cfg: dict, log_callback=None):
     logger.info("Batch size: %d", cfg["batch_size"])
     logger.info("truncate_dest=%s delete_dest=%s continue_on_error=%s dry_run=%s",
                 cfg["truncate_dest"], cfg["delete_dest"], cfg["continue_on_error"], cfg["dry_run"])
+    if cfg.get("enable_chunking") or cfg.get("migrate_enable_chunking"):
+        logger.info("Chunked migration: threshold=%s num_chunks=%s chunk_workers=%s (max 32)",
+                    cfg.get("chunk_threshold") or cfg.get("migrate_chunk_threshold"),
+                    cfg.get("num_chunks") or cfg.get("migrate_num_chunks"),
+                    cfg.get("chunk_workers") or cfg.get("migrate_chunk_workers"))
+    if cfg.get("skip_completed") or cfg.get("migrate_skip_completed"):
+        logger.info("Skip completed tables: ON (tables with matching src/dest row counts will be skipped)")
     logger.info("Python exe: %s", sys.executable)
     logger.info("Run folder: %s", str(root.resolve()))
     logger.info("Log file: %s", str(log_file.resolve()))
@@ -618,10 +1125,17 @@ def run_migration(cfg: dict, log_callback=None):
                         delete_dest=cfg["delete_dest"],
                         continue_on_error=cfg["continue_on_error"],
                         dry_run=cfg["dry_run"],
+                        enable_chunking=cfg.get("enable_chunking", cfg.get("migrate_enable_chunking", False)),
+                        chunk_threshold=cfg.get("chunk_threshold", cfg.get("migrate_chunk_threshold", 500_000)),
+                        num_chunks=cfg.get("num_chunks", cfg.get("migrate_num_chunks", 10)),
+                        chunk_workers=cfg.get("chunk_workers", cfg.get("migrate_chunk_workers", 4)),
+                        disable_indexes=cfg.get("disable_indexes", cfg.get("migrate_disable_indexes", False)),
+                        skip_completed=cfg.get("skip_completed", cfg.get("migrate_skip_completed", False)),
+                        cfg=cfg,
                     )
                     report["tables"].append(res)
 
-                    if res["status"] == "failed":
+                    if res["status"] in ("failed", "completed_with_errors"):
                         report["errors"].append(f"{table_fqn}: {res.get('error')}")
                         if not cfg["continue_on_error"]:
                             raise RuntimeError(f"Stopping due to failure in {table_fqn}")
@@ -646,8 +1160,8 @@ def run_migration(cfg: dict, log_callback=None):
         logger.info("Report JSON: %s", str(report_file.resolve()))
         logger.info("Log file: %s", str(log_file.resolve()))
 
-        ok = sum(1 for t in report["tables"] if t.get("status") in ("success", "dry_run"))
-        failed = sum(1 for t in report["tables"] if t.get("status") == "failed")
+        ok = sum(1 for t in report["tables"] if t.get("status") in ("success", "dry_run", "skipped"))
+        failed = sum(1 for t in report["tables"] if t.get("status") in ("failed", "completed_with_errors"))
         report["tables_ok"] = ok
         report["tables_failed"] = failed
         logger.info("Summary: tables_ok=%d tables_failed=%d total_tables=%d errors=%d",

@@ -411,49 +411,25 @@ class DataMigrationTab:
                                        variable=self.verify_after_copy_var)
         verify_check.pack(anchor=tk.W, pady=2)
         
-        # Separator for chunking options
-        ttk.Separator(perf_frame, orient='horizontal').pack(fill=tk.X, pady=10)
-        
-        # Chunking options header
-        chunk_header = tk.Label(perf_frame, text="Large Table Chunking (ADF-style parallel migration):", 
-                               font=("Arial", 9, "bold"))
-        chunk_header.pack(anchor=tk.W, pady=(5, 2))
-        
-        # Row 6: Enable chunking
+        # Row 6: Chunked migration (same as Full Migration – for ODBC/Standard method)
+        chunk_row = ttk.Frame(perf_frame)
+        chunk_row.pack(fill=tk.X, pady=8)
         self.enable_chunking_var = tk.BooleanVar(value=False)
-        chunk_check = ttk.Checkbutton(perf_frame,
-                                       text="Enable Chunked Migration for large tables (parallel chunks with retry)",
-                                       variable=self.enable_chunking_var)
-        chunk_check.pack(anchor=tk.W, pady=2)
-        
-        # Row 7: Chunk settings frame
-        chunk_settings_frame = ttk.Frame(perf_frame)
-        chunk_settings_frame.pack(fill=tk.X, pady=5, padx=20)
-        
-        tk.Label(chunk_settings_frame, text="Chunk threshold (rows):").pack(side=tk.LEFT, padx=5)
-        self.chunk_threshold_var = tk.IntVar(value=10_000_000)
-        threshold_spin = ttk.Spinbox(chunk_settings_frame, from_=1_000_000, to=500_000_000, 
-                                     increment=1_000_000, width=12,
-                                     textvariable=self.chunk_threshold_var)
-        threshold_spin.pack(side=tk.LEFT, padx=5)
-        
-        tk.Label(chunk_settings_frame, text="Number of chunks:").pack(side=tk.LEFT, padx=(20, 5))
+        ttk.Checkbutton(chunk_row, text="Enable chunked migration (parallel slices, retry on fail)",
+                       variable=self.enable_chunking_var).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(chunk_row, text="Threshold (rows):").pack(side=tk.LEFT, padx=(0, 5))
+        self.chunk_threshold_var = tk.IntVar(value=500_000)
+        ttk.Spinbox(chunk_row, from_=100_000, to=500_000_000, increment=100_000,
+                    width=12, textvariable=self.chunk_threshold_var).pack(side=tk.LEFT, padx=2)
+        tk.Label(chunk_row, text="Chunks (max 32):").pack(side=tk.LEFT, padx=(10, 5))
         self.num_chunks_var = tk.IntVar(value=10)
-        chunks_spin = ttk.Spinbox(chunk_settings_frame, from_=2, to=50, width=5,
-                                  textvariable=self.num_chunks_var)
-        chunks_spin.pack(side=tk.LEFT, padx=5)
-        
-        tk.Label(chunk_settings_frame, text="Parallel workers:").pack(side=tk.LEFT, padx=(20, 5))
+        ttk.Spinbox(chunk_row, from_=2, to=32, width=5,
+                    textvariable=self.num_chunks_var).pack(side=tk.LEFT, padx=2)
+        tk.Label(chunk_row, text="Workers (max 32):").pack(side=tk.LEFT, padx=(10, 5))
         self.chunk_workers_var = tk.IntVar(value=4)
-        workers_spin = ttk.Spinbox(chunk_settings_frame, from_=1, to=16, width=5,
-                                   textvariable=self.chunk_workers_var)
-        workers_spin.pack(side=tk.LEFT, padx=5)
-        
-        # Explanation label
-        chunk_explain = tk.Label(perf_frame,
-                                text="Chunks split table by ID/PK column. Failed chunks are retried without affecting other chunks.",
-                                fg="gray", font=("Arial", 8))
-        chunk_explain.pack(anchor=tk.W, padx=20, pady=2)
+        ttk.Spinbox(chunk_row, from_=1, to=32, width=5,
+                    textvariable=self.chunk_workers_var).pack(side=tk.LEFT, padx=2)
+        tk.Label(chunk_row, text="(ODBC/Standard method only)", fg="gray", font=("Arial", 8)).pack(side=tk.LEFT, padx=5)
         
         # Progress frame
         progress_frame = ttk.LabelFrame(scrollable_frame, text="Progress", padding=10)

@@ -208,3 +208,5 @@ desktop.ini
 # !drivers/
 # drivers/*
 # !drivers/README.txt
+/azure_migration_tool/migration_runs
+/azure_migration_tool/migrations

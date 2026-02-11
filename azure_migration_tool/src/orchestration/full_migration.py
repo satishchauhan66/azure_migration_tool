@@ -232,6 +232,18 @@ def run_full_migration(cfg: dict):
                 "delete_dest": cfg["migrate_delete_dest"],
                 "continue_on_error": cfg["migrate_continue_on_error"],
                 "dry_run": cfg["migrate_dry_run"],
+                "enable_chunking": cfg.get("migrate_enable_chunking", False),
+                "migrate_enable_chunking": cfg.get("migrate_enable_chunking", False),
+                "chunk_threshold": cfg.get("migrate_chunk_threshold", 500_000),
+                "migrate_chunk_threshold": cfg.get("migrate_chunk_threshold", 500_000),
+                "num_chunks": cfg.get("migrate_num_chunks", 10),
+                "migrate_num_chunks": cfg.get("migrate_num_chunks", 10),
+                "chunk_workers": cfg.get("migrate_chunk_workers", 4),
+                "migrate_chunk_workers": cfg.get("migrate_chunk_workers", 4),
+                "disable_indexes": cfg.get("migrate_disable_indexes", False),
+                "migrate_disable_indexes": cfg.get("migrate_disable_indexes", False),
+                "skip_completed": cfg.get("migrate_skip_completed", False),
+                "migrate_skip_completed": cfg.get("migrate_skip_completed", False),
             }
 
             log_msg("Running data migration...")

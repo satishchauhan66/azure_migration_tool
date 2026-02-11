@@ -253,22 +253,22 @@ class FullMigrationTab:
         perf_row3.pack(fill=tk.X, pady=5)
         
         self.enable_chunking_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(perf_row3, text="Enable Chunking (ADF-style)",
+        ttk.Checkbutton(perf_row3, text="Enable chunked migration (parallel slices, retry on fail)",
                        variable=self.enable_chunking_var).pack(side=tk.LEFT, padx=10)
         
-        tk.Label(perf_row3, text="Threshold:").pack(side=tk.LEFT, padx=5)
-        self.chunk_threshold_var = tk.IntVar(value=10_000_000)
-        ttk.Spinbox(perf_row3, from_=1_000_000, to=500_000_000, increment=1_000_000, 
+        tk.Label(perf_row3, text="Threshold (rows):").pack(side=tk.LEFT, padx=5)
+        self.chunk_threshold_var = tk.IntVar(value=500_000)
+        ttk.Spinbox(perf_row3, from_=100_000, to=500_000_000, increment=100_000,
                    width=12, textvariable=self.chunk_threshold_var).pack(side=tk.LEFT, padx=2)
         
-        tk.Label(perf_row3, text="Chunks:").pack(side=tk.LEFT, padx=5)
+        tk.Label(perf_row3, text="Chunks (max 32):").pack(side=tk.LEFT, padx=5)
         self.num_chunks_var = tk.IntVar(value=10)
-        ttk.Spinbox(perf_row3, from_=2, to=50, width=5,
+        ttk.Spinbox(perf_row3, from_=2, to=32, width=5,
                    textvariable=self.num_chunks_var).pack(side=tk.LEFT, padx=2)
         
-        tk.Label(perf_row3, text="Workers:").pack(side=tk.LEFT, padx=5)
+        tk.Label(perf_row3, text="Workers (max 32):").pack(side=tk.LEFT, padx=5)
         self.chunk_workers_var = tk.IntVar(value=4)
-        ttk.Spinbox(perf_row3, from_=1, to=16, width=5,
+        ttk.Spinbox(perf_row3, from_=1, to=32, width=5,
                    textvariable=self.chunk_workers_var).pack(side=tk.LEFT, padx=2)
         
         self.truncate_dest_var = tk.BooleanVar(value=False)
