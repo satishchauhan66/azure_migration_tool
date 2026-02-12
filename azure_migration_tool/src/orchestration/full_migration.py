@@ -244,6 +244,8 @@ def run_full_migration(cfg: dict):
                 "migrate_disable_indexes": cfg.get("migrate_disable_indexes", False),
                 "skip_completed": cfg.get("migrate_skip_completed", False),
                 "migrate_skip_completed": cfg.get("migrate_skip_completed", False),
+                "parallel_tables": cfg.get("migrate_parallel_tables", 1),
+                "migrate_parallel_tables": cfg.get("migrate_parallel_tables", 1),
             }
 
             log_msg("Running data migration...")

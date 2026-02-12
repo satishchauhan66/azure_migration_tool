@@ -1028,6 +1028,9 @@ def run_migration(cfg: dict, log_callback=None):
                     cfg.get("chunk_workers") or cfg.get("migrate_chunk_workers"))
     if cfg.get("skip_completed") or cfg.get("migrate_skip_completed"):
         logger.info("Skip completed tables: ON (tables with matching src/dest row counts will be skipped)")
+    parallel_tables = max(1, min(32, cfg.get("parallel_tables", cfg.get("migrate_parallel_tables", 1))))
+    if parallel_tables > 1:
+        logger.info("Parallel tables: %d (migrating up to %d tables at a time)", parallel_tables, parallel_tables)
     logger.info("Python exe: %s", sys.executable)
     logger.info("Run folder: %s", str(root.resolve()))
     logger.info("Log file: %s", str(log_file.resolve()))
@@ -1110,35 +1113,106 @@ def run_migration(cfg: dict, log_callback=None):
 
                 logger.info("Tables selected for migration: %d", len(final_tables))
 
-                for i, (schema, table) in enumerate(final_tables, start=1):
+                num_tables = len(final_tables)
+                parallel_tables_eff = min(parallel_tables, num_tables) if parallel_tables > 1 else 1
+
+                def _migrate_one_table_worker(item: Tuple[int, str, str]) -> Tuple[int, Dict[str, Any]]:
+                    """Run migrate_one_table with dedicated connections (for parallel table migration)."""
+                    idx, schema, table = item
                     table_fqn = f"{schema}.{table}"
-                    logger.info("=== [%d/%d] Migrating %s ===", i, len(final_tables), table_fqn)
-
-                    res = migrate_one_table(
+                    logger.info("=== [%d/%d] Migrating %s ===", idx + 1, num_tables, table_fqn)
+                    with connect_to_database(
+                        server=cfg["src_server"],
+                        db=cfg["src_db"],
+                        user=cfg["src_user"],
+                        driver=driver,
+                        auth=cfg["src_auth"],
+                        password=cfg["src_password"],
+                        timeout=30,
                         logger=logger,
-                        src_conn=src_conn,
-                        dest_conn=dest_conn,
-                        schema=schema,
-                        table=table,
-                        batch_size=cfg["batch_size"],
-                        truncate_dest=cfg["truncate_dest"],
-                        delete_dest=cfg["delete_dest"],
-                        continue_on_error=cfg["continue_on_error"],
-                        dry_run=cfg["dry_run"],
-                        enable_chunking=cfg.get("enable_chunking", cfg.get("migrate_enable_chunking", False)),
-                        chunk_threshold=cfg.get("chunk_threshold", cfg.get("migrate_chunk_threshold", 500_000)),
-                        num_chunks=cfg.get("num_chunks", cfg.get("migrate_num_chunks", 10)),
-                        chunk_workers=cfg.get("chunk_workers", cfg.get("migrate_chunk_workers", 4)),
-                        disable_indexes=cfg.get("disable_indexes", cfg.get("migrate_disable_indexes", False)),
-                        skip_completed=cfg.get("skip_completed", cfg.get("migrate_skip_completed", False)),
-                        cfg=cfg,
-                    )
-                    report["tables"].append(res)
+                    ) as my_src:
+                        my_src.timeout = 0
+                        with connect_to_database(
+                            server=cfg["dest_server"],
+                            db=cfg["dest_db"],
+                            user=cfg["dest_user"],
+                            driver=driver,
+                            auth=cfg["dest_auth"],
+                            password=cfg["dest_password"],
+                            timeout=30,
+                            logger=logger,
+                        ) as my_dest:
+                            my_dest.timeout = 0
+                            res = migrate_one_table(
+                                logger=logger,
+                                src_conn=my_src,
+                                dest_conn=my_dest,
+                                schema=schema,
+                                table=table,
+                                batch_size=cfg["batch_size"],
+                                truncate_dest=cfg["truncate_dest"],
+                                delete_dest=cfg["delete_dest"],
+                                continue_on_error=cfg["continue_on_error"],
+                                dry_run=cfg["dry_run"],
+                                enable_chunking=cfg.get("enable_chunking", cfg.get("migrate_enable_chunking", False)),
+                                chunk_threshold=cfg.get("chunk_threshold", cfg.get("migrate_chunk_threshold", 500_000)),
+                                num_chunks=cfg.get("num_chunks", cfg.get("migrate_num_chunks", 10)),
+                                chunk_workers=cfg.get("chunk_workers", cfg.get("migrate_chunk_workers", 4)),
+                                disable_indexes=cfg.get("disable_indexes", cfg.get("migrate_disable_indexes", False)),
+                                skip_completed=cfg.get("skip_completed", cfg.get("migrate_skip_completed", False)),
+                                cfg=cfg,
+                            )
+                    return (idx, res)
 
-                    if res["status"] in ("failed", "completed_with_errors"):
-                        report["errors"].append(f"{table_fqn}: {res.get('error')}")
-                        if not cfg["continue_on_error"]:
-                            raise RuntimeError(f"Stopping due to failure in {table_fqn}")
+                if parallel_tables_eff <= 1:
+                    # Sequential: use the existing shared connections
+                    for i, (schema, table) in enumerate(final_tables, start=1):
+                        table_fqn = f"{schema}.{table}"
+                        logger.info("=== [%d/%d] Migrating %s ===", i, num_tables, table_fqn)
+                        res = migrate_one_table(
+                            logger=logger,
+                            src_conn=src_conn,
+                            dest_conn=dest_conn,
+                            schema=schema,
+                            table=table,
+                            batch_size=cfg["batch_size"],
+                            truncate_dest=cfg["truncate_dest"],
+                            delete_dest=cfg["delete_dest"],
+                            continue_on_error=cfg["continue_on_error"],
+                            dry_run=cfg["dry_run"],
+                            enable_chunking=cfg.get("enable_chunking", cfg.get("migrate_enable_chunking", False)),
+                            chunk_threshold=cfg.get("chunk_threshold", cfg.get("migrate_chunk_threshold", 500_000)),
+                            num_chunks=cfg.get("num_chunks", cfg.get("migrate_num_chunks", 10)),
+                            chunk_workers=cfg.get("chunk_workers", cfg.get("migrate_chunk_workers", 4)),
+                            disable_indexes=cfg.get("disable_indexes", cfg.get("migrate_disable_indexes", False)),
+                            skip_completed=cfg.get("skip_completed", cfg.get("migrate_skip_completed", False)),
+                            cfg=cfg,
+                        )
+                        report["tables"].append(res)
+                        if res["status"] in ("failed", "completed_with_errors"):
+                            report["errors"].append(f"{table_fqn}: {res.get('error')}")
+                            if not cfg["continue_on_error"]:
+                                raise RuntimeError(f"Stopping due to failure in {table_fqn}")
+                else:
+                    # Parallel: each table gets its own connections via worker
+                    results_by_idx = [None] * num_tables  # type: List[Optional[Dict[str, Any]]]
+                    with ThreadPoolExecutor(max_workers=parallel_tables_eff) as executor:
+                        futures = {
+                            executor.submit(_migrate_one_table_worker, (i, schema, table)): (i, schema, table)
+                            for i, (schema, table) in enumerate(final_tables)
+                        }
+                        for future in as_completed(futures):
+                            idx, res = future.result()
+                            results_by_idx[idx] = res
+                    for idx in range(num_tables):
+                        res = results_by_idx[idx]
+                        schema, table = final_tables[idx]
+                        table_fqn = f"{schema}.{table}"
+                        report["tables"].append(res)
+                        if res["status"] in ("failed", "completed_with_errors"):
+                            report["errors"].append(f"{table_fqn}: {res.get('error')}")
+                            if not cfg["continue_on_error"]:
+                                raise RuntimeError(f"Stopping due to failure in {table_fqn}")
 
         report["status"] = "success" if not report["errors"] else "completed_with_errors"
 
