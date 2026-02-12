@@ -75,27 +75,27 @@ class MainWindow:
         self._create_menu()
         
         # Lazy-loaded tabs: create content only when tab is first selected
+        # Order: Projects → Backup & Restore → Schema Backup/Migration → Full Migration → Data Migration → Schema Validation → Data Validation
         self._project_path = None
-        self._tab_created = {i: False for i in range(8)}
+        self._tab_created = {i: False for i in range(7)}
         self._tab_instances = {}
         self._tab_labels = [
             "📁 Projects",
+            "📦 Backup & Restore",
             "🚀 Full Migration",
             "📋 Schema Backup/Migration",
             "📊 Data Migration",
-            "✅ Data Validation",
             "🔍 Schema Validation",
-            "📦 Legacy Data",
-            "📦 Compare DB2 (Schema)",
+            "✅ Data Validation",
         ]
         
         # Create notebook (tabs)
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Add 8 placeholder frames (one per tab)
+        # Add 7 placeholder frames (one per tab)
         self._tab_placeholders = []
-        for i in range(8):
+        for i in range(7):
             ph = ttk.Frame(self.notebook)
             lbl = tk.Label(ph, text="Loading...", font=("Arial", 10), fg="gray")
             lbl.pack(expand=True, pady=50)
@@ -133,7 +133,7 @@ class MainWindow:
             idx = self.notebook.index(self.notebook.select())
         except Exception:
             return
-        if idx is None or idx < 0 or idx >= 8 or self._tab_created.get(idx, False):
+        if idx is None or idx < 0 or idx >= 7 or self._tab_created.get(idx, False):
             return
         self._ensure_tab_created(idx)
     
@@ -144,15 +144,15 @@ class MainWindow:
             if tab is not None:
                 return tab
         # Map index to (module_path, class_name); try azure_migration_tool first, then gui for path compatibility
+        # Legacy Data and Compare DB2 are under Tools menu (open in separate window)
         tab_specs = [
             ("azure_migration_tool.gui.tabs.project_tab", "ProjectTab"),
+            ("azure_migration_tool.gui.tabs.backup_restore_tab", "BackupRestoreTab"),
             ("azure_migration_tool.gui.tabs.full_migration_tab", "FullMigrationTab"),
             ("azure_migration_tool.gui.tabs.schema_tab", "SchemaTab"),
             ("azure_migration_tool.gui.tabs.data_migration_tab", "DataMigrationTab"),
-            ("azure_migration_tool.gui.tabs.data_validation_tab", "DataValidationTab"),
             ("azure_migration_tool.gui.tabs.schema_validation_tab", "SchemaValidationTab"),
-            ("azure_migration_tool.gui.tabs.legacy_data_validation_tab", "LegacyDataValidationTab"),
-            ("azure_migration_tool.gui.tabs.legacy_schema_validation_tab", "LegacySchemaValidationTab"),
+            ("azure_migration_tool.gui.tabs.data_validation_tab", "DataValidationTab"),
         ]
         mod_name, class_name = tab_specs[idx]
         try:
@@ -233,6 +233,9 @@ class MainWindow:
         tools_menu.add_command(label="Check what's installed...", command=self._show_dependency_check)
         tools_menu.add_command(label="Install database driver...", command=self._install_odbc_driver)
         tools_menu.add_separator()
+        tools_menu.add_command(label="Legacy Data Validation...", command=self._open_legacy_data_window)
+        tools_menu.add_command(label="Compare DB2 (Schema)...", command=self._open_compare_db2_window)
+        tools_menu.add_separator()
         tools_menu.add_command(label="Settings...", command=self._show_settings)
         
         # Help menu
@@ -261,6 +264,44 @@ class MainWindow:
     def _show_settings(self):
         """Show settings dialog."""
         messagebox.showinfo("Settings", "Settings dialog coming soon!")
+
+    def _open_legacy_data_window(self):
+        """Open Legacy Data Validation in a separate window (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.legacy_data_validation_tab",
+            "LegacyDataValidationTab",
+            "Legacy Data Validation",
+        )
+
+    def _open_compare_db2_window(self):
+        """Open Compare DB2 (Schema) in a separate window (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.legacy_schema_validation_tab",
+            "LegacySchemaValidationTab",
+            "Compare DB2 (Schema)",
+        )
+
+    def _open_tool_window(self, mod_name, class_name, title):
+        """Open a tab class in a new Toplevel window."""
+        try:
+            try:
+                mod = __import__(mod_name, fromlist=[class_name])
+            except ImportError:
+                short_name = "gui.tabs." + mod_name.split(".tabs.")[-1]
+                mod = __import__(short_name, fromlist=[class_name])
+            cls = getattr(mod, class_name)
+            win = tk.Toplevel(self.root)
+            win.title(title)
+            win.geometry("1000x700")
+            win.minsize(800, 500)
+            placeholder = ttk.Frame(win)
+            placeholder.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            tab = cls(placeholder, self)
+            tab.frame.pack(fill=tk.BOTH, expand=True)
+            if hasattr(self, "_project_path") and self._project_path and hasattr(tab, "set_project_path"):
+                tab.set_project_path(self._project_path)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open {title}: {e}")
     
     def _show_log_console(self):
         """Show the streaming log console window."""
