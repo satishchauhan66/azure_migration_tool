@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """
 Object inventory schemas for tracking database objects.
 """

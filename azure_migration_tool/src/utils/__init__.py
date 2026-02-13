@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """Utility modules for database operations."""
 
 from .azure_compat import (

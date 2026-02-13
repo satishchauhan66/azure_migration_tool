@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 Schema diff schemas for tracking differences between source and target.
 """

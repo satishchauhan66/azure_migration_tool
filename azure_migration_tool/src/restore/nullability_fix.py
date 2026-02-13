@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """Functions to fix nullability mismatches during restore."""
 
 import re

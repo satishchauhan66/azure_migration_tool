@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """
 Build Azure Migration Tool - Creates small exe with all dependencies.
 
@@ -52,7 +52,7 @@ def build_pyinstaller(app_dir: Path, console: bool = False) -> bool:
     
     datas_str = repr(datas_list)
     console_str = "True" if console else "False"
-    
+
     # Create spec file
     spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
 
@@ -150,6 +150,15 @@ exe = EXE(
     if exe.exists():
         size = exe.stat().st_size / (1024 * 1024)
         print(f"  Built: {exe.name} ({size:.0f} MB)")
+        # Copy to versioned name so each build creates a new file (no overwrite)
+        try:
+            sys.path.insert(0, str(app_dir.parent))
+            from azure_migration_tool import __version__
+            versioned = app_dir / 'dist' / f'AzureMigrationTool_{__version__}.exe'
+            shutil.copy2(exe, versioned)
+            print(f"  Copy:  {versioned.name} (versioned build)")
+        except Exception as e:
+            print(f"  (Versioned copy skipped: {e})")
         return True
     else:
         print(f"  Build failed!")
@@ -203,9 +212,16 @@ def main():
     exe_path = dist_dir / 'AzureMigrationTool.exe'
     if exe_path.exists():
         size = exe_path.stat().st_size / (1024 * 1024)
-        
+        try:
+            sys.path.insert(0, str(app_dir.parent))
+            from azure_migration_tool import __version__
+            versioned_path = dist_dir / f'AzureMigrationTool_{__version__}.exe'
+        except Exception:
+            versioned_path = None
         print_header("BUILD SUCCESSFUL!")
         print(f"\nExecutable: {exe_path}")
+        if versioned_path and versioned_path.exists():
+            print(f"Versioned:  {versioned_path}")
         print(f"Size: {size:.0f} MB")
         
         print("\n" + "-" * 60)

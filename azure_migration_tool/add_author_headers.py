@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """
 One-time script to add author/company headers to all Python files that don't have them.
 Run from repo root: python azure_migration_tool/add_author_headers.py
@@ -9,7 +9,7 @@ from pathlib import Path
 
 HEADER_LINES = [
     "# Author: Satish Chauhan",
-    "# Proprietary - 66degrees. All rights reserved.",
+    "",
 ]
 SKIP_DIRS = {"__pycache__", ".git", "venv", ".venv", "env", ".env"}
 
@@ -34,7 +34,7 @@ def should_skip(path: Path) -> bool:
 
 def already_has_header(content: str) -> bool:
     first_lines = "\n".join(content.splitlines()[:8])
-    return "Satish Chauhan" in first_lines and "66degrees" in first_lines
+    return "Satish Chauhan" in first_lines and "Satish Chauhan" in first_lines
 
 
 def add_header(content: str, path: Path) -> str:

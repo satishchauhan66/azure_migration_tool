@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """
 DB2 to Azure Migration Validation Module
 
@@ -28,7 +28,7 @@ Usage:
 """
 
 __version__ = "1.0.0"
-__author__ = "Migration Team"
+__author__ = "Satish Chauhan"
 
 # Lazy imports - don't import PySpark services at module load time
 # This allows the app to start even if PySpark is not installed

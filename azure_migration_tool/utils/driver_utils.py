@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """
 Driver utilities for checking and installing required drivers.
 Handles ODBC drivers and other dependencies for SQL Server connectivity.

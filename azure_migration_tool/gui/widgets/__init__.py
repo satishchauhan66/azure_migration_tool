@@ -1,3 +1,3 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """GUI widgets package."""

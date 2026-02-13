@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 Restore SQL Server database from Azure Blob Storage (.bak) via RESTORE DATABASE FROM URL.
 Uses the same credential pattern as backup (container SAS); no WITH CREDENTIAL for SAS.

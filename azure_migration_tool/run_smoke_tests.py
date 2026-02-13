@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """
 Smoke tests for Azure Migration Tool (no GUI, no DB).
 Run from repo root: python -m azure_migration_tool.run_smoke_tests

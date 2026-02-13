@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 Scrollable frame utility for tabs that have too much content.
 """

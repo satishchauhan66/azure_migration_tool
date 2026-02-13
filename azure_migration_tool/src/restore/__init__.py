@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """Schema restore module."""
 
 from .schema_restore import get_backup_paths, run_restore

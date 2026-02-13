@@ -1,3 +1,3 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 # Example scripts for db2_azure_validation module

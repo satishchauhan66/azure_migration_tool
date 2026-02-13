@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """
 Legacy Schema Validation Tab - Python-only validation (DB2 vs Azure SQL).
 Uses azure_migration_tool.validation; no PySpark required.

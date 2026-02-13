@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 Azure Migration Tool - Main Application
 A comprehensive GUI application for SQL Server/Azure SQL migrations.

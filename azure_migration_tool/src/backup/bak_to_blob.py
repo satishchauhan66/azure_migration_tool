@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 On-prem SQL Server .bak backup to Azure Blob Storage (BACKUP TO URL).
 Uses BACKUP DATABASE ... TO URL so the backup is written directly to blob.

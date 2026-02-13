@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 DB2-specific schema query utilities.
 Uses SYSCAT views instead of INFORMATION_SCHEMA.

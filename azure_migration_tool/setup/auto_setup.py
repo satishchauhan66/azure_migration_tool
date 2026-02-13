@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 Auto-Setup Module for Azure Migration Tool
 Automatically configures the host computer with necessary drivers and dependencies.

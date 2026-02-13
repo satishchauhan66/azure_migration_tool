@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """Orchestration module for full migration workflow."""
 
 from .full_migration import run_full_migration

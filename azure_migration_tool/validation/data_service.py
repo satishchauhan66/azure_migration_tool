@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 LegacyDataValidationService: Python-only data comparison (DB2 vs Azure SQL).
 compare_row_counts, compare_column_nulls. Same __init__ and save_comparison_to_csv as schema_service.

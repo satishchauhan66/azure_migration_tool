@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """
 Python-only Legacy validation module (DB2 vs Azure SQL).
 No PySpark; uses jaydebeapi, pyodbc, and pandas.

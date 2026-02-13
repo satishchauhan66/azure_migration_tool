@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """
 Main application window with tabbed interface.
 """
@@ -312,7 +312,13 @@ class MainWindow:
         
     def _show_about(self):
         """Show about dialog."""
-        about_text = """Azure Migration Tool v1.0
+        try:
+            from azure_migration_tool import __version__
+        except ImportError:
+            __version__ = "1.0"
+        about_text = f"""Azure Migration Tool v{__version__}
+
+Developed by Satish Chauhan
 
 A comprehensive tool for SQL Server/Azure SQL migrations.
 
@@ -322,7 +328,7 @@ Features:
 • Data Validation (Row Comparison)
 • Schema Validation
 
-© 2026"""
+© 2026 Satish Chauhan"""
         messagebox.showinfo("About", about_text)
         
     def _center_window(self):

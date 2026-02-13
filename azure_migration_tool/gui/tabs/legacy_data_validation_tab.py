@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """
 Legacy Data Validation Tab - Python-only (no PySpark).
 Compares DB2 to Azure SQL; same report format as before.

@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 Open DB2 (jaydebeapi) and Azure SQL (pyodbc) connections from config.
 Config can be a file path (str) or an in-memory dict (no file stored).

@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """
 Subprocess entry point for legacy data validation.
 Runs validation in a separate process so the JVM (DB2/JDBC) does not block the main process UI.

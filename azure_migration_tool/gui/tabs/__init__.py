@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """Tab components for the main window."""
 
 from gui.tabs.project_tab import ProjectTab

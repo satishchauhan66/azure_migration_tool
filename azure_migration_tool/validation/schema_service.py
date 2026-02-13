@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """
 LegacySchemaValidationService: Python-only schema comparison (DB2 vs Azure SQL).
 Returns pandas DataFrames with exact column names expected by Legacy schema tab.

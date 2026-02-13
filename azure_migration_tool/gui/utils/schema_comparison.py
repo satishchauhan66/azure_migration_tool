@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """
 Schema comparison utilities for comparing source and destination databases.
 Supports both SQL Server and DB2.

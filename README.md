@@ -1,5 +1,7 @@
 # Azure Migration Tool
 
+**Author: Satish Chauhan · © 2026**
+
 A desktop app to migrate and compare SQL Server / Azure SQL databases. It helps you move your database (schema and data) from a source server to a destination, and to validate that everything matches.
 
 ## Getting started (non-technical users)

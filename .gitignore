@@ -27,6 +27,11 @@ wheels/
 # PyInstaller
 *.manifest
 *.spec
+# Installer: keep scripts and NSIS; ignore bundled downloads (large)
+azure_migration_tool/installer/java/
+azure_migration_tool/installer/odbc/*.msi
+installer/java/
+installer/odbc/*.msi
 
 # Installer logs
 pip-log.txt
@@ -208,5 +213,11 @@ desktop.ini
 # !drivers/
 # drivers/*
 # !drivers/README.txt
+
+# App output / migration runs (tool creates these at runtime)
 /azure_migration_tool/migration_runs
 /azure_migration_tool/migrations
+azure_migration_tool/migration_runs
+azure_migration_tool/migrations
+projects/
+azure_migration_tool/installer/README.md

@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """Schema backup and .bak to blob module."""
 
 from .schema_backup import run_backup

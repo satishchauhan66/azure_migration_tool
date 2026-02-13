@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """Export functions for schema objects (tables, programmables, constraints, indexes)."""
 
 import re

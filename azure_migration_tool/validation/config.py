@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Sa-tish Chauhan
+
 """
 Load database config (from file or dict) and expose output directory.
 No pydantic; plain json.load(). Normalize user -> username for db2 and azure_sql.

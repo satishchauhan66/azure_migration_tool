@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: Satish Ch@uhan
+
 """
 SQL Server schema export utilities for schema comparison and script generation.
 Provides the same API as src.backup.exporters so schema_tab and script generator work without external src package.

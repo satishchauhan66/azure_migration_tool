@@ -1,5 +1,5 @@
-# Author: Satish Chauhan
-# Proprietary - 66degrees. All rights reserved.
+# Author: S@tish Chauhan
+
 """
 Setup script for db2_azure_validation module.
 
@@ -30,8 +30,8 @@ if os.path.exists(requirements_path):
 setup(
     name="db2_azure_validation",
     version="1.0.0",
-    author="Migration Team",
-    author_email="migration@example.com",
+    author="Satish Chauhan",
+    author_email="",
     description="DB2 to Azure SQL Migration Validation Module",
     long_description=long_description,
     long_description_content_type="text/markdown",
