@@ -69,7 +69,7 @@ Section "MainSection" SEC01
   SetOutPath "$INSTDIR"
   
   ; Main exe (versioned in dist; install as AzureMigrationTool.exe for shortcuts)
-  File /oname="${PRODUCT_EXE}" "${SOURCE_EXE}"
+  File /oname=${PRODUCT_EXE} "${SOURCE_EXE}"
   
   ; ODBC and Java: include only when built with /DHAVE_ODBC and /DHAVE_JAVA (build_installer.ps1 passes these when files exist)
   !ifdef HAVE_ODBC
