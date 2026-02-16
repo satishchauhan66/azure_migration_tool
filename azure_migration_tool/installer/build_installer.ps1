@@ -20,7 +20,16 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -LiteralPath $MyInvocation.MyCommand.Path
 if (-not $ScriptDir) { $ScriptDir = Split-Path -LiteralPath $PSCommandPath }
 $AppDir = Split-Path -LiteralPath $ScriptDir
-$DistExe = Join-Path $AppDir "dist\AzureMigrationTool.exe"
+# Version from __init__.py (exe is built as AzureMigrationTool_<version>.exe)
+$version = $null
+$initPath = Join-Path $AppDir "__init__.py"
+if (Test-Path $initPath) {
+    try {
+        $content = Get-Content -LiteralPath $initPath -Raw -Encoding UTF8 -ErrorAction Stop
+        if ($content -and ($content -match '__version__\s*=\s*"([^"]+)"')) { $version = $Matches[1].Trim() }
+    } catch { }
+}
+$DistExe = if ($version) { Join-Path $AppDir "dist\AzureMigrationTool_$version.exe" } else { Join-Path $AppDir "dist\AzureMigrationTool.exe" }
 $OdbcMsi = Join-Path $ScriptDir "odbc\msodbcsql18_x64.msi"
 $OdbcUrl = "https://go.microsoft.com/fwlink/?linkid=2249006"
 
@@ -61,7 +70,7 @@ if ($BuildExe) {
         $buildResult = & $pythonCmd build_exe.py 2>&1
         if ($LASTEXITCODE -ne 0) { Write-Host $buildResult }
         if (-not (Test-Path $DistExe)) {
-            Write-Host "ERROR: build_exe.py did not produce $DistExe" -ForegroundColor Red
+            Write-Host "ERROR: build_exe.py did not produce $DistExe (version from __init__.py)" -ForegroundColor Red
             Pop-Location
             Pause-IfError; exit 1
         }
@@ -73,7 +82,7 @@ if ($BuildExe) {
     Pop-Location | Out-Null
 } else {
     if (-not (Test-Path $DistExe)) {
-        Write-Host "ERROR: dist\AzureMigrationTool.exe not found. Build it first or run with -BuildExe." -ForegroundColor Red
+        Write-Host "ERROR: $DistExe not found. Build it first or run with -BuildExe." -ForegroundColor Red
         Pause-IfError; exit 1
     }
     Write-Host "Using existing exe: $DistExe"
@@ -98,19 +107,7 @@ if (-not $makensis) {
     Pause-IfError; exit 1
 }
 
-# 5. Get version so each build creates a new setup file (AzureMigrationTool_Setup_1.1.6.exe)
-$version = $null
-$initPath = Join-Path $AppDir "__init__.py"
-if (Test-Path $initPath) {
-    try {
-        $content = Get-Content -LiteralPath $initPath -Raw -Encoding UTF8 -ErrorAction Stop
-        if ($content -and ($content -match '__version__\s*=\s*"([^"]+)"')) {
-            $version = $Matches[1].Trim()
-        }
-    } catch {
-        Write-Host "Warning: Could not read version from __init__.py; setup will be AzureMigrationTool_Setup.exe" -ForegroundColor Yellow
-    }
-}
+# 5. Version already read above; if missing, setup output will be unversioned
 if (-not $version) {
     Write-Host "Warning: Could not read version from __init__.py; setup will be AzureMigrationTool_Setup.exe" -ForegroundColor Yellow
 }

@@ -1,8 +1,8 @@
-# Build Azure Migration Tool exe and name it with version.
+# Build Azure Migration Tool exe and NSIS installer.
 # Triggers: push to main, tags v*, or manual run.
-# Artifact: AzureMigrationTool-<version>.exe
+# Artifacts: AzureMigrationTool-<version>.exe, AzureMigrationTool_Setup_<version>.exe
 
-name: Build EXE
+name: Build EXE and Installer
 
 on:
   push:
@@ -74,20 +74,37 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
-      - name: Name exe with version
+      - name: Prepare exe artifact (versioned name in dist)
+        shell: pwsh
         run: |
           $ver = "${{ steps.version.outputs.version }}"
-          $src = "azure_migration_tool\dist\AzureMigrationTool.exe"
+          $src = "azure_migration_tool\dist\AzureMigrationTool_$ver.exe"
           $dir = "dist-versioned"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item $src "$dir\AzureMigrationTool-$ver.exe"
-          echo "Created AzureMigrationTool-$ver.exe"
+          Write-Host "Created AzureMigrationTool-$ver.exe"
 
-      - name: Upload artifact
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          cd azure_migration_tool
+          .\installer\build_installer.ps1
+
+      - name: Upload exe artifact
         uses: actions/upload-artifact@v4
         with:
           name: AzureMigrationTool-${{ steps.version.outputs.version }}.exe
           path: dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AzureMigrationTool_Setup-${{ steps.version.outputs.version }}.exe
+          path: azure_migration_tool/dist/AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe
 
       # Push to main: update "latest" tag and create/update release so it shows on Releases page
       - name: Update latest tag (push to main only)
@@ -109,20 +126,24 @@ jobs:
         with:
           tag_name: latest
           name: Latest (main)
-          body: "Built from main. Download **AzureMigrationTool-${{ steps.version.outputs.version }}.exe** below."
-          files: dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
+          body: "Built from main. Download **AzureMigrationTool-${{ steps.version.outputs.version }}.exe** (standalone) or **AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe** (installer)."
+          files: |
+            dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
+            azure_migration_tool/dist/AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe
           allow_updates: true
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tag v* or published release: create release if needed and attach exe
+      # Tag v* or published release: create release if needed and attach exe + installer
       - name: Upload to Release (tag v* or published release)
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
-          files: dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
+          files: |
+            dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
+            azure_migration_tool/dist/AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -11,8 +11,12 @@
 !define PRODUCT_NAME       "Azure Migration Tool"
 !define PRODUCT_PUBLISHER  "Satish Chauhan"
 !define PRODUCT_EXE        "AzureMigrationTool.exe"
-; Source: parent of installer = azure_migration_tool, so exe is ..\dist\AzureMigrationTool.exe
-!define SOURCE_EXE         "..\dist\${PRODUCT_EXE}"
+; Source: versioned exe when /DVERSION passed (build_installer.ps1), else unversioned
+!ifdef VERSION
+!define SOURCE_EXE         "..\dist\AzureMigrationTool_${VERSION}.exe"
+!else
+!define SOURCE_EXE         "..\dist\AzureMigrationTool.exe"
+!endif
 ; Bundled ODBC Driver 18 x64 MSI (optional - install runs it during setup)
 !define ODBC_MSI           "odbc\msodbcsql18_x64.msi"
 ; Bundled Java (Eclipse Temurin 17) for DB2/JDBC - run installer\download_java.ps1 to populate
@@ -42,9 +46,9 @@ Unicode True
 ; !define MUI_UNICON "path\to\unicon.ico"
 ; !define MUI_HEADERIMAGE  ; needs MUI_HEADERIMAGE_BITMAP
 !define MUI_WELCOMEPAGE_TITLE "Welcome to ${PRODUCT_NAME} Setup"
-!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and required components.$\r$\nDeveloped by Satish Chauhan.$\r$\n$\r$\nIncluded: application, ODBC Driver 18 for SQL Server, and Java 17 for DB2/JDBC (if bundled).$\r$\n$\r$\nClick Next to continue."
+!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and required components.$\r$\n$\r$\n$\r$\nIncluded: application, ODBC Driver 18 for SQL Server, and Java 17 for DB2/JDBC (if bundled).$\r$\n$\r$\nClick Next to continue."
 !define MUI_FINISHPAGE_TITLE "Completing ${PRODUCT_NAME} Setup"
-!define MUI_FINISHPAGE_TEXT "${PRODUCT_NAME} has been installed.$\r$\nDeveloped by Satish Chauhan.$\r$\n$\r$\nIncluded: ODBC Driver 18 for SQL Server, and Java 17 for DB2/JDBC (if bundled).$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar)."
+!define MUI_FINISHPAGE_TEXT "${PRODUCT_NAME} has been installed.$\r$\n.$\r$\n$\r$\nIncluded: ODBC Driver 18 for SQL Server, and Java 17 for DB2/JDBC (if bundled).$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar)."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "Run ${PRODUCT_NAME} now"
 
@@ -64,8 +68,8 @@ Unicode True
 Section "MainSection" SEC01
   SetOutPath "$INSTDIR"
   
-  ; Main exe (embedded at build time; if missing, makensis would have failed)
-  File "${SOURCE_EXE}"
+  ; Main exe (versioned in dist; install as AzureMigrationTool.exe for shortcuts)
+  File /oname="${PRODUCT_EXE}" "${SOURCE_EXE}"
   
   ; ODBC and Java: include only when built with /DHAVE_ODBC and /DHAVE_JAVA (build_installer.ps1 passes these when files exist)
   !ifdef HAVE_ODBC

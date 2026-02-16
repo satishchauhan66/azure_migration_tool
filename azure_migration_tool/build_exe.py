@@ -149,16 +149,24 @@ exe = EXE(
     exe = app_dir / 'dist' / 'AzureMigrationTool.exe'
     if exe.exists():
         size = exe.stat().st_size / (1024 * 1024)
-        print(f"  Built: {exe.name} ({size:.0f} MB)")
-        # Copy to versioned name so each build creates a new file (no overwrite)
-        try:
-            sys.path.insert(0, str(app_dir.parent))
-            from azure_migration_tool import __version__
-            versioned = app_dir / 'dist' / f'AzureMigrationTool_{__version__}.exe'
-            shutil.copy2(exe, versioned)
-            print(f"  Copy:  {versioned.name} (versioned build)")
-        except Exception as e:
-            print(f"  (Versioned copy skipped: {e})")
+        # Get version and rename to single versioned file (AzureMigrationTool_1.1.6.exe)
+        version = None
+        init_py = app_dir / '__init__.py'
+        if init_py.exists():
+            try:
+                text = init_py.read_text(encoding='utf-8')
+                import re
+                m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
+                if m:
+                    version = m.group(1).strip()
+            except Exception:
+                pass
+        if version:
+            versioned = app_dir / 'dist' / f'AzureMigrationTool_{version}.exe'
+            exe.rename(versioned)
+            print(f"  Built: {versioned.name} ({size:.0f} MB)")
+        else:
+            print(f"  Built: {exe.name} ({size:.0f} MB)")
         return True
     else:
         print(f"  Build failed!")
@@ -208,20 +216,23 @@ def main():
         print("\nBuild failed!")
         return 1
     
-    # Summary
-    exe_path = dist_dir / 'AzureMigrationTool.exe'
+    # Summary (exe is versioned: AzureMigrationTool_<version>.exe)
+    version = None
+    init_py = app_dir / '__init__.py'
+    if init_py.exists():
+        try:
+            import re
+            text = init_py.read_text(encoding='utf-8')
+            m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
+            if m:
+                version = m.group(1).strip()
+        except Exception:
+            pass
+    exe_path = (dist_dir / f'AzureMigrationTool_{version}.exe') if version else (dist_dir / 'AzureMigrationTool.exe')
     if exe_path.exists():
         size = exe_path.stat().st_size / (1024 * 1024)
-        try:
-            sys.path.insert(0, str(app_dir.parent))
-            from azure_migration_tool import __version__
-            versioned_path = dist_dir / f'AzureMigrationTool_{__version__}.exe'
-        except Exception:
-            versioned_path = None
         print_header("BUILD SUCCESSFUL!")
         print(f"\nExecutable: {exe_path}")
-        if versioned_path and versioned_path.exists():
-            print(f"Versioned:  {versioned_path}")
         print(f"Size: {size:.0f} MB")
         
         print("\n" + "-" * 60)
