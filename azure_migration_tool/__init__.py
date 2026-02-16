@@ -4,6 +4,5 @@
 
 __version__ = "1.1.6"
 __author__ = "Satish Chauhan"
-__copyright__ = "© 2026 Satish Chauhan"
 
 

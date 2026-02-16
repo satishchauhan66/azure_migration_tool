@@ -35,7 +35,7 @@ setup(
     description="DB2 to Azure SQL Migration Validation Module",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/your-org/db2-to-azure-migration-validation",
+    url="https://github.com/satishchauhan66/azure_migration_tool",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 4 - Beta",

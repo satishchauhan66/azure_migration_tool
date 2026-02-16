@@ -318,8 +318,6 @@ class MainWindow:
             __version__ = "1.0"
         about_text = f"""Azure Migration Tool v{__version__}
 
-Developed by Satish Chauhan
-
 A comprehensive tool for SQL Server/Azure SQL migrations.
 
 Features:
@@ -327,8 +325,7 @@ Features:
 • Data Migration with Auto-tuning
 • Data Validation (Row Comparison)
 • Schema Validation
-
-© 2026 Satish Chauhan"""
+"""
         messagebox.showinfo("About", about_text)
         
     def _center_window(self):
