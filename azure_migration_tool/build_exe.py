@@ -149,7 +149,7 @@ exe = EXE(
     exe = app_dir / 'dist' / 'AzureMigrationTool.exe'
     if exe.exists():
         size = exe.stat().st_size / (1024 * 1024)
-        # Get version and rename to single versioned file (AzureMigrationTool_1.1.6.exe)
+        # Get version and rename to single versioned file (AzureMigrationTool_1.2.0.exe)
         version = None
         init_py = app_dir / '__init__.py'
         if init_py.exists():

@@ -1,4 +1,5 @@
 ; Azure Migration Tool - NSIS Installer
+; Developed by Satish Chauhan
 ; Separate flow: run AFTER building the exe with build_exe.py
 ; Requires: NSIS 3.x (https://nsis.sourceforge.io/)
 ; Build: from azure_migration_tool dir run: makensis installer\AzureMigrationTool.nsi
@@ -26,8 +27,8 @@
 ; Installer attributes
 ; ---------------------------------------------------------------------------
 Name "${PRODUCT_NAME}"
-; VERSION passed by build_installer.bat / build_installer.ps1 (e.g. /DVERSION=1.1.6)
-; so each build creates a new file: AzureMigrationTool_Setup_1.1.6.exe
+; VERSION passed by build_installer.bat / build_installer.ps1 (e.g. /DVERSION=1.2.0)
+; so each build creates a new file: AzureMigrationTool_Setup_1.2.0.exe
 !ifdef VERSION
 OutFile "..\dist\AzureMigrationTool_Setup_${VERSION}.exe"
 !else
@@ -42,13 +43,14 @@ Unicode True
 ; UI
 ; ---------------------------------------------------------------------------
 !define MUI_ABORTWARNING
+!define MUI_BRANDINGTEXT "Developed by Satish Chauhan"
 ; !define MUI_ICON "path\to\icon.ico"   ; optional
 ; !define MUI_UNICON "path\to\unicon.ico"
 ; !define MUI_HEADERIMAGE  ; needs MUI_HEADERIMAGE_BITMAP
 !define MUI_WELCOMEPAGE_TITLE "Welcome to ${PRODUCT_NAME} Setup"
-!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and required components.$\r$\n$\r$\n$\r$\nIncluded: application, ODBC Driver 18 for SQL Server, and Java 17 for DB2/JDBC (if bundled).$\r$\n$\r$\nClick Next to continue."
+!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and required components.$\r$\nDeveloped by Satish Chauhan.$\r$\n$\r$\nIncluded: application, ODBC Driver 18 for SQL Server, and Java 17 for DB2/JDBC (if bundled).$\r$\n$\r$\nClick Next to continue."
 !define MUI_FINISHPAGE_TITLE "Completing ${PRODUCT_NAME} Setup"
-!define MUI_FINISHPAGE_TEXT "${PRODUCT_NAME} has been installed.$\r$\n.$\r$\n$\r$\nIncluded: ODBC Driver 18 for SQL Server, and Java 17 for DB2/JDBC (if bundled).$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar)."
+!define MUI_FINISHPAGE_TEXT "${PRODUCT_NAME} has been installed.$\r$\nDeveloped by Satish Chauhan.$\r$\n$\r$\nIncluded: ODBC Driver 18 for SQL Server, and Java 17 for DB2/JDBC (if bundled).$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar)."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "Run ${PRODUCT_NAME} now"
 
