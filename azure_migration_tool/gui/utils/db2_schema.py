@@ -374,6 +374,148 @@ def fetch_db2_check_constraints(cursor, schema: Optional[str] = None) -> List[Di
     return checks
 
 
+def fetch_db2_view_definition(cursor, schema: str, view_name: str) -> Optional[str]:
+    """
+    Fetch view definition text from DB2. Uses TEXT column; if SEQNO exists, concatenates parts.
+    Returns None if view not found or definition not readable (e.g. no SELECT on SYSCAT.VIEWS.TEXT).
+    """
+    # Try simple TEXT first (works when no SEQNO or single row)
+    try:
+        cursor.execute("""
+            SELECT TEXT FROM SYSCAT.VIEWS
+            WHERE VIEWSCHEMA = ? AND VIEWNAME = ?
+        """, [schema, view_name])
+        rows = cursor.fetchall()
+        if rows and len(rows) == 1 and rows[0][0]:
+            return _py_str(rows[0][0]).strip()
+        if rows and len(rows) > 1:
+            return "\n".join(_py_str(r[0]) for r in rows if r[0]).strip()
+    except Exception:
+        pass
+    # Try with SEQNO for multi-part view text (some DB2 versions)
+    try:
+        cursor.execute("""
+            SELECT SEQNO, TEXT
+            FROM SYSCAT.VIEWS
+            WHERE VIEWSCHEMA = ? AND VIEWNAME = ?
+            ORDER BY SEQNO
+        """, [schema, view_name])
+        rows = cursor.fetchall()
+        if not rows:
+            return None
+        parts = []
+        for row in rows:
+            if len(row) >= 2 and row[1] is not None:
+                parts.append(_py_str(row[1]))
+            elif len(row) >= 1 and row[0] is not None:
+                parts.append(_py_str(row[0]))
+        return "\n".join(parts).strip() if parts else None
+    except Exception:
+        return None
+
+
+def fetch_db2_routine_body(cursor, schema: str, routine_name: str, routine_type: str = "P") -> Optional[str]:
+    """
+    Fetch stored procedure or function body from SYSCAT.ROUTINES (BODY column).
+    routine_type: 'P' for procedure, 'F' for function.
+    Returns None if not found or not readable.
+    """
+    try:
+        cursor.execute("""
+            SELECT BODY FROM SYSCAT.ROUTINES
+            WHERE ROUTINESCHEMA = ? AND ROUTINENAME = ? AND ROUTINETYPE = ?
+        """, [schema, routine_name, routine_type])
+        row = cursor.fetchone()
+        return _py_str(row[0]) if row and row[0] else None
+    except Exception:
+        return None
+
+
+def fetch_db2_trigger_definition(cursor, schema: str, trigger_name: str) -> Optional[str]:
+    """Fetch trigger definition from DB2. Uses TRIGDEF if available."""
+    try:
+        cursor.execute("""
+            SELECT TRIGDEF FROM SYSCAT.TRIGGERS
+            WHERE TRIGSCHEMA = ? AND TRIGNAME = ?
+        """, [schema, trigger_name])
+        row = cursor.fetchone()
+        return _py_str(row[0]) if row and row[0] else None
+    except Exception:
+        return None
+
+
+def fetch_db2_foreign_key_columns(cursor, schema: str, table_name: str, constraint_name: str) -> List[Tuple[str, str]]:
+    """
+    Fetch (parent_column, ref_column) list for a foreign key using SYSCAT.KEYCOLUSE.
+    Returns list of (parent_col, referenced_col) in order.
+    """
+    try:
+        # KEYCOLUSE has CONSTNAME, TABSCHEMA, TABNAME, COLNAME, COLSEQ for the dependent table
+        # We need referenced table columns too - join with REFKEYNAME and REFTABSCHEMA/REFTABNAME
+        cursor.execute("""
+            SELECT r.CONSTNAME, r.TABSCHEMA, r.TABNAME, r.REFTABSCHEMA, r.REFTABNAME, r.REFKEYNAME
+            FROM SYSCAT.REFERENCES r
+            WHERE r.TABSCHEMA = ? AND r.TABNAME = ? AND r.CONSTNAME = ?
+        """, [schema, table_name, constraint_name])
+        ref_row = cursor.fetchone()
+        if not ref_row:
+            return []
+        ref_schema = _py_str(ref_row[3])
+        ref_table = _py_str(ref_row[4])
+        ref_key = _py_str(ref_row[5])
+        # Get dependent table column order
+        cursor.execute("""
+            SELECT COLNAME, COLSEQ FROM SYSCAT.KEYCOLUSE
+            WHERE CONSTNAME = ? AND TABSCHEMA = ? AND TABNAME = ?
+            ORDER BY COLSEQ
+        """, [constraint_name, schema, table_name])
+        parent_cols = [( _py_str(r[0]), _py_int(r[1]) ) for r in cursor.fetchall()]
+        # Get referenced key column order (REFKEYNAME is the PK/UK name on parent)
+        cursor.execute("""
+            SELECT COLNAME, COLSEQ FROM SYSCAT.KEYCOLUSE
+            WHERE CONSTNAME = ? AND TABSCHEMA = ? AND TABNAME = ?
+            ORDER BY COLSEQ
+        """, [ref_key, ref_schema, ref_table])
+        ref_cols = [( _py_str(r[0]), _py_int(r[1]) ) for r in cursor.fetchall()]
+        # Match by sequence
+        parent_sorted = [c[0] for c in sorted(parent_cols, key=lambda x: x[1])]
+        ref_sorted = [c[0] for c in sorted(ref_cols, key=lambda x: x[1])]
+        return list(zip(parent_sorted, ref_sorted))
+    except Exception:
+        return []
+
+
+def fetch_db2_sequence_details(cursor, schema: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Fetch full sequence details (START, INCREMENT, MINVALUE, MAXVALUE, CYCLE, CACHE) for DDL export."""
+    if schema:
+        cursor.execute("""
+            SELECT SEQSCHEMA, SEQNAME, START, INCREMENT, MINVALUE, MAXVALUE, CYCLE, CACHE
+            FROM SYSCAT.SEQUENCES
+            WHERE SEQSCHEMA = ? AND SEQTYPE = 'S'
+            ORDER BY SEQSCHEMA, SEQNAME
+        """, [schema])
+    else:
+        cursor.execute("""
+            SELECT SEQSCHEMA, SEQNAME, START, INCREMENT, MINVALUE, MAXVALUE, CYCLE, CACHE
+            FROM SYSCAT.SEQUENCES
+            WHERE SEQSCHEMA NOT LIKE 'SYS%' AND SEQTYPE = 'S'
+            ORDER BY SEQSCHEMA, SEQNAME
+        """)
+    result = []
+    for row in cursor.fetchall():
+        result.append({
+            'schema_name': _py_str(row[0]),
+            'sequence_name': _py_str(row[1]),
+            'start': row[2],
+            'increment': row[3],
+            'minvalue': row[4],
+            'maxvalue': row[5],
+            'cycle': _py_str(row[6]) == 'Y' if len(row) > 6 else False,
+            'cache': row[7] if len(row) > 7 else None,
+        })
+    return result
+
+
 def get_db2_schema_objects(conn, object_types: List[str], schema: Optional[str] = None,
                            logger: Optional[logging.Logger] = None) -> Dict[str, Any]:
     """

@@ -75,9 +75,9 @@ class MainWindow:
         self._create_menu()
         
         # Lazy-loaded tabs: create content only when tab is first selected
-        # Order: Projects → Backup & Restore → Schema Backup/Migration → Full Migration → Data Migration → Schema Validation → Data Validation
+        # Order: Projects → Backup & Restore → ... → Data Validation → ADF Pipeline Trigger
         self._project_path = None
-        self._tab_created = {i: False for i in range(7)}
+        self._tab_created = {i: False for i in range(8)}
         self._tab_instances = {}
         self._tab_labels = [
             "📁 Projects",
@@ -87,15 +87,16 @@ class MainWindow:
             "📊 Data Migration",
             "🔍 Schema Validation",
             "✅ Data Validation",
+            "⚡ ADF Pipeline",
         ]
         
         # Create notebook (tabs)
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Add 7 placeholder frames (one per tab)
+        # Add 8 placeholder frames (one per tab)
         self._tab_placeholders = []
-        for i in range(7):
+        for i in range(8):
             ph = ttk.Frame(self.notebook)
             lbl = tk.Label(ph, text="Loading...", font=("Arial", 10), fg="gray")
             lbl.pack(expand=True, pady=50)
@@ -133,7 +134,7 @@ class MainWindow:
             idx = self.notebook.index(self.notebook.select())
         except Exception:
             return
-        if idx is None or idx < 0 or idx >= 7 or self._tab_created.get(idx, False):
+        if idx is None or idx < 0 or idx >= 8 or self._tab_created.get(idx, False):
             return
         self._ensure_tab_created(idx)
     
@@ -153,6 +154,7 @@ class MainWindow:
             ("azure_migration_tool.gui.tabs.data_migration_tab", "DataMigrationTab"),
             ("azure_migration_tool.gui.tabs.schema_validation_tab", "SchemaValidationTab"),
             ("azure_migration_tool.gui.tabs.data_validation_tab", "DataValidationTab"),
+            ("azure_migration_tool.gui.tabs.adf_trigger_tab", "ADFTriggerTab"),
         ]
         mod_name, class_name = tab_specs[idx]
         try:

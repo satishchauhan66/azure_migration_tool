@@ -40,7 +40,7 @@ except ImportError:
                 return drivers[0]
             return "ODBC Driver 18 for SQL Server"
 
-# Import schema_backup
+# Import schema_backup and db2 schema backup
 try:
     from src.backup import schema_backup as sechma_backup
 except ImportError:
@@ -51,6 +51,11 @@ except ImportError:
             import sechma_backup
         except ImportError:
             sechma_backup = None
+
+try:
+    from src.backup import run_db2_backup
+except ImportError:
+    run_db2_backup = None
 
 # Import restore_schema
 try:
@@ -947,43 +952,71 @@ class SchemaTab:
             self.restore_backup_path_var.set(folder)
             
     def _start_backup(self):
-        """Start schema backup in a separate thread."""
-        if not sechma_backup:
-            messagebox.showerror("Error", "Schema backup module not available!")
-            return
-            
+        """Start schema backup in a separate thread (SQL Server or DB2 based on source type)."""
+        db_type = getattr(self.backup_connection_widget, "db_type_var", None)
+        db_type = db_type.get() if db_type else "sqlserver"
+        is_db2 = (db_type == "db2")
+
+        if is_db2:
+            if not run_db2_backup:
+                messagebox.showerror("Error", "DB2 schema backup module not available!")
+                return
+        else:
+            if not sechma_backup:
+                messagebox.showerror("Error", "Schema backup module not available!")
+                return
+
         # Validate inputs
         if not self.backup_server_var.get():
-            messagebox.showerror("Error", "Server is required!")
+            messagebox.showerror("Error", "Server/Host is required!")
             return
         if not self.backup_db_var.get():
             messagebox.showerror("Error", "Database is required!")
             return
-            
+        if is_db2 and (not self.backup_user_var.get() or not self.backup_password_var.get()):
+            messagebox.showerror("Error", "User and Password are required for DB2!")
+            return
+
         self.backup_btn.config(state=tk.DISABLED)
         self.backup_log.delete("1.0", tk.END)
         self.backup_log.insert(tk.END, "Starting backup...\n")
-        
+
         def run_backup():
             try:
                 backup_root = self.backup_output_var.get() or (self.project_path / "backups" if self.project_path else "backups")
-                
-                cfg = {
-                    "server": self.backup_server_var.get(),
-                    "database": self.backup_db_var.get(),
-                    "auth": self.backup_auth_var.get(),
-                    "user": self.backup_user_var.get(),
-                    "password": self.backup_password_var.get() or None,
-                    "backup_root": str(backup_root),
-                    "log_table_sample": 20,
-                    "export_defaults_separately": True
-                }
-                
-                self.backup_log.insert(tk.END, f"Connecting to {cfg['server']}...\n")
-                self.backup_log.see(tk.END)
-                
-                summary = sechma_backup.run_backup(cfg)
-                
+                backup_root = str(backup_root)
+
+                if is_db2:
+                    port_var = getattr(self.backup_connection_widget, "port_var", None)
+                    schema_var = getattr(self.backup_connection_widget, "schema_var", None)
+                    cfg = {
+                        "host": self.backup_server_var.get(),
+                        "port": int((port_var.get() if port_var else "50000") or "50000"),
+                        "database": self.backup_db_var.get(),
+                        "user": self.backup_user_var.get(),
+                        "password": self.backup_password_var.get() or "",
+                        "backup_root": backup_root,
+                        "schema": (schema_var.get() if schema_var else "").strip() or None,
+                        "log_table_sample": 20,
+                    }
+                    self.backup_log.insert(tk.END, f"Connecting to DB2 {cfg['host']}:{cfg['port']}...\n")
+                    self.backup_log.see(tk.END)
+                    summary = run_db2_backup(cfg)
+                else:
+                    cfg = {
+                        "server": self.backup_server_var.get(),
+                        "database": self.backup_db_var.get(),
+                        "auth": self.backup_auth_var.get(),
+                        "user": self.backup_user_var.get(),
+                        "password": self.backup_password_var.get() or None,
+                        "backup_root": backup_root,
+                        "log_table_sample": 20,
+                        "export_defaults_separately": True
+                    }
+                    self.backup_log.insert(tk.END, f"Connecting to {cfg['server']}...\n")
+                    self.backup_log.see(tk.END)
+                    summary = sechma_backup.run_backup(cfg)
+
                 if summary["status"] == "success":
                     self.backup_log.insert(tk.END, f"\n✓ Backup completed successfully!\n")
                     self.backup_log.insert(tk.END, f"Run ID: {summary.get('run_id', 'N/A')}\n")

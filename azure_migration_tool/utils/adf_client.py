@@ -135,8 +135,8 @@ class ADFClient:
             if not self.pipeline_exists(pipeline_name):
                 raise ValueError(f"Pipeline '{pipeline_name}' not found in factory '{self.factory_name}'")
             
-            # Trigger pipeline
-            run_response = self.client.pipeline_runs.create_run(
+            # Trigger pipeline (create_run is on PipelinesOperations, not PipelineRunsOperations)
+            run_response = self.client.pipelines.create_run(
                 self.resource_group,
                 self.factory_name,
                 pipeline_name,
