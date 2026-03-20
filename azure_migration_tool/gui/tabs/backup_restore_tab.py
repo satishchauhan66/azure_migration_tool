@@ -16,6 +16,7 @@ parent_dir = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(parent_dir))
 
 from gui.widgets.connection_widget import ConnectionWidget
+from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
 
 
 class BackupRestoreTab:
@@ -50,10 +51,7 @@ class BackupRestoreTab:
         canvas.bind("<Configure>", _on_canvas_configure)
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        bind_canvas_vertical_scroll(canvas, scrollable_frame)
 
         title_label = tk.Label(
             scrollable_frame,

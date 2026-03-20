@@ -20,6 +20,8 @@ sys.path.insert(0, str(parent_dir))
 
 from gui.utils.excel_utils import read_excel_file, create_sample_excel
 from gui.utils.database_utils import connect_with_msal_cache, connect_to_any_database
+from gui.utils.schema_remap import pair_tables_for_schema_remap
+from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
 
 # Import DB2-agnostic schema helpers
 try:
@@ -931,11 +933,8 @@ class SchemaValidationTab:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Enable mouse wheel scrolling
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        
+        bind_canvas_vertical_scroll(canvas, scrollable_frame)
+
         # Store reference
         self.scrollable_frame = scrollable_frame
         
@@ -1022,6 +1021,33 @@ class SchemaValidationTab:
         self.validate_programmables_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(options_frame, text="Validate Programmables (Views, Procedures, Functions)", 
                        variable=self.validate_programmables_var).pack(anchor=tk.W)
+        
+        # Cross-schema map: e.g. source tables under "userid" compared to "dbo" on destination (SQL Server)
+        remap_frame = ttk.LabelFrame(options_frame, text="Schema remap (optional)", padding=6)
+        remap_frame.pack(fill=tk.X, pady=(10, 0))
+        self.schema_remap_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            remap_frame,
+            text="Map source schema to destination schema (tables/columns; same table name)",
+            variable=self.schema_remap_enabled_var,
+        ).pack(anchor=tk.W)
+        remap_row = ttk.Frame(remap_frame)
+        remap_row.pack(anchor=tk.W, pady=4)
+        tk.Label(remap_row, text="Source schema:").pack(side=tk.LEFT, padx=(0, 4))
+        self.schema_remap_from_var = tk.StringVar(value="")
+        ttk.Entry(remap_row, textvariable=self.schema_remap_from_var, width=18).pack(side=tk.LEFT, padx=2)
+        tk.Label(remap_row, text="Destination schema:").pack(side=tk.LEFT, padx=(12, 4))
+        self.schema_remap_to_var = tk.StringVar(value="dbo")
+        ttk.Entry(remap_row, textvariable=self.schema_remap_to_var, width=18).pack(side=tk.LEFT, padx=2)
+        tk.Label(
+            remap_frame,
+            text="Example: userid (source) -> dbo (Azure). Other schemas still match 1:1. "
+            "Ignored when source/destination are different platform types (uses cross-platform table-name match). "
+            "Index/FK/constraint steps still use physical names on each server.",
+            font=("Arial", 8),
+            fg="gray",
+            wraplength=520,
+        ).pack(anchor=tk.W, pady=(4, 0))
         
         # Excel support frame
         excel_frame = ttk.LabelFrame(scrollable_frame, text="Bulk Processing (Excel)", padding=10)
@@ -1351,10 +1377,37 @@ class SchemaValidationTab:
                                 for name in matching_names
                             }
                         else:
-                            missing_in_dest = src_tables - dest_tables
-                            extra_in_dest = dest_tables - src_tables
-                            common_tables = src_tables & dest_tables
-                            self._cross_db_table_map = {}
+                            schema_remap_active = (
+                                self.schema_remap_enabled_var.get()
+                                and self.schema_remap_from_var.get().strip()
+                                and self.schema_remap_to_var.get().strip()
+                            )
+                            if schema_remap_active:
+                                self.validation_log.insert(
+                                    tk.END,
+                                    f"  Note: Schema remap ({self.schema_remap_from_var.get().strip()} -> "
+                                    f"{self.schema_remap_to_var.get().strip()}): pair tables by name on dest schema\n",
+                                )
+                                self.validation_log.see(tk.END)
+                                try:
+                                    common_tables, missing_in_dest, extra_in_dest, self._cross_db_table_map = (
+                                        pair_tables_for_schema_remap(
+                                            src_tables_list,
+                                            dest_tables_list,
+                                            self.schema_remap_from_var.get(),
+                                            self.schema_remap_to_var.get(),
+                                        )
+                                    )
+                                except ValueError:
+                                    common_tables = set()
+                                    missing_in_dest = src_tables - dest_tables
+                                    extra_in_dest = dest_tables - src_tables
+                                    self._cross_db_table_map = {}
+                            else:
+                                missing_in_dest = src_tables - dest_tables
+                                extra_in_dest = dest_tables - src_tables
+                                common_tables = src_tables & dest_tables
+                                self._cross_db_table_map = {}
                         
                         self.validation_log.insert(tk.END, f"  Results: {len(common_tables)} match, {len(missing_in_dest)} missing in dest, {len(extra_in_dest)} extra in dest\n")
                         self.validation_log.see(tk.END)
@@ -1386,7 +1439,7 @@ class SchemaValidationTab:
                             table_count += 1
                             self.validation_log.insert(tk.END, f"  [{table_count}/{len(common_tables)}] Validating columns for {table}...\n")
                             self.validation_log.see(tk.END)
-                            schema, name = table.split('.')
+                            schema, name = table.split(".", 1)
                             
                             self.validation_log.insert(tk.END, f"    Querying source columns for {table}...\n")
                             self.validation_log.see(tk.END)
@@ -1467,9 +1520,10 @@ class SchemaValidationTab:
                             is_cross_db = (src_db_type == 'db2' and dest_db_type == 'sqlserver')
                             
                             # For cross-database, get destination table name from mapping
-                            if is_cross_db and hasattr(self, '_cross_db_table_map') and table in self._cross_db_table_map:
-                                dest_table = self._cross_db_table_map[table]
-                                dest_schema, dest_name = dest_table.split('.')
+                            _tbl_map = getattr(self, '_cross_db_table_map', None) or {}
+                            if table in _tbl_map:
+                                dest_full = _tbl_map[table]
+                                dest_schema, dest_name = dest_full.split('.', 1)
                             else:
                                 dest_schema, dest_name = schema, name
                             
@@ -3047,7 +3101,11 @@ After installation, restart this application.
                                 WHERE TABLE_TYPE = 'BASE TABLE'
                                 ORDER BY TABLE_SCHEMA, TABLE_NAME
                             """)
-                            src_tables = {f"{row[0]}.{row[1]}" for row in src_cur.fetchall()}
+                            src_rows_tbl = src_cur.fetchall()
+                            src_tables_list = [
+                                (str(r[0]).strip(), str(r[1]).strip()) for r in src_rows_tbl
+                            ]
+                            src_tables = {f"{a}.{b}" for a, b in src_tables_list}
                             
                             dest_cur.execute("""
                                 SELECT TABLE_SCHEMA, TABLE_NAME
@@ -3055,11 +3113,50 @@ After installation, restart this application.
                                 WHERE TABLE_TYPE = 'BASE TABLE'
                                 ORDER BY TABLE_SCHEMA, TABLE_NAME
                             """)
-                            dest_tables = {f"{row[0]}.{row[1]}" for row in dest_cur.fetchall()}
+                            dest_rows_tbl = dest_cur.fetchall()
+                            dest_tables_list = [
+                                (str(r[0]).strip(), str(r[1]).strip()) for r in dest_rows_tbl
+                            ]
+                            dest_tables = {f"{a}.{b}" for a, b in dest_tables_list}
                             
-                            missing_in_dest = src_tables - dest_tables
-                            extra_in_dest = dest_tables - src_tables
-                            common_tables = src_tables & dest_tables
+                            src_dt_bulk = (
+                                cfg.get("src_db_type", self.src_db_type_var.get()) or "sqlserver"
+                            ).lower()
+                            dest_dt_bulk = (
+                                cfg.get("dest_db_type", self.dest_db_type_var.get()) or "sqlserver"
+                            ).lower()
+                            cross_db_bulk = src_dt_bulk != dest_dt_bulk
+                            bulk_table_map = {}
+                            if cross_db_bulk:
+                                missing_in_dest = src_tables - dest_tables
+                                extra_in_dest = dest_tables - src_tables
+                                common_tables = src_tables & dest_tables
+                            elif (
+                                self.schema_remap_enabled_var.get()
+                                and self.schema_remap_from_var.get().strip()
+                                and self.schema_remap_to_var.get().strip()
+                            ):
+                                try:
+                                    (
+                                        common_tables,
+                                        missing_in_dest,
+                                        extra_in_dest,
+                                        bulk_table_map,
+                                    ) = pair_tables_for_schema_remap(
+                                        src_tables_list,
+                                        dest_tables_list,
+                                        self.schema_remap_from_var.get(),
+                                        self.schema_remap_to_var.get(),
+                                    )
+                                except ValueError:
+                                    missing_in_dest = src_tables - dest_tables
+                                    extra_in_dest = dest_tables - src_tables
+                                    common_tables = src_tables & dest_tables
+                                    bulk_table_map = {}
+                            else:
+                                missing_in_dest = src_tables - dest_tables
+                                extra_in_dest = dest_tables - src_tables
+                                common_tables = src_tables & dest_tables
                             
                             db_name = f"{cfg.get('src_db')} vs {cfg.get('dest_db')}"
                             
@@ -3084,7 +3181,11 @@ After installation, restart this application.
                             self.validation_log.see(tk.END)
                             
                             for table in sorted(common_tables):
-                                schema, name = table.split('.')
+                                schema, name = table.split(".", 1)
+                                dest_schema, dest_name = schema, name
+                                if table in bulk_table_map:
+                                    d_full = bulk_table_map[table]
+                                    dest_schema, dest_name = d_full.split(".", 1)
                                 
                                 src_cur.execute("""
                                     SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE
@@ -3099,7 +3200,7 @@ After installation, restart this application.
                                     FROM INFORMATION_SCHEMA.COLUMNS
                                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
                                     ORDER BY ORDINAL_POSITION
-                                """, schema, name)
+                                """, dest_schema, dest_name)
                                 dest_columns = {row[0]: row[1:] for row in dest_cur.fetchall()}
                                 
                                 db_name = f"{cfg.get('src_db')} vs {cfg.get('dest_db')}"
@@ -5605,8 +5706,8 @@ After installation, restart this application.
                 obj = values['text']
                 db_name = self.results_tree.set(item, "DB")
                 
-                # Check status filter
-                status_match = (status_filter == "All" or status in status_filter)
+                # Check status filter (exact match on combobox value, not substring)
+                status_match = (status_filter == "All" or status == status_filter)
                 
                 # Check search filter
                 search_match = (not search_term or 

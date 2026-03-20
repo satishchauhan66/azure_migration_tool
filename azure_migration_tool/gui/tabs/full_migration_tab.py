@@ -15,6 +15,7 @@ parent_dir = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(parent_dir))
 
 from gui.utils.excel_utils import read_excel_file, create_sample_excel
+from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
 
 # Use real full migration orchestration module (no top-level run_full_migration package)
 run_full_migration = None
@@ -81,11 +82,8 @@ class FullMigrationTab:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Enable mouse wheel scrolling
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        
+        bind_canvas_vertical_scroll(canvas, scrollable_frame)
+
         # Store reference for later use
         self.scrollable_frame = scrollable_frame
         

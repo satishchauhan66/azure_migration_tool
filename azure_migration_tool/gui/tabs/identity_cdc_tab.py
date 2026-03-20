@@ -22,6 +22,11 @@ except ImportError:
     from azure_migration_tool.gui.widgets.connection_widget import ConnectionWidget
 
 try:
+    from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
+except ImportError:
+    from azure_migration_tool.gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
+
+try:
     from utils.identity_cdc import (
         fetch_identity_columns,
         save_state_file,
@@ -162,10 +167,7 @@ class IdentityCDCTab:
         canvas.bind("<Configure>", _on_canvas_configure)
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        bind_canvas_vertical_scroll(canvas, scrollable_frame)
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)

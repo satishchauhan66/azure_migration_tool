@@ -24,6 +24,7 @@ sys.path.insert(0, str(parent_dir))
 
 from gui.utils.excel_utils import read_excel_file, create_sample_excel
 from gui.widgets.connection_widget import ConnectionWidget
+from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
 
 try:
     import pyodbc
@@ -44,6 +45,14 @@ except ImportError:
             from src.migration import data_migration as migrate_data
         except ImportError:
             migrate_data = None
+
+
+def _data_migration_module():
+    """Return the loaded ``src.migration.data_migration`` module (the global ``migrate_data``)."""
+    if migrate_data is None:
+        raise RuntimeError("Data migration module not available.")
+    return migrate_data
+
 
 try:
     import msal
@@ -115,11 +124,8 @@ class DataMigrationTab:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Enable mouse wheel scrolling
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        
+        bind_canvas_vertical_scroll(canvas, scrollable_frame)
+
         # Store reference
         self.scrollable_frame = scrollable_frame
         
@@ -1103,6 +1109,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
     
     def _migrate_with_bcp(self, cfg, logger_callback):
         """Migrate data using BCP with native MFA support."""
+        md = _data_migration_module()
         bcp_exe = self._find_bcp_exe()
         if not bcp_exe:
             raise RuntimeError("BCP utility not found. Please install SQL Server Command Line Utilities.")
@@ -1120,7 +1127,6 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             bcp_login_name = self.bcp_login_name_var.get() or "svc_azdm_bcp"
             
             # Build connection strings for MFA to create logins
-            from migrate_data import build_conn_str, pick_sql_driver
             import logging
             
             log_handler = logging.StreamHandler()
@@ -1129,13 +1135,13 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             temp_logger.addHandler(log_handler)
             temp_logger.setLevel(logging.INFO)
             
-            driver = pick_sql_driver(temp_logger)
+            driver = md.pick_sql_driver(temp_logger)
             
-            src_conn_str = build_conn_str(
+            src_conn_str = md.build_conn_str(
                 cfg['src_server'], cfg['src_db'], driver,
                 cfg['src_auth'], cfg['src_user'], cfg.get('src_password')
             )
-            dest_conn_str = build_conn_str(
+            dest_conn_str = md.build_conn_str(
                 cfg['dest_server'], cfg['dest_db'], driver,
                 cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
             )
@@ -1213,7 +1219,6 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
         else:
             # Not using SQL login - get table list via BCP query or pyodbc
             # For simplicity, we'll use pyodbc to get table list
-            from migrate_data import build_conn_str, pick_sql_driver
             import logging
             
             log_handler = logging.StreamHandler()
@@ -1222,9 +1227,9 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             temp_logger.addHandler(log_handler)
             temp_logger.setLevel(logging.INFO)
             
-            driver = pick_sql_driver(temp_logger)
+            driver = md.pick_sql_driver(temp_logger)
             
-            src_conn_str = build_conn_str(
+            src_conn_str = md.build_conn_str(
                 cfg['src_server'], cfg['src_db'], driver,
                 cfg['src_auth'], cfg['src_user'], cfg.get('src_password')
             )
@@ -1313,7 +1318,6 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
         
         if check_exists and table_list:
             logger_callback("Checking which tables exist in destination...")
-            from migrate_data import build_conn_str, pick_sql_driver
             import logging
             
             log_handler = logging.StreamHandler()
@@ -1323,8 +1327,8 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 temp_logger.addHandler(log_handler)
             temp_logger.setLevel(logging.INFO)
             
-            driver = pick_sql_driver(temp_logger)
-            dest_conn_str = build_conn_str(
+            driver = md.pick_sql_driver(temp_logger)
+            dest_conn_str = md.build_conn_str(
                 cfg['dest_server'], cfg['dest_db'], driver,
                 cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
             )
@@ -1415,10 +1419,6 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
         try:
             # Connect to destination for constraint management
             if cfg.get('disable_fk') or cfg.get('disable_indexes') or cfg.get('disable_triggers'):
-                from migrate_data import (build_conn_str, pick_sql_driver, 
-                    disable_all_foreign_keys, enable_all_foreign_keys,
-                    disable_nonclustered_indexes, rebuild_indexes,
-                    disable_all_triggers, enable_all_triggers)
                 import logging
                 
                 log_handler = logging.StreamHandler()
@@ -1428,8 +1428,8 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     temp_logger.addHandler(log_handler)
                 temp_logger.setLevel(logging.INFO)
                 
-                driver = pick_sql_driver(temp_logger)
-                dest_conn_str = build_conn_str(
+                driver = md.pick_sql_driver(temp_logger)
+                dest_conn_str = md.build_conn_str(
                     cfg['dest_server'], cfg['dest_db'], driver,
                     cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
                 )
@@ -1438,21 +1438,21 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 
                 if cfg.get('disable_fk'):
                     logger_callback("Disabling foreign key constraints...")
-                    disable_all_foreign_keys(dest_cur, temp_logger)
+                    md.disable_all_foreign_keys(dest_cur, temp_logger)
                     dest_conn_for_constraints.commit()
                     fk_disabled = True
                     logger_callback("[OK] Foreign key constraints disabled")
                 
                 if cfg.get('disable_indexes'):
                     logger_callback("Disabling non-clustered indexes...")
-                    disable_nonclustered_indexes(dest_cur, temp_logger)
+                    md.disable_nonclustered_indexes(dest_cur, temp_logger)
                     dest_conn_for_constraints.commit()
                     indexes_disabled = True
                     logger_callback("[OK] Non-clustered indexes disabled")
                 
                 if cfg.get('disable_triggers'):
                     logger_callback("Disabling triggers...")
-                    disable_all_triggers(dest_cur, temp_logger)
+                    md.disable_all_triggers(dest_cur, temp_logger)
                     dest_conn_for_constraints.commit()
                     triggers_disabled = True
                     logger_callback("[OK] Triggers disabled")
@@ -1462,7 +1462,6 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             skip_completed = cfg.get('skip_completed', True)  # Default to skip completed
             
             if resume_enabled or skip_completed:
-                from migrate_data import build_conn_str, pick_sql_driver
                 import logging
                 log_handler = logging.StreamHandler()
                 log_handler.setFormatter(logging.Formatter('%(message)s'))
@@ -1470,8 +1469,8 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 if not temp_logger.handlers:
                     temp_logger.addHandler(log_handler)
                 temp_logger.setLevel(logging.INFO)
-                driver = pick_sql_driver(temp_logger)
-                dest_conn_str = build_conn_str(
+                driver = md.pick_sql_driver(temp_logger)
+                dest_conn_str = md.build_conn_str(
                     cfg['dest_server'], cfg['dest_db'], driver,
                     cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
                 )
@@ -1516,7 +1515,6 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                             dest_conn_for_resume.commit()
                         else:
                             # Need to create a connection for truncate
-                            from migrate_data import build_conn_str, pick_sql_driver
                             import logging
                             
                             log_handler = logging.StreamHandler()
@@ -1525,8 +1523,8 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                             temp_logger.addHandler(log_handler)
                             temp_logger.setLevel(logging.INFO)
                             
-                            driver = pick_sql_driver(temp_logger)
-                            dest_conn_str = build_conn_str(
+                            driver = md.pick_sql_driver(temp_logger)
+                            dest_conn_str = md.build_conn_str(
                                 cfg['dest_server'], cfg['dest_db'], driver,
                                 cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
                             )
@@ -1739,7 +1737,6 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             # Re-enable constraints/indexes/triggers
             try:
                 if dest_conn_for_constraints:
-                    from migrate_data import (enable_all_foreign_keys, rebuild_indexes, enable_all_triggers)
                     import logging
                     
                     temp_logger = logging.getLogger('bcp_migration_constraints')
@@ -1747,7 +1744,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     
                     if triggers_disabled:
                         logger_callback("Re-enabling triggers...")
-                        enable_all_triggers(dest_cur, temp_logger)
+                        md.enable_all_triggers(dest_cur, temp_logger)
                         dest_conn_for_constraints.commit()
                         logger_callback("[OK] Triggers re-enabled")
                     
@@ -1771,7 +1768,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     
                     if fk_disabled:
                         logger_callback("Re-enabling foreign key constraints...")
-                        enable_all_foreign_keys(dest_cur, temp_logger)
+                        md.enable_all_foreign_keys(dest_cur, temp_logger)
                         dest_conn_for_constraints.commit()
                         logger_callback("[OK] Foreign key constraints re-enabled")
                     
@@ -1791,7 +1788,6 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 logger_callback(f"Cleaning up SQL login '{bcp_login_name}'...")
                 
                 # Reconnect to clean up
-                from migrate_data import build_conn_str, pick_sql_driver
                 import logging
                 
                 log_handler = logging.StreamHandler()
@@ -1800,13 +1796,13 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 temp_logger.addHandler(log_handler)
                 temp_logger.setLevel(logging.INFO)
                 
-                driver = pick_sql_driver(temp_logger)
+                driver = md.pick_sql_driver(temp_logger)
                 
-                src_conn_str = build_conn_str(
+                src_conn_str = md.build_conn_str(
                     cfg['src_server'], cfg['src_db'], driver,
                     cfg['src_auth'], cfg['src_user'], cfg.get('src_password')
                 )
-                dest_conn_str = build_conn_str(
+                dest_conn_str = md.build_conn_str(
                     cfg['dest_server'], cfg['dest_db'], driver,
                     cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
                 )
@@ -1888,9 +1884,8 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 # Get all tables from source
                 logger_callback("Getting table list from source database...")
                 try:
-                    import migrate_data
                     import pyodbc
-                    from migrate_data import build_conn_str, pick_sql_driver, fetch_tables
+                    md_adf = _data_migration_module()
                     import logging
                     
                     log_handler = logging.StreamHandler()
@@ -1899,15 +1894,15 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     temp_logger.addHandler(log_handler)
                     temp_logger.setLevel(logging.INFO)
                     
-                    driver = pick_sql_driver(temp_logger)
-                    src_conn_str = build_conn_str(
+                    driver = md_adf.pick_sql_driver(temp_logger)
+                    src_conn_str = md_adf.build_conn_str(
                         cfg['src_server'], cfg['src_db'], driver,
                         cfg['src_auth'], cfg['src_user'], cfg.get('src_password')
                     )
                     src_conn = pyodbc.connect(src_conn_str)
                     src_cur = src_conn.cursor()
                     
-                    tables = fetch_tables(src_cur)
+                    tables = md_adf.fetch_tables(src_cur)
                     table_list = [f"{s}.{t}" for s, t in tables]
                     
                     src_conn.close()
@@ -2053,6 +2048,9 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         "BCP utility is still not found.\n\n"
                         "Please install it manually and restart the application.")
                     return
+            if not migrate_data:
+                messagebox.showerror("Error", "Data migration module not available!")
+                return
         elif migration_method == "adf":
             # Check if ADF client is available
             if not ADF_AVAILABLE or ADFClient is None:
@@ -2265,6 +2263,9 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         "BCP utility is still not found.\n\n"
                         "Please install it manually and restart the application.")
                     return
+            if not migrate_data:
+                messagebox.showerror("Error", "Data migration module not available!")
+                return
         elif migration_method == "adf":
             # Check if ADF client is available
             if not ADF_AVAILABLE or ADFClient is None:

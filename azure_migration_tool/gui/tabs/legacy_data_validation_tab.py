@@ -30,6 +30,7 @@ except ImportError:
 
 # Import ConnectionWidget
 from gui.widgets.connection_widget import ConnectionWidget
+from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
 
 
 class LegacyDataValidationTab:
@@ -192,11 +193,8 @@ class LegacyDataValidationTab:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Enable mouse wheel scrolling
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        
+        bind_canvas_vertical_scroll(canvas, scrollable_frame)
+
         self.scrollable_frame = scrollable_frame
         
         # Left column - Source Database

@@ -19,6 +19,28 @@ sys.path.insert(0, str(parent_dir))
 
 from gui.utils.excel_utils import read_excel_file, create_sample_excel
 from gui.utils.database_utils import connect_with_msal_cache, connect_to_any_database
+from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
+from gui.utils.schema_remap import physical_dest_schema_table
+from gui.utils.compare_keys import (
+    align_pairs_to_cursor_columns,
+    db2_order_by_clause,
+    distinct_key_count_in_sample,
+    fetch_db2_column_names,
+    fetch_db2_pk_columns,
+    fetch_sqlserver_column_names,
+    fetch_sqlserver_pk_columns,
+    fetch_sqlserver_rows_matching_composite_keys,
+    format_compare_key_override,
+    format_duplicate_key_examples,
+    format_key_for_display,
+    greedy_expand_key_until_unique_in_sample,
+    normalize_compare_key_tuple,
+    pair_columns_case_insensitive,
+    resolve_compare_key_pairs,
+    row_key_tuple,
+    sample_key_duplicate_stats,
+    sqlserver_order_by_clause,
+)
 
 # Import log console for streaming logs
 try:
@@ -208,11 +230,8 @@ class DataValidationTab:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Enable mouse wheel scrolling
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        
+        bind_canvas_vertical_scroll(canvas, scrollable_frame)
+
         # Store reference
         self.scrollable_frame = scrollable_frame
         
@@ -300,6 +319,28 @@ class DataValidationTab:
         sample_size_spin.pack(side=tk.LEFT, padx=5)
         tk.Label(sample_size_row, text="(default 100)").pack(side=tk.LEFT)
         
+        tk.Label(
+            options_frame,
+            text="Compare sample rows by key (optional, comma-separated column names):",
+            font=("Arial", 9),
+        ).pack(anchor=tk.W, pady=(8, 0))
+        self.compare_key_override_var = tk.StringVar(value="")
+        ttk.Entry(
+            options_frame,
+            textvariable=self.compare_key_override_var,
+            width=62,
+        ).pack(anchor=tk.W, pady=2)
+        tk.Label(
+            options_frame,
+            text="Overrides automatic key: destination PK → source PK → id-like column. "
+            "Used for ORDER BY and matching rows in sample comparison. "
+            "After selecting a result row, use “Suggest compare key” in the detail panel "
+            "to fill this from a sample.",
+            font=("Arial", 8),
+            fg="gray",
+            wraplength=520,
+        ).pack(anchor=tk.W)
+        
         self.use_exact_count_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(options_frame, text="Use Exact COUNT(*) (slower but more accurate)", 
                        variable=self.use_exact_count_var).pack(anchor=tk.W, pady=5)
@@ -309,6 +350,30 @@ class DataValidationTab:
                        variable=self.check_identity_reseed_var).pack(anchor=tk.W, pady=5)
         tk.Label(options_frame, text="Reseed: After DB2 to SQL migration, identity can be lower than max ID in child tables; new inserts then cause duplicate-key errors. This check flags tables that need DBCC CHECKIDENT RESEED.", 
                  font=("Arial", 8), fg="gray", wraplength=520).pack(anchor=tk.W, padx=(20, 0))
+        
+        remap_frame = ttk.LabelFrame(options_frame, text="Schema remap (optional)", padding=6)
+        remap_frame.pack(fill=tk.X, pady=(10, 0))
+        self.schema_remap_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            remap_frame,
+            text="Use different schema on destination (same table name)",
+            variable=self.schema_remap_enabled_var,
+        ).pack(anchor=tk.W)
+        remap_row = ttk.Frame(remap_frame)
+        remap_row.pack(anchor=tk.W, pady=4)
+        tk.Label(remap_row, text="Source schema:").pack(side=tk.LEFT, padx=(0, 4))
+        self.schema_remap_from_var = tk.StringVar(value="")
+        ttk.Entry(remap_row, textvariable=self.schema_remap_from_var, width=18).pack(side=tk.LEFT, padx=2)
+        tk.Label(remap_row, text="Destination schema:").pack(side=tk.LEFT, padx=(12, 4))
+        self.schema_remap_to_var = tk.StringVar(value="dbo")
+        ttk.Entry(remap_row, textvariable=self.schema_remap_to_var, width=18).pack(side=tk.LEFT, padx=2)
+        tk.Label(
+            remap_frame,
+            text="Example: source userid.Orders compared to dbo.Orders on Azure.",
+            font=("Arial", 8),
+            fg="gray",
+            wraplength=520,
+        ).pack(anchor=tk.W, pady=(4, 0))
         
         # Excel support frame
         excel_frame = ttk.LabelFrame(scrollable_frame, text="Bulk Processing (Excel)", padding=10)
@@ -445,6 +510,18 @@ class DataValidationTab:
         self.validation_results = {}
         self._last_sample_export_data = None  # for Export sample (top 100) to Excel
         self._cached_driver = None  # Cache the detected driver
+
+    def _physical_dest_schema_table(self, src_schema: str, table_name: str):
+        """Destination (schema, table) to query for a given source schema.table."""
+        return physical_dest_schema_table(
+            src_schema,
+            table_name,
+            remap_enabled=bool(
+                getattr(self, "schema_remap_enabled_var", None) and self.schema_remap_enabled_var.get()
+            ),
+            remap_from=(self.schema_remap_from_var.get() if getattr(self, "schema_remap_from_var", None) else "") or "",
+            remap_to=(self.schema_remap_to_var.get() if getattr(self, "schema_remap_to_var", None) else "") or "",
+        )
     
     def _get_odbc_driver(self):
         """Auto-detect the best available ODBC driver."""
@@ -719,7 +796,12 @@ class DataValidationTab:
                     self._log("Using fast path: row counts from batch (no per-table queries).", logging.INFO, context)
                 
                 for idx, table in enumerate(tables, 1):
-                    schema, name = table.split('.') if '.' in table else ('dbo', table)
+                    schema, name = (
+                        table.split(".", 1) if "." in table else ("dbo", table)
+                    )
+                    dest_schema, dest_name = self._physical_dest_schema_table(
+                        schema, name
+                    )
                     table_context = {**context, "table": table}
                     
                     # Update progress every 10 tables or for first/last
@@ -738,8 +820,8 @@ class DataValidationTab:
                         else:
                             src_table_ref = f"[{schema}].[{name}]"  # SQL Server uses brackets
                         
-                        # Destination is always SQL Server
-                        dest_table_ref = f"[{schema}].[{name}]"
+                        # Destination is always SQL Server (schema may differ when remap is enabled)
+                        dest_table_ref = f"[{dest_schema}].[{dest_name}]"
                         
                         if use_exact:
                             # EXACT MODE: Use direct COUNT(*) for both databases
@@ -784,7 +866,7 @@ class DataValidationTab:
                                 JOIN sys.tables t ON p.object_id = t.object_id
                                 JOIN sys.schemas s ON t.schema_id = s.schema_id
                                 WHERE s.name = ? AND t.name = ? AND p.index_id IN (0,1)
-                            """, (schema, name))
+                            """, (dest_schema, dest_name))
                             dest_count_fast = dest_cur.fetchone()[0] or 0
                             
                             # If DB2 CARD is invalid (-1), fall back to COUNT(*)
@@ -813,8 +895,9 @@ class DataValidationTab:
                         else:
                             # FAST CHECK: Use batch counts if available, else sys.partitions per table (SQL Server to SQL Server)
                             if src_counts_batch and dest_counts_batch:
+                                dest_batch_key = f"{dest_schema}.{dest_name}"
                                 src_count_fast = src_counts_batch.get(table, -1)
-                                dest_count_fast = dest_counts_batch.get(table, -1)
+                                dest_count_fast = dest_counts_batch.get(dest_batch_key, -1)
                                 if src_count_fast < 0:
                                     src_count_fast = 0
                                 # Batch path: no per-table DB calls; only log at DEBUG to avoid 175 lines
@@ -839,7 +922,7 @@ class DataValidationTab:
                                     JOIN sys.tables t ON p.object_id = t.object_id
                                     JOIN sys.schemas s ON t.schema_id = s.schema_id
                                     WHERE s.name = ? AND t.name = ? AND p.index_id IN (0,1)
-                                """, (schema, name))
+                                """, (dest_schema, dest_name))
                                 dest_count_fast = dest_cur.fetchone()[0] or 0
                                 self._log(f"  Destination fast count: {dest_count_fast:,}", logging.DEBUG, table_context)
                             
@@ -1453,7 +1536,8 @@ After installation, restart this application.
                     error_count = 0
                     
                     for table_idx, table in enumerate(tables, 1):
-                        schema, name = table.split('.') if '.' in table else ('dbo', table)
+                        schema, name = table.split('.', 1) if '.' in table else ('dbo', table)
+                        dest_schema, dest_name = self._physical_dest_schema_table(schema, name)
                         table_context = {**context, "table": table}
                         
                         # Update status for each table
@@ -1472,7 +1556,7 @@ After installation, restart this application.
                                 src_table_ref = f"[{schema}].[{name}]"  # SQL Server uses brackets
                             
                             # Destination is always SQL Server
-                            dest_table_ref = f"[{schema}].[{name}]"
+                            dest_table_ref = f"[{dest_schema}].[{dest_name}]"
                             
                             if use_exact:
                                 # EXACT MODE: Use direct COUNT(*)
@@ -1501,7 +1585,7 @@ After installation, restart this application.
                                     JOIN sys.tables t ON p.object_id = t.object_id
                                     JOIN sys.schemas s ON t.schema_id = s.schema_id
                                     WHERE s.name = ? AND t.name = ? AND p.index_id IN (0,1)
-                                """, (schema, name))
+                                """, (dest_schema, dest_name))
                                 dest_count = int(dest_cur.fetchone()[0] or 0)
                                 
                                 # If DB2 CARD unavailable, fall back to COUNT(*)
@@ -1530,7 +1614,7 @@ After installation, restart this application.
                                     JOIN sys.tables t ON p.object_id = t.object_id
                                     JOIN sys.schemas s ON t.schema_id = s.schema_id
                                     WHERE s.name = ? AND t.name = ? AND p.index_id IN (0,1)
-                                """, (schema, name))
+                                """, (dest_schema, dest_name))
                                 dest_count_fast = dest_cur.fetchone()[0] or 0
                                 self._log(f"  Destination fast count: {dest_count_fast:,}", logging.DEBUG, table_context)
                                 
@@ -1746,13 +1830,28 @@ After installation, restart this application.
             diffs = result.get("differences") or []
             if diffs:
                 tk.Label(self.detail_content_frame, text="Note: " + "; ".join(diffs), font=("Arial", 9), wraplength=500).pack(anchor=tk.W)
-            tk.Label(self.detail_content_frame, text="Sample comparison includes identity columns so rows are compared by actual record identity (avoids false matches after DB2 to SQL migration).", 
-                     font=("Arial", 8), fg="gray", wraplength=500).pack(anchor=tk.W, pady=(6, 2))
+            tk.Label(
+                self.detail_content_frame,
+                text="Sample: source = TOP n ordered by key. Destination (SQL Server) = all rows matching those keys "
+                "(key lookup), so matches are not limited to the first n rows on the destination. "
+                "DB2 destination still uses TOP n on both sides.",
+                font=("Arial", 8),
+                fg="gray",
+                wraplength=500,
+            ).pack(anchor=tk.W, pady=(6, 2))
             self._selected_row_count_result_key = result_key
             btn_row = ttk.Frame(self.detail_content_frame)
             btn_row.pack(anchor=tk.W, pady=4)
-            ttk.Button(btn_row, text="Reload sample comparison (include identity columns)", 
-                       command=self._load_sample_comparison).pack(side=tk.LEFT, padx=(0, 8))
+            ttk.Button(
+                btn_row,
+                text="Reload sample comparison",
+                command=self._load_sample_comparison,
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            ttk.Button(
+                btn_row,
+                text="Suggest compare key",
+                command=self._suggest_compare_key,
+            ).pack(side=tk.LEFT, padx=(0, 8))
             try:
                 n_sample = max(1, min(1000, int(self.sample_size_var.get())))
             except (ValueError, TypeError, AttributeError):
@@ -1806,6 +1905,264 @@ After installation, restart this application.
             return s[:max_len] + "..."
         return s
 
+    def _suggest_compare_key(self):
+        """
+        Fetch an unordered sample, greedily extend the current resolved key with columns
+        until rows are unique in the sample (if possible), then offer to apply to override.
+        """
+        key = getattr(self, "_selected_row_count_result_key", None)
+        if not key:
+            messagebox.showwarning(
+                "Suggest compare key",
+                "Select a row-count result row in the table first.",
+            )
+            return
+        result = self.validation_results.get(key)
+        if not result or result.get("type") != "row_count":
+            messagebox.showwarning(
+                "Suggest compare key",
+                "Select a row-count validation result.",
+            )
+            return
+        table = result.get("table", "")
+        if "." in table:
+            schema, name = table.split(".", 1)
+        else:
+            schema, name = "dbo", table
+        if not name:
+            return
+        dest_schema, dest_name = self._physical_dest_schema_table(schema, name)
+        conn_info = None
+        if "." in key:
+            src_db_from_key = key.split(".", 1)[0]
+            conn_info = getattr(self, "_bulk_connection_map", {}).get(src_db_from_key)
+
+        lbl = getattr(self, "detail_sample_result_label", None)
+        if lbl:
+            lbl.config(
+                text="Analyzing sample to suggest compare key (unordered TOP n)...",
+                fg="blue",
+            )
+
+        def run_suggest():
+            err = None
+            n_analyzed = 0
+            override_str = ""
+            unique = False
+            status_note = ""
+            n_distinct = 0
+            src_conn = None
+            dest_conn = None
+            try:
+                try:
+                    n_sample = max(50, min(1000, int(self.sample_size_var.get())))
+                except (ValueError, TypeError, AttributeError):
+                    n_sample = 100
+
+                if conn_info:
+                    src_conn = connect_to_any_database(
+                        server=conn_info.get("src_server"),
+                        database=conn_info.get("src_db"),
+                        auth=conn_info.get("src_auth"),
+                        user=conn_info.get("src_user"),
+                        password=conn_info.get("src_password") or None,
+                        db_type=conn_info.get("src_db_type", "sqlserver"),
+                        port=int(conn_info.get("src_port") or 1433),
+                        timeout=30,
+                    )
+                    dest_conn = connect_to_any_database(
+                        server=conn_info.get("dest_server"),
+                        database=conn_info.get("dest_db"),
+                        auth=conn_info.get("dest_auth"),
+                        user=conn_info.get("dest_user"),
+                        password=conn_info.get("dest_password") or None,
+                        db_type=conn_info.get("dest_db_type", "sqlserver"),
+                        port=int(conn_info.get("dest_port") or 1433),
+                        timeout=30,
+                    )
+                    src_db_type_val = (
+                        conn_info.get("src_db_type") or "sqlserver"
+                    ).strip().lower()
+                else:
+                    src_conn = connect_to_any_database(
+                        server=self.src_server_var.get(),
+                        database=self.src_db_var.get(),
+                        auth=self.src_auth_var.get(),
+                        user=self.src_user_var.get(),
+                        password=self.src_password_var.get() or None,
+                        db_type=self.src_db_type_var.get(),
+                        port=int(self.src_port_var.get() or 50000),
+                        timeout=30,
+                    )
+                    dest_conn = connect_to_any_database(
+                        server=self.dest_server_var.get(),
+                        database=self.dest_db_var.get(),
+                        auth=self.dest_auth_var.get(),
+                        user=self.dest_user_var.get(),
+                        password=self.dest_password_var.get() or None,
+                        db_type=self.dest_db_type_var.get(),
+                        port=int(self.dest_port_var.get() or 50000),
+                        timeout=30,
+                    )
+                    src_db_type_val = (
+                        self.src_db_type_var.get() or ""
+                    ).strip().lower()
+
+                src_is_db2 = src_db_type_val == "db2"
+                src_cur = src_conn.cursor()
+                dest_cur = dest_conn.cursor()
+
+                if src_is_db2:
+                    src_cols_meta = fetch_db2_column_names(src_cur, schema, name)
+                else:
+                    src_cols_meta = fetch_sqlserver_column_names(src_cur, schema, name)
+                dest_cols_meta = fetch_sqlserver_column_names(
+                    dest_cur, dest_schema, dest_name
+                )
+                col_pairs = pair_columns_case_insensitive(
+                    src_cols_meta, dest_cols_meta
+                )
+                dest_pk = fetch_sqlserver_pk_columns(dest_cur, dest_schema, dest_name)
+                if src_is_db2:
+                    src_pk = fetch_db2_pk_columns(src_cur, schema, name)
+                else:
+                    src_pk = fetch_sqlserver_pk_columns(src_cur, schema, name)
+                override = (
+                    (self.compare_key_override_var.get() or "").strip()
+                    if getattr(self, "compare_key_override_var", None)
+                    else ""
+                )
+                key_pairs, _key_source = resolve_compare_key_pairs(
+                    col_pairs, dest_pk, src_pk, override or None
+                )
+
+                if not col_pairs:
+                    err = (
+                        "No overlapping column names between source and destination "
+                        "for this table."
+                    )
+                else:
+                    if src_is_db2:
+                        src_sql = (
+                            f'SELECT * FROM "{schema}"."{name}" '
+                            f"FETCH FIRST {n_sample} ROWS ONLY"
+                        )
+                    else:
+                        src_sql = (
+                            f"SELECT TOP ({n_sample}) * FROM [{schema}].[{name}]"
+                        )
+                    dest_sql = (
+                        f"SELECT TOP ({n_sample}) * FROM "
+                        f"[{dest_schema}].[{dest_name}]"
+                    )
+                    src_cur.execute(src_sql)
+                    dest_cur.execute(dest_sql)
+                    src_cols = [
+                        str(d[0]) if d[0] is not None else ""
+                        for d in (src_cur.description or [])
+                    ]
+                    dest_cols = [
+                        str(d[0]) if d[0] is not None else ""
+                        for d in (dest_cur.description or [])
+                    ]
+                    src_rows = [tuple(r) for r in src_cur.fetchall()]
+                    dest_rows = [tuple(r) for r in dest_cur.fetchall()]
+
+                    def to_dict(cols, row):
+                        return dict(zip(cols, row)) if cols else {}
+
+                    src_list = [to_dict(src_cols, r) for r in src_rows]
+                    if not src_list:
+                        err = "No rows returned in the sample query for this table."
+                    else:
+                        col_pairs_aligned = align_pairs_to_cursor_columns(
+                            col_pairs, src_cols, dest_cols
+                        )
+                        key_pairs_aligned = align_pairs_to_cursor_columns(
+                            key_pairs, src_cols, dest_cols
+                        )
+                        if not key_pairs_aligned and col_pairs_aligned:
+                            key_pairs_aligned = [col_pairs_aligned[0]]
+
+                        suggested, unique, status_note = (
+                            greedy_expand_key_until_unique_in_sample(
+                                key_pairs_aligned,
+                                col_pairs_aligned,
+                                src_list,
+                            )
+                        )
+                        override_str = format_compare_key_override(suggested)
+                        n_analyzed = len(src_list)
+                        n_distinct = distinct_key_count_in_sample(
+                            src_list, suggested
+                        )
+            except Exception as e:
+                err = str(e)
+            finally:
+                for c in (src_conn, dest_conn):
+                    if c is not None:
+                        try:
+                            c.close()
+                        except Exception:
+                            pass
+
+            def finish():
+                if getattr(self, "_selected_row_count_result_key", None) != key:
+                    return
+                if err:
+                    if lbl and lbl.winfo_exists():
+                        lbl.config(text=f"Suggest key failed: {err[:120]}...", fg="red")
+                    messagebox.showerror("Suggest compare key failed", err)
+                    return
+                if not override_str:
+                    if lbl and lbl.winfo_exists():
+                        lbl.config(text="No suggested key produced.", fg="gray")
+                    messagebox.showinfo(
+                        "Suggest compare key",
+                        "No suggested key was produced.",
+                    )
+                    return
+                status_readable = {
+                    "already_unique": "already unique (current key is enough in this sample)",
+                    "expanded": "added columns until rows were unique in the sample",
+                    "partial": "could not reach full uniqueness with available columns",
+                }.get(status_note, status_note)
+                lines = [
+                    f"Sample rows analyzed: {n_analyzed}",
+                    f"Distinct keys with suggested columns: {n_distinct} / {n_analyzed}",
+                    "",
+                    "Suggested columns (destination names):",
+                    override_str,
+                    "",
+                    f"Status: {status_readable}"
+                    + ("." if unique else " (not all rows have a distinct key)."),
+                ]
+                if not unique:
+                    lines.append(
+                        "\nKeys may still collide in the full table, or you may need "
+                        "a larger sample size."
+                    )
+                msg = "\n".join(lines)
+                apply_ok = messagebox.askyesno(
+                    "Apply suggested compare key?",
+                    msg
+                    + "\n\nApply to 'Compare sample rows by key' and reload sample comparison?",
+                )
+                if apply_ok:
+                    self.compare_key_override_var.set(override_str)
+                    self._load_sample_comparison()
+                elif lbl and lbl.winfo_exists():
+                    short = override_str if len(override_str) < 80 else override_str[:77] + "..."
+                    lbl.config(
+                        text=f"Suggested key (not applied): {short} — "
+                        f"{'unique in sample' if unique else 'partial'}",
+                        fg="#b45309" if not unique else "darkgreen",
+                    )
+
+            self.frame.after(0, finish)
+
+        threading.Thread(target=run_suggest, daemon=True).start()
+
     def _load_sample_comparison(self):
         """Load a sample of rows from source and destination and compare (including identity columns)."""
         key = getattr(self, "_selected_row_count_result_key", None)
@@ -1821,6 +2178,7 @@ After installation, restart this application.
             schema, name = "dbo", table
         if not name:
             return
+        dest_schema, dest_name = self._physical_dest_schema_table(schema, name)
         # Use bulk connection info if this result came from bulk validation (key is "src_db.schema.table")
         conn_info = None
         if "." in key:
@@ -1833,6 +2191,7 @@ After installation, restart this application.
             msg = ""
             mismatch_display = []
             export_data = None
+            key_dup_banner = ""
             try:
                 if conn_info:
                     src_conn = connect_to_any_database(
@@ -1883,111 +2242,362 @@ After installation, restart this application.
                 except (ValueError, TypeError, AttributeError):
                     n_rows = 100
                 src_is_db2 = src_db_type_val == "db2"
-                if src_is_db2:
-                    src_table_ref = f'"{schema}"."{name}"'
-                    src_cur = src_conn.cursor()
-                    src_cur.execute(f"SELECT * FROM {src_table_ref} FETCH FIRST {n_rows} ROWS ONLY")
-                else:
-                    src_table_ref = f"[{schema}].[{name}]"
-                    src_cur = src_conn.cursor()
-                    src_cur.execute(f"SELECT TOP {n_rows} * FROM {src_table_ref}")
-                dest_table_ref = f"[{schema}].[{name}]"
+                src_cur = src_conn.cursor()
                 dest_cur = dest_conn.cursor()
-                dest_cur.execute(f"SELECT TOP {n_rows} * FROM {dest_table_ref}")
-                # Normalize column names to Python str (DB2/JDBC can return java.lang.String)
-                src_cols = [str(d[0]) if d[0] is not None else "" for d in src_cur.description]
-                dest_cols = [str(d[0]) if d[0] is not None else "" for d in dest_cur.description]
-                src_rows = [tuple(r) for r in src_cur.fetchall()]
-                dest_rows = [tuple(r) for r in dest_cur.fetchall()]
-                src_conn.close()
-                dest_conn.close()
-                # Build row dicts by identity or by index
-                def to_dict(cols, row):
-                    return dict(zip(cols, row)) if cols else {}
-                src_list = [to_dict(src_cols, r) for r in src_rows]
-                dest_list = [to_dict(dest_cols, r) for r in dest_rows]
-                common_cols = [c for c in src_cols if c in dest_cols]
-                if not common_cols:
-                    msg = "Sample loaded but no common columns to compare."
+
+                if src_is_db2:
+                    src_cols_meta = fetch_db2_column_names(src_cur, schema, name)
+                else:
+                    src_cols_meta = fetch_sqlserver_column_names(src_cur, schema, name)
+                dest_cols_meta = fetch_sqlserver_column_names(
+                    dest_cur, dest_schema, dest_name
+                )
+                col_pairs = pair_columns_case_insensitive(src_cols_meta, dest_cols_meta)
+
+                dest_pk = fetch_sqlserver_pk_columns(dest_cur, dest_schema, dest_name)
+                if src_is_db2:
+                    src_pk = fetch_db2_pk_columns(src_cur, schema, name)
+                else:
+                    src_pk = fetch_sqlserver_pk_columns(src_cur, schema, name)
+
+                override = (
+                    (self.compare_key_override_var.get() or "").strip()
+                    if getattr(self, "compare_key_override_var", None)
+                    else ""
+                )
+                key_pairs, key_source = resolve_compare_key_pairs(
+                    col_pairs, dest_pk, src_pk, override or None
+                )
+
+                if not col_pairs:
+                    msg = (
+                        "Sample loaded but no overlapping column names "
+                        "(case-insensitive) between source and destination."
+                    )
                     mismatch_display = []
                     export_data = None
+                    src_conn.close()
+                    dest_conn.close()
                 else:
-                    # Prefer identity-like column as key (first column that ends with _ID or is named *id)
-                    key_col = None
-                    for c in common_cols:
-                        cstr = str(c) if c is not None else ""
-                        if cstr and (cstr.lower().endswith("_id") or cstr.lower() == "id"):
-                            key_col = c
-                            break
-                    if not key_col and common_cols:
-                        key_col = common_cols[0]
+                    src_key_order = [sc for sc, _ in key_pairs]
+                    dest_key_order = [dc for _, dc in key_pairs]
+
+                    if src_is_db2:
+                        src_table_ref = f'"{schema}"."{name}"'
+                        src_ob = db2_order_by_clause(src_key_order)
+                        src_sql = (
+                            f"SELECT * FROM {src_table_ref}{src_ob} "
+                            f"FETCH FIRST {n_rows} ROWS ONLY"
+                        )
+                    else:
+                        src_table_ref = f"[{schema}].[{name}]"
+                        src_ob = sqlserver_order_by_clause(src_key_order)
+                        src_sql = (
+                            f"SELECT TOP ({n_rows}) * FROM {src_table_ref}{src_ob}"
+                        )
+
+                    if conn_info:
+                        dest_db_type_l = (
+                            conn_info.get("dest_db_type") or "sqlserver"
+                        ).strip().lower()
+                    else:
+                        dest_db_type_l = (
+                            self.dest_db_type_var.get() or "sqlserver"
+                        ).strip().lower()
+                    dest_is_db2 = dest_db_type_l == "db2"
+                    dest_used_key_lookup = False
+
+                    src_cur.execute(src_sql)
+                    src_cols = [
+                        str(d[0]) if d[0] is not None else ""
+                        for d in (src_cur.description or [])
+                    ]
+                    src_rows = [tuple(r) for r in src_cur.fetchall()]
+
+                    def to_dict(cols, row):
+                        return dict(zip(cols, row)) if cols else {}
+
+                    src_list = [to_dict(src_cols, r) for r in src_rows]
+
+                    col_pairs_aligned = align_pairs_to_cursor_columns(
+                        col_pairs, src_cols, dest_cols_meta
+                    )
+                    key_pairs_aligned = align_pairs_to_cursor_columns(
+                        key_pairs, src_cols, dest_cols_meta
+                    )
+                    if not key_pairs_aligned and col_pairs_aligned:
+                        key_pairs_aligned = [col_pairs_aligned[0]]
+                        key_source = f"{key_source} (aligned to cursor names)"
+
+                    dest_list = []
+                    dest_cols = []
+
+                    if dest_is_db2:
+                        dref = f'"{dest_schema}"."{dest_name}"'
+                        dest_ob = db2_order_by_clause(dest_key_order)
+                        dest_sql = (
+                            f"SELECT * FROM {dref}{dest_ob} "
+                            f"FETCH FIRST {n_rows} ROWS ONLY"
+                        )
+                        dest_cur.execute(dest_sql)
+                        dest_cols = [
+                            str(d[0]) if d[0] is not None else ""
+                            for d in (dest_cur.description or [])
+                        ]
+                        dest_rows = [tuple(r) for r in dest_cur.fetchall()]
+                        dest_list = [
+                            to_dict(dest_cols, r) for r in dest_rows
+                        ]
+                    elif src_list:
+                        dest_used_key_lookup = True
+                        dest_key_cols = [dc for _, dc in key_pairs_aligned]
+                        key_tuples = [
+                            normalize_compare_key_tuple(
+                                row_key_tuple(s, key_pairs_aligned, "src")
+                            )
+                            for s in src_list
+                        ]
+                        dest_cols, dest_rows = (
+                            fetch_sqlserver_rows_matching_composite_keys(
+                                dest_cur,
+                                dest_schema,
+                                dest_name,
+                                dest_key_cols,
+                                key_tuples,
+                            )
+                        )
+                        dest_list = [
+                            to_dict(dest_cols, r) for r in dest_rows
+                        ]
+                    else:
+                        dest_cols = [str(c) for c in dest_cols_meta]
+
+                    col_pairs_aligned = align_pairs_to_cursor_columns(
+                        col_pairs, src_cols, dest_cols
+                    )
+                    key_pairs_aligned = align_pairs_to_cursor_columns(
+                        key_pairs, src_cols, dest_cols
+                    )
+                    if not key_pairs_aligned and col_pairs_aligned:
+                        key_pairs_aligned = [col_pairs_aligned[0]]
+                        key_source = f"{key_source} (aligned to cursor names)"
+
+                    src_conn.close()
+                    dest_conn.close()
+
+                    display_cols = [dc for sc, dc in col_pairs_aligned]
+                    src_by_dest = {dc: sc for sc, dc in col_pairs_aligned}
+
+                    src_has_dups, src_nkeys, src_ukeys, src_multi = (
+                        sample_key_duplicate_stats(
+                            src_list, key_pairs_aligned, "src"
+                        )
+                    )
+                    dest_has_dups, dest_nkeys, dest_ukeys, dest_multi = (
+                        sample_key_duplicate_stats(
+                            dest_list, key_pairs_aligned, "dest"
+                        )
+                    )
+                    warn_lines = []
+                    if src_has_dups:
+                        sex = format_duplicate_key_examples(
+                            src_list, key_pairs_aligned, "src"
+                        )
+                        warn_lines.append(
+                            f"Source sample: {src_nkeys} rows but only {src_ukeys} "
+                            f"distinct key(s) ({src_multi} key value(s) repeat). "
+                            "Several source rows can match the same destination row."
+                        )
+                        if sex:
+                            warn_lines.append(
+                                "Repeated source keys (examples): " + "; ".join(sex)
+                            )
+                    if dest_has_dups:
+                        dex = format_duplicate_key_examples(
+                            dest_list, key_pairs_aligned, "dest"
+                        )
+                        if dest_used_key_lookup:
+                            warn_lines.append(
+                                f"Destination: {dest_nkeys} row(s) fetched by key; "
+                                f"only {dest_ukeys} distinct key(s) ({dest_multi} repeat). "
+                                "Multiple rows per key: one is used for comparison."
+                            )
+                        else:
+                            warn_lines.append(
+                                f"Destination sample: {dest_nkeys} rows but only {dest_ukeys} "
+                                f"distinct key(s) ({dest_multi} key value(s) repeat). "
+                                "Only one destination row per key is kept (last in sample order)."
+                            )
+                        if dex:
+                            warn_lines.append(
+                                "Repeated destination keys (examples): "
+                                + "; ".join(dex)
+                            )
+                    if warn_lines:
+                        key_dup_banner = (
+                            "WARNING: Comparison key is NOT unique in this sample — "
+                            "mismatch results can be misleading.\n"
+                            "Fix: add columns under 'Compare sample rows by key' "
+                            "(use your full PK / unique business key), or define a "
+                            "unique key in the database.\n\n"
+                            + "\n".join(warn_lines)
+                        )
+
                     dest_by_key = {}
                     for d in dest_list:
-                        k = d.get(key_col)
-                        if k is not None:
-                            dest_by_key[k] = d
+                        kt = normalize_compare_key_tuple(
+                            row_key_tuple(d, key_pairs_aligned, "dest")
+                        )
+                        dest_by_key[kt] = d
+
                     match_count = 0
-                    mismatch_rows = []  # (k, reason, diff_cols_str, source_row, dest_row or None)
-                    export_rows = []  # for Export sample (top 100): safe values, max_len=200
+                    mismatch_rows = []
+                    export_rows = []
+                    key_cols_label = ", ".join(
+                        str(dc) for _, dc in key_pairs_aligned
+                    )
+
                     for s in src_list:
-                        k = s.get(key_col)
-                        d = dest_by_key.get(k) if k is not None else None
+                        kt = normalize_compare_key_tuple(
+                            row_key_tuple(s, key_pairs_aligned, "src")
+                        )
+                        d = dest_by_key.get(kt)
+                        key_str = format_key_for_display(kt)
+
                         if d is None:
                             if len(mismatch_rows) < 5:
-                                mismatch_rows.append((k, "Missing in destination", None, s, None))
+                                mismatch_rows.append(
+                                    (kt, "Missing in destination", None, s, None)
+                                )
                             status = "Missing in destination"
-                            diff_cols = list(common_cols)
-                            export_row = {"Key": str(k), "Status": status, "Mismatch_Columns": ",".join(diff_cols)[:500]}
-                            for col in common_cols:
-                                export_row["Source_" + str(col)] = self._safe_display_value(s.get(col), max_len=200)
-                                export_row["Dest_" + str(col)] = "—"
+                            diff_cols = list(display_cols)
+                            export_row = {
+                                "Key": key_str,
+                                "Status": status,
+                                "Mismatch_Columns": ",".join(diff_cols)[:500],
+                            }
+                            for sc, dc in col_pairs_aligned:
+                                export_row["Source_" + str(dc)] = (
+                                    self._safe_display_value(s.get(sc), max_len=200)
+                                )
+                                export_row["Dest_" + str(dc)] = "—"
                             export_rows.append(export_row)
                             continue
+
                         same = True
                         diff_cols = []
-                        for col in common_cols:
-                            sv, dv = s.get(col), d.get(col)
+                        for sc, dc in col_pairs_aligned:
+                            sv, dv = s.get(sc), d.get(dc)
                             if sv != dv and not (sv is None and dv is None):
                                 same = False
-                                diff_cols.append(str(col))
+                                diff_cols.append(str(dc))
                         if same:
                             match_count += 1
                             status = "Match"
                         else:
                             if len(mismatch_rows) < 5:
-                                mismatch_rows.append((k, "Value mismatch", ", ".join(diff_cols[:5]), s, d))
+                                mismatch_rows.append(
+                                    (
+                                        kt,
+                                        "Value mismatch",
+                                        ", ".join(diff_cols[:5]),
+                                        s,
+                                        d,
+                                    )
+                                )
                             status = "Value mismatch"
-                        export_row = {"Key": str(k), "Status": status, "Mismatch_Columns": ",".join(diff_cols)[:500]}
-                        for col in common_cols:
-                            export_row["Source_" + str(col)] = self._safe_display_value(s.get(col), max_len=200)
-                            export_row["Dest_" + str(col)] = self._safe_display_value(d.get(col), max_len=200)
+                        export_row = {
+                            "Key": key_str,
+                            "Status": status,
+                            "Mismatch_Columns": ",".join(diff_cols)[:500],
+                        }
+                        for sc, dc in col_pairs_aligned:
+                            export_row["Source_" + str(dc)] = (
+                                self._safe_display_value(s.get(sc), max_len=200)
+                            )
+                            export_row["Dest_" + str(dc)] = (
+                                self._safe_display_value(d.get(dc), max_len=200)
+                            )
                         export_rows.append(export_row)
+
                     total = len(src_list)
-                    export_data = {"table": f"{schema}.{name}", "key_col": key_col, "rows": export_rows} if export_rows else None
-                    msg = f"Sample: {total} rows. Compared including identity/key column '{key_col}'. Matching: {match_count}. Mismatches: {total - match_count}."
+                    export_data = (
+                        {
+                            "table": f"{schema}.{name}",
+                            "key_col": key_cols_label,
+                            "key_source": key_source,
+                            "rows": export_rows,
+                            "key_duplicate_warning": key_dup_banner or None,
+                        }
+                        if export_rows
+                        else None
+                    )
+                    msg = (
+                        f"Sample: {total} source rows. Key [{key_cols_label}] "
+                        f"({key_source}). Matching: {match_count}. "
+                        f"Mismatches: {total - match_count}."
+                    )
+                    if dest_used_key_lookup:
+                        msg += (
+                            " Destination: rows loaded by key lookup (every row "
+                            "on SQL Server that matches a sample key), not TOP n only."
+                        )
+                    if key_dup_banner:
+                        msg = key_dup_banner + "\n\n" + msg
                     if mismatch_rows:
-                        msg += "\nFirst mismatches: " + "; ".join(f"key={m[0]!s} ({m[1]}: {m[2] or ''})" for m in mismatch_rows)
-                    # Build display-safe data for UI (truncate values, max 5 mismatches) + which columns differ
+                        msg += "\nFirst mismatches: " + "; ".join(
+                            f"key={format_key_for_display(m[0])} ({m[1]}: {m[2] or ''})"
+                            for m in mismatch_rows
+                        )
+
                     mismatch_display = []
                     for m in mismatch_rows[:5]:
-                        k, reason, _, s_row, d_row = m
-                        src_d = {str(col): self._safe_display_value(s_row.get(col)) for col in common_cols}
-                        dest_d = {str(col): (self._safe_display_value(d_row.get(col)) if d_row else "—") for col in common_cols} if d_row else {str(col): "—" for col in common_cols}
+                        kt, reason, _, s_row, d_row = m
+                        key_val = format_key_for_display(kt)
+                        src_d = {
+                            str(dc): self._safe_display_value(s_row.get(src_by_dest[dc]))
+                            for dc in display_cols
+                        }
                         if d_row is None:
-                            mismatch_cols = set(common_cols)  # all columns "missing" on dest
+                            dest_d = {str(dc): "—" for dc in display_cols}
+                            mismatch_cols = set(display_cols)
                         else:
-                            mismatch_cols = {c for c in common_cols if s_row.get(c) != d_row.get(c)}
-                        mismatch_display.append((str(k), reason, src_d, dest_d, list(common_cols), mismatch_cols))
+                            dest_d = {
+                                str(dc): self._safe_display_value(d_row.get(dc))
+                                for dc in display_cols
+                            }
+                            mismatch_cols = {
+                                dc
+                                for sc, dc in col_pairs_aligned
+                                if s_row.get(sc) != d_row.get(dc)
+                                and not (
+                                    s_row.get(sc) is None and d_row.get(dc) is None
+                                )
+                            }
+                        mismatch_display.append(
+                            (key_val, reason, src_d, dest_d, display_cols, mismatch_cols)
+                        )
             except Exception as e:
                 msg = f"Sample comparison failed: {e}"
                 mismatch_display = []
                 export_data = None
-            def update_ui(m=msg, details=None, export_data=None):
+                key_dup_banner = ""
+
+            def update_ui(m=msg, details=None, export_data=None, dup_banner=""):
                 if details is None:
                     details = []
                 l = getattr(self, "detail_sample_result_label", None)
                 if l and l.winfo_exists() and getattr(self, "_selected_row_count_result_key", None) == key:
-                    l.config(text=m, fg="red" if "failed" in m.lower() else "darkgreen")
+                    if "failed" in m.lower():
+                        fg = "red"
+                    elif dup_banner or (
+                        "WARNING: Comparison key" in m
+                        or "NOT unique" in m
+                    ):
+                        fg = "#b45309"
+                    else:
+                        fg = "darkgreen"
+                    l.config(text=m, fg=fg)
                 if getattr(self, "_selected_row_count_result_key", None) == key and export_data is not None:
                     self._last_sample_export_data = export_data
                     btn = getattr(self, "detail_export_sample_btn", None)
@@ -1998,6 +2608,15 @@ After installation, restart this application.
                     return
                 for w in frame.winfo_children():
                     w.destroy()
+                if dup_banner:
+                    tk.Label(
+                        frame,
+                        text=dup_banner,
+                        fg="#b45309",
+                        font=("Arial", 9),
+                        wraplength=520,
+                        justify=tk.LEFT,
+                    ).pack(anchor=tk.W, pady=(0, 8))
                 if not details:
                     return
                 tk.Label(frame, text="Sample row data (first 5 mismatches, values truncated). Red = differing value.", font=("Arial", 9, "bold")).pack(anchor=tk.W)
@@ -2023,7 +2642,12 @@ After installation, restart this application.
                         tk.Label(row_f, text=str(col)[:30], width=18, anchor=tk.W, bg=bg_red, font=("Arial", 8)).pack(side=tk.LEFT, padx=1)
                         tk.Label(row_f, text=src_d.get(col, "—"), width=22, anchor=tk.W, wraplength=200, bg=bg_red, font=("Arial", 8)).pack(side=tk.LEFT, padx=1)
                         tk.Label(row_f, text=dest_d.get(col, "—"), width=22, anchor=tk.W, wraplength=200, bg=bg_red, font=("Arial", 8)).pack(side=tk.LEFT, padx=1)
-            self.frame.after(0, lambda: update_ui(msg, mismatch_display, export_data))
+            self.frame.after(
+                0,
+                lambda m=msg, d=mismatch_display, ed=export_data, b=key_dup_banner: update_ui(
+                    m, d, ed, b
+                ),
+            )
         threading.Thread(target=run_sample, daemon=True).start()
 
     def _export_sample_to_excel(self):

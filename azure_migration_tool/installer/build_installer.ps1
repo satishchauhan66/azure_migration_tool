@@ -3,6 +3,10 @@
 # By default: uses existing dist\AzureMigrationTool.exe and creates versioned setup (no params).
 # Optional: -BuildExe to build the exe from code first, then create the installer.
 # Optional: -IncludeJava to download and bundle Java 17 for DB2/JDBC (adds ~60MB to installer).
+#
+# The setup UI offers "all users" vs "current user" (NSIS MultiUser). Silent mode examples:
+#   AzureMigrationTool_Setup_x.y.z.exe /S /CurrentUser
+#   AzureMigrationTool_Setup_x.y.z.exe /S /AllUsers
 
 param([switch]$BuildExe, [switch]$IncludeJava)
 

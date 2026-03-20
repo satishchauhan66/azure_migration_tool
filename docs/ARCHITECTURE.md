@@ -333,6 +333,8 @@ flowchart LR
     E --> F[dist/AzureMigrationTool_Setup_<version>.exe]
 ```
 
+The NSIS script (`installer/AzureMigrationTool.nsi`) uses the **MultiUser** plugin: installers can target **current user** (default under `%LOCALAPPDATA%\Programs\`, HKCU, per-user Start Menu) or **all users** (`Program Files`, HKLM, common Start Menu; UAC when needed). Bundled **ODBC 18 MSI** runs only for **all-users** installs; per-user installs skip it (install ODBC separately). Silent flags: `/CurrentUser` or `/AllUsers` with `/S`.
+
 ```mermaid
 flowchart TB
     subgraph Bundled["Bundled in exe (build_exe.py)"]
@@ -375,7 +377,7 @@ flowchart LR
 | Entry       | `main.py`         | Tk root, DependencyChecker, MainWindow |
 | UI          | `gui/main_window.py` | Tabs, menu, shared connection vars |
 | UI          | `gui/tabs/*.py`   | Project, Backup & Restore, Full Migration, Schema, Data Migration, Schema/Data Validation |
-| UI          | `gui/widgets/`, `gui/utils/`, `gui/dialogs/` | Connection, schema tree, diff, DB utils, script gen, Excel, restore preview |
+| UI          | `gui/widgets/`, `gui/utils/`, `gui/dialogs/` | Connection, schema tree, diff, DB utils, `schema_remap` / `compare_keys` (validation keys), script gen, Excel, restore preview |
 | Orchestration | `src/orchestration/full_migration.py` | run_full_migration: backup → restore tables → migrate → restore |
 | Services    | `src/backup/schema_backup.py` | run_backup |
 | Services    | `src/backup/bak_to_blob.py` | run_bak_backup_to_blob |

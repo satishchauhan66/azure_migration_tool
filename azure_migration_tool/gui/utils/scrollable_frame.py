@@ -7,6 +7,8 @@ Scrollable frame utility for tabs that have too much content.
 import tkinter as tk
 from tkinter import ttk
 
+from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
+
 
 class ScrollableFrame(ttk.Frame):
     """A scrollable frame widget."""
@@ -29,10 +31,7 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Enable mouse wheel scrolling
-        def _on_mousewheel(event):
-            self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        bind_canvas_vertical_scroll(self.canvas, self.scrollable_frame)
         
         # Also bind to canvas focus
         self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())

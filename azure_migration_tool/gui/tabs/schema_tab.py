@@ -24,6 +24,7 @@ from gui.widgets.schema_diff_viewer import SchemaDiffViewer
 from gui.utils.schema_comparison import compare_schemas
 from gui.utils.schema_script_generator import generate_script_for_objects
 from gui.utils.database_utils import connect_with_msal_cache, connect_to_any_database
+from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
 import logging
 
 # Import pick_sql_driver
@@ -114,11 +115,8 @@ class SchemaTab:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Enable mouse wheel scrolling
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        
+        bind_canvas_vertical_scroll(canvas, scrollable_frame)
+
         # Store reference for later use
         self.scrollable_frame = scrollable_frame
         
