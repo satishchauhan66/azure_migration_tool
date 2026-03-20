@@ -29,9 +29,9 @@ if os.path.exists(requirements_path):
 
 setup(
     name="db2_azure_validation",
-    version="1.0.0",
+    version="1.2.8",
     author="Satish Chauhan",
-    author_email="",
+    author_email="satishchauhan603@gmail.com",
     description="DB2 to Azure SQL Migration Validation Module",
     long_description=long_description,
     long_description_content_type="text/markdown",
