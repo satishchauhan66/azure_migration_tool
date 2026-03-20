@@ -1018,7 +1018,7 @@ class SchemaTab:
                     summary = sechma_backup.run_backup(cfg)
 
                 if summary["status"] == "success":
-                    self.backup_log.insert(tk.END, f"\n✓ Backup completed successfully!\n")
+                    self.backup_log.insert(tk.END, f"\n[OK] Backup completed successfully!\n")
                     self.backup_log.insert(tk.END, f"Run ID: {summary.get('run_id', 'N/A')}\n")
                     
                     # Auto-fill restore backup path with the backup that was just created
@@ -1040,16 +1040,16 @@ class SchemaTab:
                         self.latest_backup_path = backup_path
                         # Update restore backup path field
                         self.restore_backup_path_var.set(backup_path)
-                        self.backup_log.insert(tk.END, f"\n💡 Backup path auto-filled in the Restore tab.\n")
+                        self.backup_log.insert(tk.END, f"\n[Note] Backup path auto-filled in the Restore tab.\n")
                         self.backup_log.insert(tk.END, f"   Path: {backup_path}\n")
                     
                     self.frame.after(0, lambda: messagebox.showinfo("Success", "Backup completed successfully!\n\nSwitch to the Restore tab to restore to a destination."))
                 else:
-                    self.backup_log.insert(tk.END, f"\n✗ Backup failed!\n")
+                    self.backup_log.insert(tk.END, f"\n[FAIL] Backup failed!\n")
                     self.backup_log.insert(tk.END, f"Errors: {summary.get('errors', [])}\n")
                     self.frame.after(0, lambda: messagebox.showerror("Error", "Backup failed! Check log for details."))
             except Exception as e:
-                self.backup_log.insert(tk.END, f"\n✗ Error: {str(e)}\n")
+                self.backup_log.insert(tk.END, f"\n[ERROR] {str(e)}\n")
                 self.frame.after(0, lambda msg=str(e): messagebox.showerror("Error", f"Backup failed: {msg}"))
             finally:
                 self.frame.after(0, lambda: self.backup_btn.config(state=tk.NORMAL))
@@ -1128,17 +1128,17 @@ class SchemaTab:
                             log(f"  Note: {note}\n")
                 
                 if summary["status"] == "success":
-                    log("\n✓ Restore completed successfully!\n")
+                    log("\n[OK] Restore completed successfully!\n")
                     self.frame.after(0, lambda: messagebox.showinfo("Success", "Restore completed successfully!"))
                 else:
-                    log("\n✗ Restore completed with errors.\n")
+                    log("\n[FAIL] Restore completed with errors.\n")
                     for err in (summary.get("errors") or [])[:20]:
                         log(f"  {err}\n")
                     if len(summary.get("errors") or []) > 20:
                         log(f"  ... and {len(summary['errors']) - 20} more\n")
                     self.frame.after(0, lambda: messagebox.showwarning("Warning", "Restore completed with errors. Check log for details."))
             except Exception as e:
-                self.restore_log.insert(tk.END, f"\n✗ Error: {str(e)}\n")
+                self.restore_log.insert(tk.END, f"\n[ERROR] {str(e)}\n")
                 self.restore_log.see(tk.END)
                 self.frame.after(0, lambda msg=str(e): messagebox.showerror("Error", f"Restore failed: {msg}"))
             finally:
@@ -1238,13 +1238,13 @@ class SchemaTab:
                     }
                     summary = sechma_backup.run_backup(backup_cfg)
                     if summary["status"] == "success":
-                        log(f"✓ {cfg.get('src_db')}\n")
+                        log(f"[OK] {cfg.get('src_db')}\n")
                         success_count += 1
                     else:
-                        log(f"✗ {cfg.get('src_db')}: {summary.get('errors', [])}\n")
+                        log(f"[FAIL] {cfg.get('src_db')}: {summary.get('errors', [])}\n")
                         fail_count += 1
                 except Exception as e:
-                    log(f"✗ {cfg.get('src_db')}: {str(e)}\n")
+                    log(f"[FAIL] {cfg.get('src_db')}: {str(e)}\n")
                     fail_count += 1
             log(f"\n{'='*60}\nBulk backup: {success_count} succeeded, {fail_count} failed\n")
             self.frame.after(0, lambda: messagebox.showinfo("Bulk Backup Complete", f"Completed: {success_count} succeeded, {fail_count} failed"))
@@ -1293,14 +1293,14 @@ class SchemaTab:
                     }
                     summary = restore_schema.run_restore(restore_cfg)
                     if summary["status"] == "success":
-                        log(f"✓ {cfg.get('dest_db')}\n")
+                        log(f"[OK] {cfg.get('dest_db')}\n")
                         success_count += 1
                     else:
                         errs = summary.get("errors", [])
-                        log(f"✗ {cfg.get('dest_db')}: {len(errs)} error(s)\n")
+                        log(f"[FAIL] {cfg.get('dest_db')}: {len(errs)} error(s)\n")
                         fail_count += 1
                 except Exception as e:
-                    log(f"✗ {cfg.get('dest_db')}: {str(e)}\n")
+                    log(f"[FAIL] {cfg.get('dest_db')}: {str(e)}\n")
                     fail_count += 1
             log(f"\n{'='*60}\nBulk restore: {success_count} succeeded, {fail_count} failed\n")
             self.frame.after(0, lambda: messagebox.showinfo("Bulk Restore Complete", f"Completed: {success_count} succeeded, {fail_count} failed"))

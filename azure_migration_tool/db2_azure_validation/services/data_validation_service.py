@@ -39,7 +39,7 @@ from db2_azure_validation.services.pyspark_schema_comparison import (
 
 
 class PySparkDataValidationService(PySparkSchemaComparisonService):
-    """Data validations for DB2 → Azure."""
+    """Data validations for DB2 to Azure."""
 
     def __init__(
         self,
@@ -412,7 +412,7 @@ class PySparkDataValidationService(PySparkSchemaComparisonService):
         if _nc_verbose:
             pairs_list = pairs.collect()
             for idx, rpair in enumerate(pairs_list, start=1):
-                print(f"[NullCheck] [{idx}/{len(pairs_list)}] {rpair['l_schema']}.{rpair['l_object']} ↔ {rpair['r_schema']}.{rpair['r_object']}")
+                print(f"[NullCheck] [{idx}/{len(pairs_list)}] {rpair['l_schema']}.{rpair['l_object']} <-> {rpair['r_schema']}.{rpair['r_object']}")
 
         s_schema_list = [r["s_schema"] for r in pairs_norm.select("s_schema").distinct().collect()]
         r_schema_list = [r["r_schema"] for r in pairs_norm.select("r_schema").distinct().collect()]
@@ -1952,7 +1952,7 @@ class PySparkDataValidationService(PySparkSchemaComparisonService):
 
 
 class PySparkDataValidationAzureService(PySparkAzureSchemaComparisonService):
-    """Data validations for Azure → Azure."""
+    """Data validations for Azure to Azure."""
 
     def __init__(self, *, access_token_override: Optional[str] = None):
         super().__init__(

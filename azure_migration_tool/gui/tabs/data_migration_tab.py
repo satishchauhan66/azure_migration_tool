@@ -230,7 +230,7 @@ class DataMigrationTab:
         self.bcp_options_frame.grid(row=7, column=0, columnspan=2, sticky=tk.W+tk.E, pady=5)
         
         info_label = tk.Label(self.bcp_options_frame, 
-                             text="✓ BCP uses Azure AD token caching - MFA prompts only ONCE at start.\n" +
+                             text="[OK] BCP uses Azure AD token caching - MFA prompts only ONCE at start.\n" +
                                   "   For SQL auth, credentials are used directly.",
                              font=("Arial", 9), fg="green", justify=tk.LEFT)
         info_label.pack(anchor=tk.W, pady=2)
@@ -448,9 +448,9 @@ class DataMigrationTab:
         excel_btn_frame = ttk.Frame(excel_frame)
         excel_btn_frame.pack(fill=tk.X)
         
-        ttk.Button(excel_btn_frame, text="📥 Download Sample Template", 
+        ttk.Button(excel_btn_frame, text="Download Sample Template", 
                   command=lambda: self._download_template("data_migration")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(excel_btn_frame, text="📤 Upload Excel File", 
+        ttk.Button(excel_btn_frame, text="Upload Excel File", 
                   command=self._upload_excel).pack(side=tk.LEFT, padx=5)
         
         self.excel_file_var = tk.StringVar()
@@ -651,7 +651,7 @@ exit 0
                 # Verify installation
                 bcp_path = self._find_bcp_exe()
                 if bcp_path:
-                    self.migration_log.insert(tk.END, f"✓ BCP installed successfully at: {bcp_path}\n")
+                    self.migration_log.insert(tk.END, f"[OK] BCP installed successfully at: {bcp_path}\n")
                     self.migration_log.see(tk.END)
                     return True, None
                 else:
@@ -696,7 +696,7 @@ exit 0
                 try:
                     urllib.request.urlretrieve(url, installer_path)
                     if os.path.exists(installer_path) and os.path.getsize(installer_path) > 0:
-                        self.migration_log.insert(tk.END, f"✓ Download complete: {installer_path}\n")
+                        self.migration_log.insert(tk.END, f"[OK] Download complete: {installer_path}\n")
                         self.migration_log.see(tk.END)
                         return installer_path
                 except Exception as e:
@@ -706,7 +706,7 @@ exit 0
             return None
             
         except Exception as e:
-            self.migration_log.insert(tk.END, f"✗ Download failed: {str(e)}\n")
+            self.migration_log.insert(tk.END, f"[X] Download failed: {str(e)}\n")
             return None
     
     def _install_bcp_installer(self, installer_path):
@@ -738,7 +738,7 @@ exit 0
                 # Verify installation
                 bcp_path = self._find_bcp_exe()
                 if bcp_path:
-                    self.migration_log.insert(tk.END, f"✓ BCP installed successfully at: {bcp_path}\n")
+                    self.migration_log.insert(tk.END, f"[OK] BCP installed successfully at: {bcp_path}\n")
                     self.migration_log.see(tk.END)
                     return True, None
                 else:
@@ -963,7 +963,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
         """
         if msal is None:
             if logger:
-                logger("⚠ MSAL library not installed. Install with: pip install msal")
+                logger("[WARN] MSAL library not installed. Install with: pip install msal")
             return None
         
         # Azure SQL Database resource ID
@@ -1008,7 +1008,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     result = app.acquire_token_silent(scopes, account=accounts[0])
                     if result and "access_token" in result:
                         if logger:
-                            logger("✓ Using cached Azure AD token (no MFA prompt needed)")
+                            logger("[OK] Using cached Azure AD token (no MFA prompt needed)")
                         return result["access_token"]
                 
                 # No cached token, need interactive auth
@@ -1025,7 +1025,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 
                 if result and "access_token" in result:
                     if logger:
-                        logger(f"✓ Azure AD token acquired successfully via {client_name}")
+                        logger(f"[OK] Azure AD token acquired successfully via {client_name}")
                     return result["access_token"]
                 else:
                     error = result.get("error_description", result.get("error", "Unknown error"))
@@ -1037,7 +1037,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         continue
                     else:
                         if logger:
-                            logger(f"✗ Failed to acquire token: {error}")
+                            logger(f"[X] Failed to acquire token: {error}")
                         return None
                         
             except Exception as e:
@@ -1049,13 +1049,13 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     continue
                 else:
                     if logger:
-                        logger(f"✗ Error with {client_name}: {str(e)}")
+                        logger(f"[X] Error with {client_name}: {str(e)}")
                     # Try next client ID
                     continue
         
         # All client IDs failed
         if logger:
-            logger(f"✗ Failed to acquire token with all available methods")
+            logger(f"[X] Failed to acquire token with all available methods")
             logger(f"  Last error: {last_error}")
             logger("  Tip: Try using SQL authentication instead of Entra MFA for BCP")
         return None
@@ -1162,7 +1162,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 if not success:
                     raise RuntimeError(f"Failed to create login on destination: {error}")
                 
-                logger_callback("✓ SQL logins created successfully")
+                logger_callback("[OK] SQL logins created successfully")
                 
                 # Get list of tables to migrate before closing connection
                 src_cur = src_conn.cursor()
@@ -1352,7 +1352,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         missing_tables.append(tbl)
                 
                 if missing_tables:
-                    logger_callback(f"⚠ Skipping {len(missing_tables)} table(s) not in destination:")
+                    logger_callback(f"[WARN] Skipping {len(missing_tables)} table(s) not in destination:")
                     for tbl in missing_tables[:5]:
                         logger_callback(f"  - {tbl}")
                     if len(missing_tables) > 5:
@@ -1360,7 +1360,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 
                 table_list = existing_tables
             except Exception as e:
-                logger_callback(f"⚠ Could not check destination tables: {e}")
+                logger_callback(f"[WARN] Could not check destination tables: {e}")
                 logger_callback("  Proceeding with all tables...")
         
         logger_callback(f"Migrating {len(table_list)} table(s) using BCP...")
@@ -1441,21 +1441,21 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     disable_all_foreign_keys(dest_cur, temp_logger)
                     dest_conn_for_constraints.commit()
                     fk_disabled = True
-                    logger_callback("✓ Foreign key constraints disabled")
+                    logger_callback("[OK] Foreign key constraints disabled")
                 
                 if cfg.get('disable_indexes'):
                     logger_callback("Disabling non-clustered indexes...")
                     disable_nonclustered_indexes(dest_cur, temp_logger)
                     dest_conn_for_constraints.commit()
                     indexes_disabled = True
-                    logger_callback("✓ Non-clustered indexes disabled")
+                    logger_callback("[OK] Non-clustered indexes disabled")
                 
                 if cfg.get('disable_triggers'):
                     logger_callback("Disabling triggers...")
                     disable_all_triggers(dest_cur, temp_logger)
                     dest_conn_for_constraints.commit()
                     triggers_disabled = True
-                    logger_callback("✓ Triggers disabled")
+                    logger_callback("[OK] Triggers disabled")
         
             # Create a connection to destination for row count checks (resume logic)
             resume_enabled = cfg.get('resume_enabled', True)  # Default to resume enabled
@@ -1499,13 +1499,13 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         
                         # If row counts match, skip this table
                         if src_row_count > 0 and src_row_count == dest_row_count:
-                            logger_callback(f"⏭ Skipping {table_fqn} (already migrated: {src_row_count:,} rows match)")
+                            logger_callback(f"[SKIP] Skipping {table_fqn} (already migrated: {src_row_count:,} rows match)")
                             skipped_count += 1
                             success_count += 1
                             continue
                         elif dest_row_count > 0 and dest_row_count != src_row_count:
                             # Partial migration - truncate and reload
-                            logger_callback(f"⚠ {table_fqn}: Row count mismatch (src: {src_row_count:,}, dest: {dest_row_count:,}) - will truncate and reload")
+                            logger_callback(f"[WARN] {table_fqn}: Row count mismatch (src: {src_row_count:,}, dest: {dest_row_count:,}) - will truncate and reload")
                     
                     # Truncate destination if requested or if row count mismatch
                     if self.truncate_dest_var.get():
@@ -1593,11 +1593,11 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         
                         # Check for token-related errors
                         if "Invalid value specified for connection string attribute 'PWD'" in error_msg:
-                            logger_callback(f"✗ BCP export failed for {table_fqn}:")
+                            logger_callback(f"[X] BCP export failed for {table_fqn}:")
                             logger_callback(f"  Error: Access token not supported by ODBC driver")
                             logger_callback(f"  Solution: Use SQL authentication or upgrade to ODBC Driver 18")
                         else:
-                            logger_callback(f"✗ BCP export failed for {table_fqn}:")
+                            logger_callback(f"[X] BCP export failed for {table_fqn}:")
                             logger_callback(f"  {error_msg.strip()}")
                         
                         error_count += 1
@@ -1607,7 +1607,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     
                     # Check if file was created and has data
                     if not os.path.exists(data_file) or os.path.getsize(data_file) == 0:
-                        logger_callback(f"⚠ No data to migrate for {table_fqn}")
+                        logger_callback(f"[WARN] No data to migrate for {table_fqn}")
                         continue
                     
                     # Import to destination
@@ -1666,24 +1666,24 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         
                         # Check for specific error types and provide helpful messages
                         if "Invalid value specified for connection string attribute 'PWD'" in error_msg:
-                            logger_callback(f"✗ BCP import failed for {table_fqn}:")
+                            logger_callback(f"[X] BCP import failed for {table_fqn}:")
                             logger_callback(f"  Error: Access token not supported by ODBC driver")
                             logger_callback(f"  Solution: Use SQL authentication or upgrade to ODBC Driver 18")
                         elif "Invalid object name" in error_msg or "S0002" in error_msg:
-                            logger_callback(f"✗ BCP import failed for {table_fqn}:")
+                            logger_callback(f"[X] BCP import failed for {table_fqn}:")
                             logger_callback(f"  Error: Table does not exist in destination database!")
                             logger_callback(f"  Solution: Run schema migration first, or exclude this table")
                             logger_callback(f"  Tip: This might be a backup table (Bak_*) not needed in destination")
                         elif "permission" in error_msg.lower() or "denied" in error_msg.lower():
-                            logger_callback(f"✗ BCP import failed for {table_fqn}:")
+                            logger_callback(f"[X] BCP import failed for {table_fqn}:")
                             logger_callback(f"  Error: Permission denied on destination table")
                             logger_callback(f"  Solution: Grant INSERT permission to the user")
                         elif "foreign key" in error_msg.lower() or "constraint" in error_msg.lower():
-                            logger_callback(f"✗ BCP import failed for {table_fqn}:")
+                            logger_callback(f"[X] BCP import failed for {table_fqn}:")
                             logger_callback(f"  Error: Foreign key or constraint violation")
                             logger_callback(f"  Solution: Enable 'Disable Foreign Keys' option")
                         else:
-                            logger_callback(f"✗ BCP import failed for {table_fqn}:")
+                            logger_callback(f"[X] BCP import failed for {table_fqn}:")
                             # Show first 3 lines of error for clarity
                             error_lines = error_msg.strip().split('\n')[:3]
                             for line in error_lines:
@@ -1712,13 +1712,13 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                                     pass
                     
                     if rows_imported > 0:
-                        logger_callback(f"✓ Migrated {table_fqn} ({rows_imported:,} rows)")
+                        logger_callback(f"[OK] Migrated {table_fqn} ({rows_imported:,} rows)")
                     else:
-                        logger_callback(f"✓ Migrated {table_fqn}")
+                        logger_callback(f"[OK] Migrated {table_fqn}")
                     success_count += 1
                 
                 except Exception as e:
-                    logger_callback(f"✗ Error migrating {table_fqn}: {str(e)}")
+                    logger_callback(f"[X] Error migrating {table_fqn}: {str(e)}")
                     error_count += 1
                     if not self.continue_on_error_var.get():
                         raise
@@ -1749,7 +1749,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         logger_callback("Re-enabling triggers...")
                         enable_all_triggers(dest_cur, temp_logger)
                         dest_conn_for_constraints.commit()
-                        logger_callback("✓ Triggers re-enabled")
+                        logger_callback("[OK] Triggers re-enabled")
                     
                     if indexes_disabled:
                         logger_callback("Rebuilding non-clustered indexes (this may take a while)...")
@@ -1767,17 +1767,17 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                             EXEC sp_executesql @sql;
                         """)
                         dest_conn_for_constraints.commit()
-                        logger_callback("✓ Non-clustered indexes rebuilt")
+                        logger_callback("[OK] Non-clustered indexes rebuilt")
                     
                     if fk_disabled:
                         logger_callback("Re-enabling foreign key constraints...")
                         enable_all_foreign_keys(dest_cur, temp_logger)
                         dest_conn_for_constraints.commit()
-                        logger_callback("✓ Foreign key constraints re-enabled")
+                        logger_callback("[OK] Foreign key constraints re-enabled")
                     
                     dest_conn_for_constraints.close()
             except Exception as cleanup_ex:
-                logger_callback(f"⚠ Warning during constraint cleanup: {cleanup_ex}")
+                logger_callback(f"[WARN] Warning during constraint cleanup: {cleanup_ex}")
             
             # Clean up temp files
             try:
@@ -1876,7 +1876,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             logger_callback("Validating pipeline exists...")
             if not adf_client.pipeline_exists(pipeline_name):
                 raise ValueError(f"Pipeline '{pipeline_name}' not found in factory '{factory_name}'")
-            logger_callback(f"✓ Pipeline '{pipeline_name}' found")
+            logger_callback(f"[OK] Pipeline '{pipeline_name}' found")
             
             # Get table list
             table_list = []
@@ -1913,7 +1913,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     src_conn.close()
                     logger_callback(f"Found {len(table_list)} table(s) to migrate")
                 except Exception as e:
-                    logger_callback(f"⚠ Could not get table list: {e}")
+                    logger_callback(f"[WARN] Could not get table list: {e}")
                     logger_callback("  Using '*' to migrate all tables")
                     table_list = ["*"]  # Use wildcard for all tables
             
@@ -1942,7 +1942,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             # Trigger pipeline
             logger_callback(f"\nTriggering pipeline '{pipeline_name}'...")
             run_id = adf_client.trigger_pipeline(pipeline_name, parameters)
-            logger_callback(f"✓ Pipeline triggered. Run ID: {run_id}")
+            logger_callback(f"[OK] Pipeline triggered. Run ID: {run_id}")
             logger_callback(f"  Monitor at: https://adf.azure.com/monitoring/pipelineruns/{run_id}")
             
             # Monitor pipeline execution
@@ -1985,7 +1985,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 
                 logger_callback(f"\n{'='*60}")
                 if status == 'Succeeded':
-                    logger_callback(f"✓ Pipeline completed successfully!")
+                    logger_callback(f"[OK] Pipeline completed successfully!")
                     logger_callback(f"  Duration: {duration_sec:.1f} seconds")
                     return {
                         "status": "success",
@@ -1994,7 +1994,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     }
                 elif status == 'Failed':
                     error_msg = final_status.get('message', 'Unknown error')
-                    logger_callback(f"✗ Pipeline failed!")
+                    logger_callback(f"[X] Pipeline failed!")
                     logger_callback(f"  Error: {error_msg}")
                     return {
                         "status": "failed",
@@ -2003,7 +2003,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         "duration_seconds": duration_sec
                     }
                 else:
-                    logger_callback(f"⚠ Pipeline status: {status}")
+                    logger_callback(f"[WARN] Pipeline status: {status}")
                     return {
                         "status": "unknown",
                         "run_id": run_id,
@@ -2012,7 +2012,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     }
                     
             except TimeoutError as e:
-                logger_callback(f"\n⚠ Timeout waiting for pipeline completion")
+                logger_callback(f"\n[WARN] Timeout waiting for pipeline completion")
                 logger_callback(f"  Run ID: {run_id}")
                 logger_callback(f"  Check status in Azure Portal")
                 return {
@@ -2021,7 +2021,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     "error": str(e)
                 }
             except Exception as e:
-                logger_callback(f"\n✗ Error monitoring pipeline: {e}")
+                logger_callback(f"\n[X] Error monitoring pipeline: {e}")
                 return {
                     "status": "error",
                     "run_id": run_id,
@@ -2030,7 +2030,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 
         except Exception as e:
             error_msg = str(e)
-            logger_callback(f"\n✗ Error: {error_msg}")
+            logger_callback(f"\n[X] Error: {error_msg}")
             return {
                 "status": "failed",
                 "error": error_msg
@@ -2152,11 +2152,11 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     report = self._migrate_with_bcp(cfg, log_callback)
                     
                     if report["status"] == "success":
-                        self.migration_log.insert(tk.END, f"\n✓ BCP Migration completed successfully!\n")
+                        self.migration_log.insert(tk.END, f"\n[OK] BCP Migration completed successfully!\n")
                         self.migration_log.insert(tk.END, f"Tables migrated: {report.get('tables_ok', 0)}\n")
                         messagebox.showinfo("Success", "BCP migration completed successfully!")
                     else:
-                        self.migration_log.insert(tk.END, f"\n✗ BCP Migration completed with errors!\n")
+                        self.migration_log.insert(tk.END, f"\n[X] BCP Migration completed with errors!\n")
                         self.migration_log.insert(tk.END, f"Tables succeeded: {report.get('tables_ok', 0)}\n")
                         self.migration_log.insert(tk.END, f"Tables failed: {report.get('tables_failed', 0)}\n")
                         messagebox.showwarning("Warning", "BCP migration completed with errors! Check log for details.")
@@ -2173,11 +2173,11 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     report = self._migrate_with_adf(cfg, log_callback)
                     
                     if report["status"] == "success":
-                        self.migration_log.insert(tk.END, f"\n✓ ADF Migration completed successfully!\n")
+                        self.migration_log.insert(tk.END, f"\n[OK] ADF Migration completed successfully!\n")
                         self.migration_log.insert(tk.END, f"Pipeline Run ID: {report.get('run_id', 'N/A')}\n")
                         messagebox.showinfo("Success", "ADF migration completed successfully!")
                     else:
-                        self.migration_log.insert(tk.END, f"\n✗ ADF Migration completed with errors!\n")
+                        self.migration_log.insert(tk.END, f"\n[X] ADF Migration completed with errors!\n")
                         self.migration_log.insert(tk.END, f"Error: {report.get('error', 'Unknown error')}\n")
                         messagebox.showwarning("Warning", "ADF migration completed with errors! Check log for details.")
                 else:
@@ -2192,18 +2192,18 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     
                     if report["status"] == "success":
                         self.migration_log.insert(tk.END, f"\n{'='*50}\n")
-                        self.migration_log.insert(tk.END, f"✓ Migration completed successfully!\n")
+                        self.migration_log.insert(tk.END, f"[OK] Migration completed successfully!\n")
                         self.migration_log.insert(tk.END, f"Tables migrated: {report.get('tables_ok', 0)}\n")
                         self.migration_log.insert(tk.END, f"Tables failed: {report.get('tables_failed', 0)}\n")
                         messagebox.showinfo("Success", "Data migration completed successfully!")
                     else:
                         self.migration_log.insert(tk.END, f"\n{'='*50}\n")
-                        self.migration_log.insert(tk.END, f"✗ Migration completed with errors!\n")
+                        self.migration_log.insert(tk.END, f"[X] Migration completed with errors!\n")
                         self.migration_log.insert(tk.END, f"Errors: {report.get('errors', [])}\n")
                         messagebox.showwarning("Warning", "Migration completed with errors! Check log for details.")
                     
             except Exception as e:
-                self.migration_log.insert(tk.END, f"\n✗ Error: {str(e)}\n")
+                self.migration_log.insert(tk.END, f"\n[X] Error: {str(e)}\n")
                 messagebox.showerror("Error", f"Migration failed: {str(e)}")
             finally:
                 self.progress_bar.stop()
@@ -2347,11 +2347,11 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         report = self._migrate_with_bcp(migrate_cfg, log_callback)
                         
                         if report["status"] == "success":
-                            self.migration_log.insert(tk.END, f"✓ Success: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
+                            self.migration_log.insert(tk.END, f"[OK] Success: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
                             self.migration_log.insert(tk.END, f"  Tables migrated: {report.get('tables_ok', 0)}\n")
                             success_count += 1
                         else:
-                            self.migration_log.insert(tk.END, f"✗ Completed with errors: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
+                            self.migration_log.insert(tk.END, f"[X] Completed with errors: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
                             self.migration_log.insert(tk.END, f"  Tables succeeded: {report.get('tables_ok', 0)}, failed: {report.get('tables_failed', 0)}\n")
                             fail_count += 1
                     elif migration_method == "adf":
@@ -2363,11 +2363,11 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         report = self._migrate_with_adf(migrate_cfg, log_callback)
                         
                         if report["status"] == "success":
-                            self.migration_log.insert(tk.END, f"✓ Success: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
+                            self.migration_log.insert(tk.END, f"[OK] Success: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
                             self.migration_log.insert(tk.END, f"  Pipeline Run ID: {report.get('run_id', 'N/A')}\n")
                             success_count += 1
                         else:
-                            self.migration_log.insert(tk.END, f"✗ Failed: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
+                            self.migration_log.insert(tk.END, f"[X] Failed: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
                             self.migration_log.insert(tk.END, f"  Error: {report.get('error', 'Unknown error')}\n")
                             fail_count += 1
                     else:
@@ -2380,15 +2380,15 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         report = migrate_data.run_migration(migrate_cfg, log_callback=stream_log)
                         
                         if report["status"] == "success":
-                            self.migration_log.insert(tk.END, f"✓ Success: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
+                            self.migration_log.insert(tk.END, f"[OK] Success: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
                             self.migration_log.insert(tk.END, f"  Tables migrated: {report.get('tables_ok', 0)}\n")
                             success_count += 1
                         else:
-                            self.migration_log.insert(tk.END, f"✗ Failed: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
+                            self.migration_log.insert(tk.END, f"[X] Failed: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
                             self.migration_log.insert(tk.END, f"  Errors: {report.get('errors', [])}\n")
                             fail_count += 1
                 except Exception as e:
-                    self.migration_log.insert(tk.END, f"✗ Error: {cfg.get('src_db')} -> {cfg.get('dest_db')} - {str(e)}\n")
+                    self.migration_log.insert(tk.END, f"[X] Error: {cfg.get('src_db')} -> {cfg.get('dest_db')} - {str(e)}\n")
                     fail_count += 1
                     
             self.progress_bar.stop()

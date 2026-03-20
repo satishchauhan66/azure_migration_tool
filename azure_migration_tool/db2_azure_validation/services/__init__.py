@@ -8,7 +8,7 @@ This module provides PySpark-based services for:
 - Data validation (compare row counts, checksums, null values)
 - Behavior validation (identity, sequences, triggers, routines)
 
-Services support both DB2→Azure and Azure→Azure comparisons.
+Services support both DB2-to-Azure and Azure-to-Azure comparisons.
 
 Note: PySpark must be installed separately: pip install pyspark
 """

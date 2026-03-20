@@ -145,9 +145,9 @@ class DataValidationTab:
         def update():
             try:
                 if total is not None:
-                    stats_text = f"✓ Completed: {success} | ✗ Failed: {failed} | Total: {total}"
+                    stats_text = f"OK Completed: {success} | Failed: {failed} | Total: {total}"
                 else:
-                    stats_text = f"✓ Completed: {success} | ✗ Failed: {failed}"
+                    stats_text = f"OK Completed: {success} | Failed: {failed}"
                 self.stats_label.config(text=stats_text)
             except Exception:
                 pass
@@ -307,7 +307,7 @@ class DataValidationTab:
         self.check_identity_reseed_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(options_frame, text="Check identity vs max ID (post-migration reseed risk)", 
                        variable=self.check_identity_reseed_var).pack(anchor=tk.W, pady=5)
-        tk.Label(options_frame, text="Reseed: After DB2→SQL migration, identity can be lower than max ID in child tables; new inserts then cause duplicate-key errors. This check flags tables that need DBCC CHECKIDENT RESEED.", 
+        tk.Label(options_frame, text="Reseed: After DB2 to SQL migration, identity can be lower than max ID in child tables; new inserts then cause duplicate-key errors. This check flags tables that need DBCC CHECKIDENT RESEED.", 
                  font=("Arial", 8), fg="gray", wraplength=520).pack(anchor=tk.W, padx=(20, 0))
         
         # Excel support frame
@@ -317,9 +317,9 @@ class DataValidationTab:
         excel_btn_frame = ttk.Frame(excel_frame)
         excel_btn_frame.pack(fill=tk.X)
         
-        ttk.Button(excel_btn_frame, text="📥 Download Sample Template", 
+        ttk.Button(excel_btn_frame, text="Download Sample Template", 
                   command=lambda: self._download_template("data_validation")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(excel_btn_frame, text="📤 Upload Excel File", 
+        ttk.Button(excel_btn_frame, text="Upload Excel File", 
                   command=self._upload_excel).pack(side=tk.LEFT, padx=5)
         
         self.excel_file_var = tk.StringVar()
@@ -377,7 +377,7 @@ class DataValidationTab:
         
         self.status_filter_var = tk.StringVar(value="All")
         status_filter_combo = ttk.Combobox(filter_frame, textvariable=self.status_filter_var,
-                                          values=["All", "✓ Match", "✗ Mismatch", "✗ Error", "✗ Missing", "⚠ Reseed"],
+                                          values=["All", "Match OK", "Mismatch", "Error", "Missing", "Reseed (warn)"],
                                           state="readonly", width=15)
         status_filter_combo.pack(side=tk.LEFT, padx=5)
         status_filter_combo.bind("<<ComboboxSelected>>", lambda e: self._filter_results())
@@ -466,18 +466,18 @@ class DataValidationTab:
         for name in preferred:
             if name in drivers:
                 self._cached_driver = name
-                self._log(f"✓ Selected ODBC driver: {name}", logging.INFO, {"process": "DriverDetection"})
+                self._log(f"[OK] Selected ODBC driver: {name}", logging.INFO, {"process": "DriverDetection"})
                 return name
         
         # Fallback: find any SQL Server driver
         for d in drivers:
             if "SQL Server" in d:
                 self._cached_driver = d
-                self._log(f"✓ Selected fallback ODBC driver: {d}", logging.WARNING, {"process": "DriverDetection"})
+                self._log(f"[OK] Selected fallback ODBC driver: {d}", logging.WARNING, {"process": "DriverDetection"})
                 return d
         
         # Last resort - return the most common one and hope it works
-        self._log(f"⚠ No ODBC driver found, using default: ODBC Driver 17 for SQL Server", logging.WARNING, {"process": "DriverDetection"})
+        self._log(f"[WARN] No ODBC driver found, using default: ODBC Driver 17 for SQL Server", logging.WARNING, {"process": "DriverDetection"})
         return "ODBC Driver 17 for SQL Server"
         
     def _get_connection_string(self, server, database, auth, user, password):
@@ -754,13 +754,13 @@ class DataValidationTab:
                             self._log(f"  Destination count: {dest_count:,}", logging.INFO, table_context)
                             
                             # Compare counts
-                            status = "✓ Match" if src_count == dest_count else "✗ Mismatch"
+                            status = "Match OK" if src_count == dest_count else "Mismatch"
                             diff = abs(src_count - dest_count)
                             
                             if src_count == dest_count:
-                                self._log(f"  ✓ MATCH: Both have {src_count:,} rows", logging.INFO, table_context)
+                                self._log(f"  [OK] MATCH: Both have {src_count:,} rows", logging.INFO, table_context)
                             else:
-                                self._log(f"  ✗ MISMATCH: Difference of {diff:,} rows (Source: {src_count:,}, Dest: {dest_count:,})", 
+                                self._log(f"  [X] MISMATCH: Difference of {diff:,} rows (Source: {src_count:,}, Dest: {dest_count:,})", 
                                          logging.WARNING, table_context)
                             
                             differences = []
@@ -801,15 +801,15 @@ class DataValidationTab:
                             
                             # Compare fast counts; exact COUNT(*) only when "Use exact count" is enabled
                             if src_count == dest_count:
-                                status = "✓ Match"
+                                status = "Match OK"
                                 diff = 0
                                 differences = []
-                                self._log(f"  ✓ MATCH (fast check): Both have {src_count:,} rows", logging.INFO, table_context)
+                                self._log(f"  [OK] MATCH (fast check): Both have {src_count:,} rows", logging.INFO, table_context)
                             else:
-                                status = "✗ Mismatch"
+                                status = "Mismatch"
                                 diff = abs(src_count - dest_count)
                                 differences = [f"Row count difference: {diff} (enable 'Use exact count' to verify)"] if diff > 0 else []
-                                self._log(f"  ✗ MISMATCH (fast check): Source {src_count:,} vs Dest {dest_count:,} rows", logging.WARNING, table_context)
+                                self._log(f"  [X] MISMATCH (fast check): Source {src_count:,} vs Dest {dest_count:,} rows", logging.WARNING, table_context)
                         else:
                             # FAST CHECK: Use batch counts if available, else sys.partitions per table (SQL Server to SQL Server)
                             if src_counts_batch and dest_counts_batch:
@@ -847,18 +847,18 @@ class DataValidationTab:
                             if src_count_fast == dest_count_fast:
                                 src_count = src_count_fast
                                 dest_count = dest_count_fast
-                                status = "✓ Match"
+                                status = "Match OK"
                                 diff = 0
                                 differences = []
-                                self._log(f"  ✓ MATCH (fast check): Both have {src_count:,} rows", logging.INFO, table_context)
+                                self._log(f"  [OK] MATCH (fast check): Both have {src_count:,} rows", logging.INFO, table_context)
                             else:
                                 # Report mismatch from sys.partitions; no COUNT(*) unless user enables "Use exact count"
                                 src_count = src_count_fast
                                 dest_count = dest_count_fast
-                                status = "✗ Mismatch"
+                                status = "Mismatch"
                                 diff = abs(src_count - dest_count)
                                 differences = [f"Row count difference: {diff} (from sys.partitions)"] if diff > 0 else []
-                                self._log(f"  ✗ MISMATCH (fast check): Source {src_count:,} vs Dest {dest_count:,} rows (enable 'Use exact count' to verify)", 
+                                self._log(f"  [X] MISMATCH (fast check): Source {src_count:,} vs Dest {dest_count:,} rows (enable 'Use exact count' to verify)", 
                                          logging.WARNING, table_context)
                         
                         result = {
@@ -881,7 +881,7 @@ class DataValidationTab:
                                                                tags=(tbl,))
                                 self.all_tree_items.append(item)
                                 if mismatch:
-                                    self.results_tree.set(item, "Status", "✗ Mismatch")
+                                    self.results_tree.set(item, "Status", "Mismatch")
                             except Exception as ex:
                                 # Log so we don't silently lose results
                                 try:
@@ -894,7 +894,7 @@ class DataValidationTab:
                     except Exception as e:
                         error_msg = str(e)
                         error_type = type(e).__name__
-                        self._log(f"  ✗ ERROR validating {table}: {error_msg}", logging.ERROR, table_context)
+                        self._log(f"  [X] ERROR validating {table}: {error_msg}", logging.ERROR, table_context)
                         self._log(f"  Error type: {error_type}", logging.DEBUG, table_context)
                         
                         db_name = f"{src_db} vs {dest_db}"
@@ -904,7 +904,7 @@ class DataValidationTab:
                         def add_error(tbl=table, db=db_name, err=error_msg):
                             try:
                                 item = self.results_tree.insert("", tk.END, text=str(tbl),
-                                                       values=("Row count", str(db), "Error", "Error", "✗ Error", str(err)[:200]),
+                                                       values=("Row count", str(db), "Error", "Error", "Error", str(err)[:200]),
                                                        tags=(err_key,))
                                 self.all_tree_items.append(item)
                             except Exception as ex:
@@ -926,12 +926,12 @@ class DataValidationTab:
                 self._log("Closing database connections...", logging.DEBUG, context)
                 src_conn.close()
                 dest_conn.close()
-                self._log("✓ Database connections closed", logging.DEBUG, context)
+                self._log("[OK] Database connections closed", logging.DEBUG, context)
                 
-                self._log("\n✓ Validation completed!", logging.INFO, context)
+                self._log("\n[OK] Validation completed!", logging.INFO, context)
                 
                 # Count successes and failures for stats (include tables that errored and never made it to validation_results)
-                success_count = sum(1 for r in self.validation_results.values() if r.get("status") == "✓ Match")
+                success_count = sum(1 for r in self.validation_results.values() if r.get("status") == "Match OK")
                 total_count = len(tables)
                 fail_count = total_count - success_count
                 
@@ -940,7 +940,7 @@ class DataValidationTab:
                     try:
                         self.export_btn.config(state=tk.NORMAL)
                         self._update_progress(len(tables), len(tables), f"Completed: {len(tables)} tables validated")
-                        self._update_status(f"✓ Validation completed! {len(tables)} tables validated", "darkgreen")
+                        self._update_status(f"[OK] Validation completed! {len(tables)} tables validated", "darkgreen")
                         self._update_stats(success_count, fail_count, total_count)
                         # Ensure results tree is visible and scroll to top
                         if hasattr(self, 'results_tree') and self.results_tree.get_children():
@@ -953,7 +953,7 @@ class DataValidationTab:
             except Exception as e:
                 error_str = str(e)
                 error_type = type(e).__name__
-                self._log(f"\n✗ FATAL ERROR: {error_str}", logging.ERROR, context)
+                self._log(f"\n[X] FATAL ERROR: {error_str}", logging.ERROR, context)
                 self._log(f"  Error type: {error_type}", logging.DEBUG, context)
                 self._log(f"  Source: {self.src_server_var.get()}/{src_db}", logging.DEBUG, context)
                 self._log(f"  Destination: {self.dest_server_var.get()}/{dest_db}", logging.DEBUG, context)
@@ -961,7 +961,7 @@ class DataValidationTab:
                 # Check if this is a driver-related error (thread-safe; catch KeyboardInterrupt during dialog)
                 def show_error(err=error_str):
                     try:
-                        self._update_status(f"✗ Validation failed: {err[:50]}...", "red")
+                        self._update_status(f"[X] Validation failed: {err[:50]}...", "red")
                         if is_driver_missing_error(err):
                             self._handle_driver_missing_error(err)
                         else:
@@ -1069,7 +1069,7 @@ class DataValidationTab:
                     f"ODBC Driver installed successfully!\n\n"
                     f"Driver: {driver_name}\n\n"
                     f"You can now retry the validation.")
-                self.validation_log.insert(tk.END, f"\n✓ ODBC Driver installed: {driver_name}\n")
+                self.validation_log.insert(tk.END, f"\n[OK] ODBC Driver installed: {driver_name}\n")
             else:
                 messagebox.showinfo("Installation Complete", 
                     message + "\n\nPlease restart the application to use the new driver.")
@@ -1308,8 +1308,8 @@ After installation, restart this application.
                 self._log(f"  Dest Auth: {cfg.get('dest_auth', self.dest_auth_var.get())}", logging.DEBUG, context)
                 
                 # Update status UI
-                self._update_status(f"Processing Config #{idx}/{total_configs}: {src_db} → {dest_db}", "blue")
-                self._update_progress(idx - 1, total_configs, f"Config {idx}/{total_configs}: {src_db} → {dest_db}")
+                self._update_status(f"Processing Config #{idx}/{total_configs}: {src_db} -> {dest_db}", "blue")
+                self._update_progress(idx - 1, total_configs, f"Config {idx}/{total_configs}: {src_db} -> {dest_db}")
                 
                 try:
                     # Build connection strings
@@ -1541,7 +1541,7 @@ After installation, restart this application.
                                     self._log(f"  Fast check match: {src_count:,} rows", logging.INFO, table_context)
                                 else:
                                     # Verify with exact COUNT(*)
-                                    self._log(f"  ⚠ Fast check mismatch, verifying with exact COUNT(*)...", logging.WARNING, table_context)
+                                    self._log(f"  [WARN] Fast check mismatch, verifying with exact COUNT(*)...", logging.WARNING, table_context)
                                     src_cur.execute(f"SELECT COUNT(*) FROM {src_table_ref}")
                                     src_count = src_cur.fetchone()[0]
                                     dest_cur.execute(f"SELECT COUNT(*) FROM {dest_table_ref}")
@@ -1549,13 +1549,13 @@ After installation, restart this application.
                                     self._log(f"  Source exact count: {src_count:,}, Dest exact count: {dest_count:,}", logging.INFO, table_context)
                             
                             # Compare
-                            status = "✓ Match" if src_count == dest_count else "✗ Mismatch"
+                            status = "Match OK" if src_count == dest_count else "Mismatch"
                             diff = abs(src_count - dest_count)
                             
                             if src_count == dest_count:
-                                self._log(f"  ✓ MATCH: Both databases have {src_count:,} rows", logging.INFO, table_context)
+                                self._log(f"  [OK] MATCH: Both databases have {src_count:,} rows", logging.INFO, table_context)
                             else:
-                                self._log(f"  ✗ MISMATCH: Difference of {diff:,} rows (Source: {src_count:,}, Dest: {dest_count:,})", 
+                                self._log(f"  [X] MISMATCH: Difference of {diff:,} rows (Source: {src_count:,}, Dest: {dest_count:,})", 
                                          logging.WARNING, table_context)
                             
                             result_key = f"{cfg.get('src_db')}.{table}"
@@ -1583,7 +1583,7 @@ After installation, restart this application.
                         except Exception as e:
                             error_count += 1
                             error_msg = str(e)
-                            self._log(f"  ✗ ERROR validating {table}: {error_msg}", logging.ERROR, table_context)
+                            self._log(f"  [X] ERROR validating {table}: {error_msg}", logging.ERROR, table_context)
                             self._log(f"  Error type: {type(e).__name__}", logging.DEBUG, table_context)
                             
                             db_name = f"{src_db} vs {dest_db}"
@@ -1592,7 +1592,7 @@ After installation, restart this application.
                             def add_error(tbl=table, db=db_name, err=error_msg):
                                 try:
                                     item = self.results_tree.insert("", tk.END, text=tbl,
-                                                           values=("Row count", db, "Error", "Error", "✗ Error", err[:200]),
+                                                           values=("Row count", db, "Error", "Error", "Error", err[:200]),
                                                            tags=(err_key,))
                                     self.all_tree_items.append(item)
                                 except Exception:
@@ -1603,23 +1603,23 @@ After installation, restart this application.
                     self._log("Closing database connections...", logging.DEBUG, context)
                     src_conn.close()
                     dest_conn.close()
-                    self._log("✓ Database connections closed", logging.DEBUG, context)
+                    self._log("[OK] Database connections closed", logging.DEBUG, context)
                     
                     total_success += 1
-                    self._log(f"✓ Configuration #{idx} completed: {validated_count} tables validated, {error_count} errors", 
+                    self._log(f"[OK] Configuration #{idx} completed: {validated_count} tables validated, {error_count} errors", 
                              logging.INFO, context)
-                    self._update_status(f"✓ Config #{idx} completed: {validated_count} tables validated", "darkgreen")
+                    self._update_status(f"[OK] Config #{idx} completed: {validated_count} tables validated", "darkgreen")
                     self._update_stats(total_success, total_fail, total_configs)
                     
                 except Exception as e:
                     error_str = str(e)
                     error_type = type(e).__name__
-                    self._log(f"✗ FATAL ERROR in configuration #{idx}: {error_str}", logging.ERROR, context)
+                    self._log(f"[X] FATAL ERROR in configuration #{idx}: {error_str}", logging.ERROR, context)
                     self._log(f"  Error type: {error_type}", logging.DEBUG, context)
                     self._log(f"  Source: {cfg.get('src_server')}/{cfg.get('src_db')}", logging.DEBUG, context)
                     self._log(f"  Destination: {cfg.get('dest_server')}/{cfg.get('dest_db')}", logging.DEBUG, context)
                     total_fail += 1
-                    self._update_status(f"✗ Config #{idx} failed: {error_str[:50]}...", "red")
+                    self._update_status(f"[X] Config #{idx} failed: {error_str[:50]}...", "red")
                     self._update_stats(total_success, total_fail, total_configs)
                     
                     # Check if this is a driver error - only show once (wrap so KeyboardInterrupt doesn't crash app)
@@ -1643,7 +1643,7 @@ After installation, restart this application.
                     self.bulk_validate_btn.config(state=tk.NORMAL)
                     self._update_progress(total, total, f"Completed: {success} succeeded, {fail} failed")
                     if fail == 0:
-                        self._update_status(f"✓ All {success} configurations completed successfully!", "darkgreen")
+                        self._update_status(f"[OK] All {success} configurations completed successfully!", "darkgreen")
                     else:
                         self._update_status(f"Completed: {success} succeeded, {fail} failed", "orange")
                     self._update_stats(success, fail, total)
@@ -1667,7 +1667,7 @@ After installation, restart this application.
                 table = values['text']
                 db_name = self.results_tree.set(item, "DB")
                 
-                # Check status filter (exact match so "✗ Mismatch" doesn't match "✗ Error")
+                # Check status filter (exact match so "Mismatch" doesn't match "Error")
                 status_match = (status_filter == "All" or status == status_filter)
                 
                 # Check search filter (include Type column)
@@ -1746,7 +1746,7 @@ After installation, restart this application.
             diffs = result.get("differences") or []
             if diffs:
                 tk.Label(self.detail_content_frame, text="Note: " + "; ".join(diffs), font=("Arial", 9), wraplength=500).pack(anchor=tk.W)
-            tk.Label(self.detail_content_frame, text="Sample comparison includes identity columns so rows are compared by actual record identity (avoids false matches after DB2→SQL migration).", 
+            tk.Label(self.detail_content_frame, text="Sample comparison includes identity columns so rows are compared by actual record identity (avoids false matches after DB2 to SQL migration).", 
                      font=("Arial", 8), fg="gray", wraplength=500).pack(anchor=tk.W, pady=(6, 2))
             self._selected_row_count_result_key = result_key
             btn_row = ttk.Frame(self.detail_content_frame)
@@ -1774,7 +1774,7 @@ After installation, restart this application.
             for label, value in [
                 ("Identity current", ident_str),
                 ("Max (parent)", str(result.get("max_parent", "—"))),
-                ("Reseed to (≥)", str(result.get("reseed_to", "—"))),
+                ("Reseed to (>=)", str(result.get("reseed_to", "—"))),
             ]:
                 row = ttk.Frame(self.detail_content_frame)
                 row.pack(anchor=tk.W)
@@ -2149,19 +2149,19 @@ After installation, restart this application.
                     }
                     result_key = f"identity_check:{full_name}"
                     self.validation_results[result_key] = result
-                    diff_msg = f"IDENT={ident_current or 'NULL'}, reseed to ≥{reseed_to:,}"
+                    diff_msg = f"IDENT={ident_current or 'NULL'}, reseed to >={reseed_to:,}"
                     if max_children:
                         diff_msg += " (child max: " + ", ".join(f"{t}={v:,}" for t, v in max_children.items()) + ")"
                     def add_identity_result():
                         try:
                             item = self.results_tree.insert("", tk.END, text=full_name,
-                                                           values=("Identity reseed", str(dest_db), "—", "—", "⚠ Reseed", diff_msg[:180]),
+                                                           values=("Identity reseed", str(dest_db), "—", "—", "Reseed (warn)", diff_msg[:180]),
                                                            tags=(result_key,))
                             self.all_tree_items.append(item)
                         except Exception:
                             pass
                     self.frame.after(0, add_identity_result)
-                    self._log(f"  ⚠ {full_name}: identity current {ident_current}, max child/self {reseed_to}; reseed to ≥ {reseed_to}", logging.WARNING, context)
+                    self._log(f"  [WARN] {full_name}: identity current {ident_current}, max child/self {reseed_to}; reseed to >= {reseed_to}", logging.WARNING, context)
             except Exception as e:
                 self._log(f"  Identity check failed for {full_name}: {e}", logging.DEBUG, context)
 

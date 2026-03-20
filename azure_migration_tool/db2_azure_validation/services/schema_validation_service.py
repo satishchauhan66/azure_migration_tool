@@ -37,7 +37,7 @@ from db2_azure_validation.services.pyspark_schema_comparison import (
 
 
 class PySparkSchemaValidationService(PySparkSchemaComparisonService):
-    """Schema validations for DB2 → Azure (structure only)."""
+    """Schema validations for DB2 to Azure (structure only)."""
 
     def __init__(
         self,
@@ -1733,7 +1733,7 @@ class PySparkSchemaValidationService(PySparkSchemaComparisonService):
 
 
 class PySparkSchemaValidationAzureService(PySparkSchemaValidationService):
-    """Schema validations for Azure → Azure (structure only)."""
+    """Schema validations for Azure to Azure (structure only)."""
 
     def __init__(self, *, access_token_override: Optional[str] = None):
         super().__init__(

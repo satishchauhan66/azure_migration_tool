@@ -57,7 +57,7 @@ class BackupRestoreTab:
 
         title_label = tk.Label(
             scrollable_frame,
-            text="Backup & Restore (.bak ↔ Azure Blob)",
+            text="Backup & Restore (.bak <-> Azure Blob)",
             font=("Arial", 16, "bold"),
         )
         title_label.pack(pady=10)
@@ -88,7 +88,7 @@ class BackupRestoreTab:
 
     def _create_bak_to_blob_widgets(self, parent):
         """On-prem .bak backup to Azure Blob (BACKUP TO URL)."""
-        tk.Label(parent, text=".bak Backup to Azure Blob (on-prem → blob)", font=("Arial", 12, "bold")).pack(
+        tk.Label(parent, text=".bak Backup to Azure Blob (on-prem to blob)", font=("Arial", 12, "bold")).pack(
             pady=(0, 10)
         )
         tk.Label(
@@ -245,7 +245,7 @@ class BackupRestoreTab:
 
     def _create_restore_from_blob_widgets(self, parent):
         """Restore database from Azure Blob (.bak)."""
-        tk.Label(parent, text="Restore from Azure Blob (.bak → SQL Server)", font=("Arial", 12, "bold")).pack(
+        tk.Label(parent, text="Restore from Azure Blob (.bak to SQL Server)", font=("Arial", 12, "bold")).pack(
             pady=(0, 5)
         )
         tk.Label(

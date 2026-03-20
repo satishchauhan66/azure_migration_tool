@@ -105,7 +105,7 @@ class LogConsoleWindow:
     def _create_window(self):
         """Create the console window."""
         self.window = tk.Toplevel(self.parent)
-        self.window.title("📋 Log Console - Real-time Streaming")
+        self.window.title("Log Console - Real-time Streaming")
         self.window.geometry("900x500")
         self.window.minsize(600, 300)
         
@@ -117,10 +117,10 @@ class LogConsoleWindow:
         toolbar.pack(fill=tk.X, padx=5, pady=5)
         
         # Clear button
-        ttk.Button(toolbar, text="🗑️ Clear", command=self._clear_log).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Clear", command=self._clear_log).pack(side=tk.LEFT, padx=2)
         
         # Pause/Resume button
-        self.pause_btn = ttk.Button(toolbar, text="⏸️ Pause", command=self._toggle_pause)
+        self.pause_btn = ttk.Button(toolbar, text="Pause", command=self._toggle_pause)
         self.pause_btn.pack(side=tk.LEFT, padx=2)
         
         # Separator
@@ -312,10 +312,10 @@ class LogConsoleWindow:
         """Toggle pause/resume."""
         self.paused = not self.paused
         if self.paused:
-            self.pause_btn.configure(text="▶️ Resume")
+            self.pause_btn.configure(text="Resume")
             self.status_var.set("PAUSED - Click Resume to continue")
         else:
-            self.pause_btn.configure(text="⏸️ Pause")
+            self.pause_btn.configure(text="Pause")
             self.status_var.set("Streaming resumed...")
             
     def _on_level_change(self, event=None):

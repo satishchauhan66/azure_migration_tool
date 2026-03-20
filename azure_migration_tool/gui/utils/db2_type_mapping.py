@@ -198,7 +198,7 @@ def validate_type_mapping(
                     'status': 'SUCCESS',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'✓ Correct mapping{col_info}: {db2_type}({db2_length}) → {sql_type_norm}(MAX)',
+                    'message': f'[OK] Correct mapping{col_info}: {db2_type}({db2_length}) -> {sql_type_norm}(MAX)',
                     'details': {'lob_to_max': True}
                 }
             elif sql_length >= db2_length or sql_length > 8000:
@@ -207,7 +207,7 @@ def validate_type_mapping(
                     'status': 'SUCCESS',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'✓ Correct mapping{col_info}: {db2_type}({db2_length}) → {sql_type_norm}({sql_length})',
+                    'message': f'[OK] Correct mapping{col_info}: {db2_type}({db2_length}) -> {sql_type_norm}({sql_length})',
                     'details': {'lob_sized': True}
                 }
             else:
@@ -215,7 +215,7 @@ def validate_type_mapping(
                     'status': 'WARNING',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'⚠ Destination may be too small{col_info}: {db2_type}({db2_length}) → {sql_type_norm}({sql_length})',
+                    'message': f'[WARN] Destination may be too small{col_info}: {db2_type}({db2_length}) -> {sql_type_norm}({sql_length})',
                     'details': {'lob_warning': True}
                 }
         
@@ -227,7 +227,7 @@ def validate_type_mapping(
                     'status': 'SUCCESS',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'✓ Correct mapping{col_info}: {db2_type}({db2_length}) → {sql_type_norm}(MAX)',
+                    'message': f'[OK] Correct mapping{col_info}: {db2_type}({db2_length}) -> {sql_type_norm}(MAX)',
                     'details': {'length_match': True, 'max_type': True}
                 }
             elif db2_length == sql_length:
@@ -235,7 +235,7 @@ def validate_type_mapping(
                     'status': 'SUCCESS',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'✓ Correct mapping{col_info}: {db2_type}({db2_length}) → {sql_type_norm}({sql_length})',
+                    'message': f'[OK] Correct mapping{col_info}: {db2_type}({db2_length}) -> {sql_type_norm}({sql_length})',
                     'details': {'length_match': True}
                 }
             elif sql_length >= db2_length and sql_length > 0:
@@ -244,7 +244,7 @@ def validate_type_mapping(
                     'status': 'SUCCESS',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'✓ Correct mapping{col_info}: {db2_type}({db2_length}) → {sql_type_norm}({sql_length})',
+                    'message': f'[OK] Correct mapping{col_info}: {db2_type}({db2_length}) -> {sql_type_norm}({sql_length})',
                     'details': {'length_match': True, 'larger_dest': True}
                 }
             else:
@@ -252,7 +252,7 @@ def validate_type_mapping(
                     'status': 'WARNING',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'⚠ Destination length smaller{col_info}: {db2_type}({db2_length}) → {sql_type_norm}({sql_length})',
+                    'message': f'[WARN] Destination length smaller{col_info}: {db2_type}({db2_length}) -> {sql_type_norm}({sql_length})',
                     'details': {'length_match': False, 'db2_length': db2_length, 'sql_length': sql_length}
                 }
         
@@ -263,7 +263,7 @@ def validate_type_mapping(
                     'status': 'SUCCESS',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'✓ Correct mapping{col_info}: {db2_type}({db2_length},{db2_scale}) → {sql_type_norm}({sql_length},{sql_scale})',
+                    'message': f'[OK] Correct mapping{col_info}: {db2_type}({db2_length},{db2_scale}) -> {sql_type_norm}({sql_length},{sql_scale})',
                     'details': {'precision_match': True, 'scale_match': True}
                 }
             elif sql_length >= db2_length:
@@ -272,7 +272,7 @@ def validate_type_mapping(
                     'status': 'SUCCESS',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'✓ Correct mapping{col_info}: {db2_type}({db2_length},{db2_scale}) → {sql_type_norm}({sql_length},{sql_scale})',
+                    'message': f'[OK] Correct mapping{col_info}: {db2_type}({db2_length},{db2_scale}) -> {sql_type_norm}({sql_length},{sql_scale})',
                     'details': {'precision_match': True, 'scale_match': db2_scale == sql_scale}
                 }
             else:
@@ -280,7 +280,7 @@ def validate_type_mapping(
                     'status': 'WARNING',
                     'expected_type': expected_type,
                     'actual_type': sql_type_norm,
-                    'message': f'⚠ Precision smaller{col_info}: {db2_type}({db2_length},{db2_scale}) → {sql_type_norm}({sql_length},{sql_scale})',
+                    'message': f'[WARN] Precision smaller{col_info}: {db2_type}({db2_length},{db2_scale}) -> {sql_type_norm}({sql_length},{sql_scale})',
                     'details': {'precision_match': False, 'scale_match': False}
                 }
         
@@ -291,7 +291,7 @@ def validate_type_mapping(
                 'status': 'SUCCESS',
                 'expected_type': expected_type,
                 'actual_type': sql_type_norm,
-                'message': f'✓ Correct mapping{col_info}: {db2_type} → {sql_type_norm}',
+                'message': f'[OK] Correct mapping{col_info}: {db2_type} -> {sql_type_norm}',
                 'details': {'scale': sql_scale}
             }
         
@@ -301,7 +301,7 @@ def validate_type_mapping(
                 'status': 'SUCCESS',
                 'expected_type': expected_type,
                 'actual_type': sql_type_norm,
-                'message': f'✓ Correct mapping{col_info}: {db2_type} → {sql_type_norm}',
+                'message': f'[OK] Correct mapping{col_info}: {db2_type} -> {sql_type_norm}',
                 'details': {}
             }
         
@@ -311,7 +311,7 @@ def validate_type_mapping(
                 'status': 'SUCCESS',
                 'expected_type': expected_type,
                 'actual_type': sql_type_norm,
-                'message': f'✓ Correct mapping{col_info}: {db2_type} → {sql_type_norm}',
+                'message': f'[OK] Correct mapping{col_info}: {db2_type} -> {sql_type_norm}',
                 'details': {}
             }
     
@@ -321,7 +321,7 @@ def validate_type_mapping(
             'status': 'WARNING',
             'expected_type': expected_type,
             'actual_type': sql_type_norm,
-            'message': f'⚠ Alternative mapping{col_info}: {db2_type} → {sql_type_norm} (expected {expected_type})',
+            'message': f'[WARN] Alternative mapping{col_info}: {db2_type} -> {sql_type_norm} (expected {expected_type})',
             'details': {'alternative_mapping': True}
         }
     
@@ -331,7 +331,7 @@ def validate_type_mapping(
             'status': 'SUCCESS',
             'expected_type': expected_type,
             'actual_type': sql_type_norm,
-            'message': f'✓ Correct mapping{col_info}: {db2_type} → {sql_type_norm}',
+            'message': f'[OK] Correct mapping{col_info}: {db2_type} -> {sql_type_norm}',
             'details': {'string_variant': True}
         }
     
@@ -340,7 +340,7 @@ def validate_type_mapping(
         'status': 'ERROR',
         'expected_type': expected_type,
         'actual_type': sql_type_norm,
-        'message': f'✗ Type mismatch{col_info}: {db2_type} → {sql_type_norm} (expected {expected_type})',
+        'message': f'[ERR] Type mismatch{col_info}: {db2_type} -> {sql_type_norm} (expected {expected_type})',
         'details': {'db2_type': db2_type}
     }
 
@@ -457,7 +457,7 @@ def compare_columns_with_type_mapping(
                     'src_type': src_type,
                     'dest_type': dest_type,
                     'status': 'SUCCESS',
-                    'message': f'✓ Types match: {src_type}'
+                    'message': f'[OK] Types match: {src_type}'
                 })
                 results['summary']['matched'] += 1
             else:
@@ -466,20 +466,20 @@ def compare_columns_with_type_mapping(
                     'src_type': src_type,
                     'dest_type': dest_type,
                     'status': 'ERROR',
-                    'message': f'✗ Type mismatch: {src_type} vs {dest_type}'
+                    'message': f'[ERR] Type mismatch: {src_type} vs {dest_type}'
                 })
                 results['summary']['errors'] += 1
     
     return results
 
 
-def get_type_mapping_summary(results: Dict[str, Any], use_unicode: bool = True) -> str:
+def get_type_mapping_summary(results: Dict[str, Any], use_unicode: bool = False) -> str:
     """
     Generate a human-readable summary of type mapping results.
     
     Args:
         results: Results from compare_columns_with_type_mapping
-        use_unicode: Whether to use Unicode symbols (default True for GUI, False for console)
+        use_unicode: Reserved; ASCII tags [OK]/[WARN]/[ERR] are always used.
         
     Returns:
         Formatted summary string
@@ -490,15 +490,7 @@ def get_type_mapping_summary(results: Dict[str, Any], use_unicode: bool = True) 
     correctly_mapped = summary.get('correctly_mapped', 0)
     warnings = summary.get('warnings', 0)
     errors = summary.get('errors', 0)
-    
-    if use_unicode:
-        ok_sym = "✓"
-        warn_sym = "⚠"
-        err_sym = "✗"
-    else:
-        ok_sym = "[OK]"
-        warn_sym = "[WARN]"
-        err_sym = "[ERR]"
+    ok_sym, warn_sym, err_sym = "[OK]", "[WARN]", "[ERR]"
     
     lines = [
         f"Column Comparison Summary:",

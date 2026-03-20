@@ -126,10 +126,10 @@ class ConnectionWidget:
         # Save/Delete buttons for server
         btn_frame = ttk.Frame(server_frame)
         btn_frame.pack(side=tk.LEFT, padx=(5, 0))
-        save_btn = ttk.Button(btn_frame, text="💾", width=3, command=self._save_server)
+        save_btn = ttk.Button(btn_frame, text="Save", width=5, command=self._save_server)
         save_btn.pack(side=tk.LEFT, padx=1)
         add_tooltip(save_btn, "Save this connection for later")
-        del_btn = ttk.Button(btn_frame, text="🗑️", width=3, command=self._delete_server)
+        del_btn = ttk.Button(btn_frame, text="Del", width=4, command=self._delete_server)
         del_btn.pack(side=tk.LEFT, padx=1)
         add_tooltip(del_btn, "Remove saved connection")
         
@@ -158,7 +158,7 @@ class ConnectionWidget:
         # Remove aggressive validation on click/focus
         
         # Refresh button for database - only way to trigger database listing
-        ref_db_btn = ttk.Button(db_frame, text="🔄", width=3, command=self._refresh_databases)
+        ref_db_btn = ttk.Button(db_frame, text="Refresh", width=8, command=self._refresh_databases)
         ref_db_btn.pack(side=tk.LEFT, padx=(5, 0))
         add_tooltip(ref_db_btn, "Refresh list of databases from server")
         
@@ -176,7 +176,7 @@ class ConnectionWidget:
             postcommand=self._on_schema_dropdown_open
         )
         self.schema_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ref_schema_btn = ttk.Button(schema_frame, text="🔄", width=3, command=self._refresh_schemas)
+        ref_schema_btn = ttk.Button(schema_frame, text="Refresh", width=8, command=self._refresh_schemas)
         ref_schema_btn.pack(side=tk.LEFT, padx=(5, 0))
         add_tooltip(ref_schema_btn, "Refresh list of schemas")
         self._update_schema_visibility()

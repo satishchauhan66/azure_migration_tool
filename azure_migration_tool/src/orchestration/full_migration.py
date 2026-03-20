@@ -122,11 +122,11 @@ def run_full_migration(cfg: dict):
 
             if backup_summary["status"] != "success":
                 summary["errors"].append(f"Backup failed: {backup_summary.get('errors', [])}")
-                log_msg(f"✗ Backup failed. Status: {backup_summary['status']}")
+                log_msg(f"[FAIL] Backup failed. Status: {backup_summary['status']}")
                 if not cfg.get("continue_on_backup_error", False):
                     raise RuntimeError("Backup failed. Stopping migration.")
             else:
-                log_msg(f"✓ Backup completed successfully. Run ID: {backup_summary['run_id']}")
+                log_msg(f"[OK] Backup completed successfully. Run ID: {backup_summary['run_id']}")
         else:
             log_msg("Skipping schema backup (--skip-backup)")
 
@@ -183,23 +183,23 @@ def run_full_migration(cfg: dict):
 
             # Continue if status is success OR completed_with_errors (when continue_on_error is True)
             if restore_tables_summary["status"] == "success":
-                log_msg("✓ Tables restored successfully")
+                log_msg("[OK] Tables restored successfully")
             elif restore_tables_summary["status"] == "completed_with_errors":
                 summary["errors"].extend(restore_tables_summary.get("errors", []))
-                log_msg("⚠ Table restore completed with errors. Some tables may not have been created.")
+                log_msg("[WARN] Table restore completed with errors. Some tables may not have been created.")
                 # Check if critical tables were created (at least some batches succeeded)
                 tables_file_result = restore_tables_summary.get("files_restored", {}).get("tables_file", {})
                 batches_executed = tables_file_result.get("batches_executed", 0)
                 batches_total = tables_file_result.get("batches_total", 0)
                 if batches_executed == 0:
-                    log_msg("✗ No table batches were executed successfully. Cannot proceed with data migration.")
+                    log_msg("[FAIL] No table batches were executed successfully. Cannot proceed with data migration.")
                     if not cfg.get("continue_on_restore_error", False):
                         raise RuntimeError("Table restore failed - no tables created. Stopping.")
                 else:
                     log_msg(f"Table restore: {batches_executed}/{batches_total} batches succeeded. Continuing...")
             else:  # status == "failed"
                 summary["errors"].extend(restore_tables_summary.get("errors", []))
-                log_msg(f"✗ Table restore failed. Status: {restore_tables_summary['status']}")
+                log_msg(f"[FAIL] Table restore failed. Status: {restore_tables_summary['status']}")
                 if not cfg.get("continue_on_restore_error", False):
                     raise RuntimeError("Table restore failed. Stopping.")
         else:
@@ -257,11 +257,11 @@ def run_full_migration(cfg: dict):
 
             if migrate_report["status"] != "success":
                 summary["errors"].extend(migrate_report.get("errors", []))
-                log_msg(f"⚠ Migration completed with errors. Status: {migrate_report['status']}")
+                log_msg(f"[WARN] Migration completed with errors. Status: {migrate_report['status']}")
                 if not cfg.get("continue_on_migration_error", False):
                     raise RuntimeError("Data migration failed. Stopping.")
             else:
-                log_msg(f"✓ Data migration completed successfully. Tables: {migrate_report.get('tables_ok', 0)}")
+                log_msg(f"[OK] Data migration completed successfully. Tables: {migrate_report.get('tables_ok', 0)}")
         else:
             log_msg("Skipping data migration (--skip-migration)")
 
@@ -313,9 +313,9 @@ def run_full_migration(cfg: dict):
 
             if restore_summary["status"] != "success":
                 summary["errors"].extend(restore_summary.get("errors", []))
-                log_msg(f"⚠ Restore completed with errors. Status: {restore_summary['status']}")
+                log_msg(f"[WARN] Restore completed with errors. Status: {restore_summary['status']}")
             else:
-                log_msg("✓ Restore completed successfully")
+                log_msg("[OK] Restore completed successfully")
         else:
             log_msg("Skipping schema restore (--skip-restore)")
 
@@ -333,7 +333,7 @@ def run_full_migration(cfg: dict):
         logger.exception("Full migration failed: %s", msg)
         if gui_log_callback:
             try:
-                gui_log_callback(f"✗ Full migration failed: {msg}")
+                gui_log_callback(f"[FAIL] Full migration failed: {msg}")
             except:
                 pass
         summary["status"] = "failed"

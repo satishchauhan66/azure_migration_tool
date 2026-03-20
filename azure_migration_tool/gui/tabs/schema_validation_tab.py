@@ -749,11 +749,11 @@ class SchemaComparisonDialog:
         btn_frame = ttk.Frame(self.dialog, padding=10)
         btn_frame.pack(fill=tk.X)
         
-        self.next_btn = ttk.Button(btn_frame, text="Next → Preview Script", 
+        self.next_btn = ttk.Button(btn_frame, text="Next: Preview Script", 
                                   command=self._show_preview, width=20)
         self.next_btn.pack(side=tk.LEFT, padx=5)
         
-        self.back_btn = ttk.Button(btn_frame, text="← Back to Comparison", 
+        self.back_btn = ttk.Button(btn_frame, text="Back: Comparison", 
                                   command=self._show_comparison, width=20, state=tk.DISABLED)
         self.back_btn.pack(side=tk.LEFT, padx=5)
         
@@ -1030,9 +1030,9 @@ class SchemaValidationTab:
         excel_btn_frame = ttk.Frame(excel_frame)
         excel_btn_frame.pack(fill=tk.X)
         
-        ttk.Button(excel_btn_frame, text="📥 Download Sample Template", 
+        ttk.Button(excel_btn_frame, text="Download Sample Template", 
                   command=lambda: self._download_template("schema_validation")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(excel_btn_frame, text="📤 Upload Excel File", 
+        ttk.Button(excel_btn_frame, text="Upload Excel File", 
                   command=self._upload_excel).pack(side=tk.LEFT, padx=5)
         
         self.excel_file_var = tk.StringVar()
@@ -1054,7 +1054,7 @@ class SchemaValidationTab:
         self.export_btn = ttk.Button(btn_frame, text="Export Report", command=self._export_report, width=20, state=tk.DISABLED)
         self.export_btn.pack(side=tk.LEFT, padx=5)
         
-        self.fix_missing_btn = ttk.Button(btn_frame, text="🔧 Fix Missing Objects", command=self._fix_missing_objects, 
+        self.fix_missing_btn = ttk.Button(btn_frame, text="Fix Missing Objects", command=self._fix_missing_objects, 
                                          width=20, state=tk.DISABLED)
         self.fix_missing_btn.pack(side=tk.LEFT, padx=5)
         
@@ -1070,7 +1070,7 @@ class SchemaValidationTab:
         
         self.status_filter_var = tk.StringVar(value="All")
         status_filter_combo = ttk.Combobox(filter_frame, textvariable=self.status_filter_var,
-                                          values=["All", "✓ Match", "✗ Missing", "⚠ Extra", "✗ Mismatch", "✗ Error", "ℹ Auto-Gen"],
+                                          values=["All", "Match OK", "Missing", "Extra only", "Mismatch", "Error", "Auto-Gen"],
                                           state="readonly", width=15)
         status_filter_combo.pack(side=tk.LEFT, padx=5)
         status_filter_combo.bind("<<ComboboxSelected>>", lambda e: self._filter_results())
@@ -1363,17 +1363,17 @@ class SchemaValidationTab:
                         
                         for table in sorted(common_tables):
                             item = self.results_tree.insert("", tk.END, text=table,
-                                                   values=(db_name, "Exists", "Exists", "✓ Match", ""))
+                                                   values=(db_name, "Exists", "Exists", "Match OK", ""))
                             self.all_tree_items.append(item)
                         
                         for table in sorted(missing_in_dest):
                             item = self.results_tree.insert("", tk.END, text=table,
-                                                   values=(db_name, "Exists", "Missing", "✗ Missing", "Table not in destination"))
+                                                   values=(db_name, "Exists", "Missing", "Missing", "Table not in destination"))
                             self.all_tree_items.append(item)
                         
                         for table in sorted(extra_in_dest):
                             item = self.results_tree.insert("", tk.END, text=table,
-                                                   values=(db_name, "Missing", "Exists", "⚠ Extra", "Table not in source"))
+                                                   values=(db_name, "Missing", "Exists", "Extra only", "Table not in source"))
                             self.all_tree_items.append(item)
                     
                     # Validate columns
@@ -1524,7 +1524,7 @@ class SchemaValidationTab:
                                     success_cols.append(col_info['column'])
                                     item = self.results_tree.insert("", tk.END, text=f"{table}.{col_info['column']}",
                                                            values=(db_name, col_info['src_type'], col_info['dest_type'], 
-                                                                   "✓ Mapped", col_info['message']))
+                                                                   "Mapped OK", col_info['message']))
                                     self.all_tree_items.append(item)
                                 
                                 for col_info in mapping_results['type_issues']:
@@ -1532,58 +1532,58 @@ class SchemaValidationTab:
                                         warning_cols.append(col_info['column'])
                                         item = self.results_tree.insert("", tk.END, text=f"{table}.{col_info['column']}",
                                                                values=(db_name, col_info['src_type'], col_info['dest_type'], 
-                                                                       "⚠ Warning", col_info['message']))
+                                                                       "Warning", col_info['message']))
                                     else:  # ERROR
                                         mismatch_cols.append(col_info['column'])
                                         item = self.results_tree.insert("", tk.END, text=f"{table}.{col_info['column']}",
                                                                values=(db_name, col_info['src_type'], col_info['dest_type'], 
-                                                                       "✗ Mismatch", col_info['message']))
+                                                                       "Mismatch", col_info['message']))
                                     self.all_tree_items.append(item)
                                 
                                 for col_info in mapping_results['missing_in_dest']:
                                     missing_cols.append(col_info['column'])
                                     item = self.results_tree.insert("", tk.END, text=f"{table}.{col_info['column']}",
                                                            values=(db_name, col_info['src_type'], "Missing", 
-                                                                   "✗ Missing", "Column not in destination"))
+                                                                   "Missing", "Column not in destination"))
                                     self.all_tree_items.append(item)
                                 
                                 for col_info in mapping_results['extra_in_dest']:
                                     item = self.results_tree.insert("", tk.END, text=f"{table}.{col_info['column']}",
                                                            values=(db_name, "Missing", col_info['dest_type'], 
-                                                                   "⚠ Extra", "Column only in destination"))
+                                                                   "Extra only", "Column only in destination"))
                                     self.all_tree_items.append(item)
                                 
                                 # Summary message
                                 summary = mapping_results['summary']
                                 if summary['errors'] == 0 and summary['warnings'] == 0 and len(missing_cols) == 0:
-                                    self.validation_log.insert(tk.END, f"    ✓ All {summary['correctly_mapped']} columns correctly mapped\n")
+                                    self.validation_log.insert(tk.END, f"    [OK] All {summary['correctly_mapped']} columns correctly mapped\n")
                                 else:
                                     self.validation_log.insert(tk.END, 
-                                        f"    Results: ✓{summary['correctly_mapped']} mapped, ⚠{summary['warnings']} warnings, "
-                                        f"✗{summary['errors']} errors, {len(missing_cols)} missing\n")
+                                        f"    Results: OK {summary['correctly_mapped']} mapped, WARN {summary['warnings']} warnings, "
+                                        f"ERR {summary['errors']} errors, {len(missing_cols)} missing\n")
                             else:
                                 # Same database type - direct comparison
                                 for col in src_columns:
                                     if col not in dest_columns:
                                         missing_cols.append(col)
                                         item = self.results_tree.insert("", tk.END, text=f"{table}.{col}",
-                                                               values=(db_name, "Exists", "Missing", "✗ Missing", "Column not in destination"))
+                                                               values=(db_name, "Exists", "Missing", "Missing", "Column not in destination"))
                                         self.all_tree_items.append(item)
                                     elif src_columns[col] != dest_columns[col]:
                                         mismatch_cols.append(col)
                                         src_info = src_columns[col]
                                         dest_info = dest_columns[col]
                                         item = self.results_tree.insert("", tk.END, text=f"{table}.{col}",
-                                                               values=(db_name, str(src_info), str(dest_info), "✗ Mismatch", "Column definition differs"))
+                                                               values=(db_name, str(src_info), str(dest_info), "Mismatch", "Column definition differs"))
                                         self.all_tree_items.append(item)
                                     else:
                                         # Columns match - show success for cross-db or if all types match
                                         success_cols.append(col)
                                 
                                 if missing_cols or mismatch_cols:
-                                    self.validation_log.insert(tk.END, f"    ⚠ Issues found: {len(missing_cols)} missing, {len(mismatch_cols)} mismatched\n")
+                                    self.validation_log.insert(tk.END, f"    [WARN] Issues found: {len(missing_cols)} missing, {len(mismatch_cols)} mismatched\n")
                                 else:
-                                    self.validation_log.insert(tk.END, f"    ✓ All {len(success_cols)} columns match\n")
+                                    self.validation_log.insert(tk.END, f"    [OK] All {len(success_cols)} columns match\n")
                             self.validation_log.see(tk.END)
                     
                     # Validate indexes
@@ -1798,7 +1798,7 @@ class SchemaValidationTab:
                                     idx_name = f"{src_idx.get('schema', '')}.{src_idx.get('table', '')}.{src_idx.get('name', '')}"
                                     # Only show if there are column differences
                                     # item = self.results_tree.insert("", tk.END, text=idx_name,
-                                    #                        values=(db_name, "Match", "Match", "✓ Match", match_info.get('message', '')))
+                                    #                        values=(db_name, "Match", "Match", "Match OK", match_info.get('message', '')))
                                     # self.all_tree_items.append(item)
                             
                             # Show matched by signature (renamed - this is NOT an error!)
@@ -1812,7 +1812,7 @@ class SchemaValidationTab:
                                     if len(src_idx.get('columns', [])) > 3:
                                         cols += '...'
                                     item = self.results_tree.insert("", tk.END, text=src_name,
-                                                           values=(db_name, src_idx.get('name', ''), dest_name, "✓ Renamed", f"Same columns ({cols}), auto-generated names"))
+                                                           values=(db_name, src_idx.get('name', ''), dest_name, "Renamed OK", f"Same columns ({cols}), auto-generated names"))
                                     self.all_tree_items.append(item)
                             
                             # Show actually missing (not just renamed)
@@ -1820,7 +1820,7 @@ class SchemaValidationTab:
                                 idx_name = f"{idx_info.get('schema', '')}.{idx_info.get('table', '')}.{idx_info.get('name', '')}"
                                 cols = ', '.join(idx_info.get('columns', [])[:3])
                                 item = self.results_tree.insert("", tk.END, text=idx_name,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", f"Columns: {cols}"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", f"Columns: {cols}"))
                                 self.all_tree_items.append(item)
                             
                             # Show extra in destination
@@ -1828,7 +1828,7 @@ class SchemaValidationTab:
                                 idx_name = f"{idx_info.get('schema', '')}.{idx_info.get('table', '')}.{idx_info.get('name', '')}"
                                 cols = ', '.join(idx_info.get('columns', [])[:3])
                                 item = self.results_tree.insert("", tk.END, text=idx_name,
-                                                       values=(db_name, "Missing", "Exists", "⚠ Extra", f"Columns: {cols}"))
+                                                       values=(db_name, "Missing", "Exists", "Extra only", f"Columns: {cols}"))
                                 self.all_tree_items.append(item)
                         else:
                             # Fallback to name-based comparison
@@ -1841,12 +1841,12 @@ class SchemaValidationTab:
                             
                             for idx in sorted(missing_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=idx,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", "Index not in destination"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", "Index not in destination"))
                                 self.all_tree_items.append(item)
                             
                             for idx in sorted(extra_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=idx,
-                                                       values=(db_name, "Missing", "Exists", "⚠ Extra", "Index not in source"))
+                                                       values=(db_name, "Missing", "Exists", "Extra only", "Index not in source"))
                                 self.all_tree_items.append(item)
                     
                     # Validate constraints (with signature matching for FKs)
@@ -2208,7 +2208,7 @@ class SchemaValidationTab:
                                     cols = ', '.join(src_fk.get('columns', [])[:2])
                                     ref_table = src_fk.get('ref_table', '')
                                     item = self.results_tree.insert("", tk.END, text=src_name,
-                                                           values=(db_name, src_fk.get('name', ''), dest_name, "✓ Renamed", f"FK on ({cols}) -> {ref_table}, auto-generated names"))
+                                                           values=(db_name, src_fk.get('name', ''), dest_name, "Renamed OK", f"FK on ({cols}) -> {ref_table}, auto-generated names"))
                                     self.all_tree_items.append(item)
                             
                             # Show action warnings (same structure but different ON DELETE/UPDATE)
@@ -2217,7 +2217,7 @@ class SchemaValidationTab:
                                 dest_fk = warn_info['dest']
                                 fk_name = f"{src_fk.get('schema', '')}.{src_fk.get('table', '')}.{src_fk.get('name', '')}"
                                 item = self.results_tree.insert("", tk.END, text=fk_name,
-                                                       values=(db_name, f"DEL:{src_fk.get('on_delete')}", f"DEL:{dest_fk.get('on_delete')}", "⚠ Action Diff", "FK actions differ"))
+                                                       values=(db_name, f"DEL:{src_fk.get('on_delete')}", f"DEL:{dest_fk.get('on_delete')}", "Action Diff", "FK actions differ"))
                                 self.all_tree_items.append(item)
                             
                             # Show actually missing FKs
@@ -2226,7 +2226,7 @@ class SchemaValidationTab:
                                 cols = ', '.join(fk_info.get('columns', [])[:2])
                                 ref_table = fk_info.get('ref_table', '')
                                 item = self.results_tree.insert("", tk.END, text=fk_name,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", f"FK on ({cols}) -> {ref_table}"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", f"FK on ({cols}) -> {ref_table}"))
                                 self.all_tree_items.append(item)
                             
                             # Show extra FKs in destination
@@ -2235,7 +2235,7 @@ class SchemaValidationTab:
                                 cols = ', '.join(fk_info.get('columns', [])[:2])
                                 ref_table = fk_info.get('ref_table', '')
                                 item = self.results_tree.insert("", tk.END, text=fk_name,
-                                                       values=(db_name, "Missing", "Exists", "⚠ Extra", f"FK on ({cols}) -> {ref_table}"))
+                                                       values=(db_name, "Missing", "Exists", "Extra only", f"FK on ({cols}) -> {ref_table}"))
                                 self.all_tree_items.append(item)
                         else:
                             # Fallback to name-based comparison for FKs
@@ -2245,11 +2245,11 @@ class SchemaValidationTab:
                             
                             for fk in set(src_fk_names.keys()) - set(dest_fk_names.keys()):
                                 item = self.results_tree.insert("", tk.END, text=fk,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", "FK not in destination"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", "FK not in destination"))
                                 self.all_tree_items.append(item)
                             for fk in set(dest_fk_names.keys()) - set(src_fk_names.keys()):
                                 item = self.results_tree.insert("", tk.END, text=fk,
-                                                       values=(db_name, "Missing", "Exists", "⚠ Extra", "FK not in source"))
+                                                       values=(db_name, "Missing", "Exists", "Extra only", "FK not in source"))
                                 self.all_tree_items.append(item)
                         
                         # Compare other constraints (check, unique) by name
@@ -2261,13 +2261,13 @@ class SchemaValidationTab:
                         for const in sorted(missing_other):
                             const_type = src_other_constraints[const]
                             item = self.results_tree.insert("", tk.END, text=const,
-                                                   values=(db_name, "Exists", "Missing", "✗ Missing", f"{const_type} constraint not in destination"))
+                                                   values=(db_name, "Exists", "Missing", "Missing", f"{const_type} constraint not in destination"))
                             self.all_tree_items.append(item)
                         
                         for const in sorted(extra_other):
                             const_type = dest_other_constraints[const]
                             item = self.results_tree.insert("", tk.END, text=const,
-                                                   values=(db_name, "Missing", "Exists", "⚠ Extra", f"{const_type} constraint not in source"))
+                                                   values=(db_name, "Missing", "Exists", "Extra only", f"{const_type} constraint not in source"))
                             self.all_tree_items.append(item)
                         
                         # Compare DEFAULT constraints using signature-based matching
@@ -2296,33 +2296,33 @@ class SchemaValidationTab:
                                     dest_name = dest_dc.get('name', '')
                                     col_name = src_dc.get('column', '')
                                     item = self.results_tree.insert("", tk.END, text=src_name,
-                                                           values=(db_name, src_dc.get('name', ''), dest_name, "✓ Renamed", f"Default on {col_name}, auto-generated names"))
+                                                           values=(db_name, src_dc.get('name', ''), dest_name, "Renamed OK", f"Default on {col_name}, auto-generated names"))
                                     self.all_tree_items.append(item)
                             
-                            # Show actually missing defaults (real errors - ✗)
+                            # Show actually missing defaults (real errors)
                             for dc_info in default_results.get('missing_in_dest', []):
                                 dc_name = f"{dc_info.get('schema', '')}.{dc_info.get('table', '')}.{dc_info.get('name', '')}"
                                 col_name = dc_info.get('column', '')
                                 definition = dc_info.get('definition', '')[:30]
                                 item = self.results_tree.insert("", tk.END, text=dc_name,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", f"Default on {col_name}: {definition}"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", f"Default on {col_name}: {definition}"))
                                 self.all_tree_items.append(item)
                             
-                            # Show extra defaults that are NOT auto-generated (warnings - ⚠)
+                            # Show extra defaults that are NOT auto-generated (warnings)
                             for dc_info in default_results.get('extra_in_dest', []):
                                 dc_name = f"{dc_info.get('schema', '')}.{dc_info.get('table', '')}.{dc_info.get('name', '')}"
                                 col_name = dc_info.get('column', '')
                                 definition = dc_info.get('definition', '')[:30]
                                 item = self.results_tree.insert("", tk.END, text=dc_name,
-                                                       values=(db_name, "Missing", "Exists", "⚠ Extra", f"Default on {col_name}: {definition}"))
+                                                       values=(db_name, "Missing", "Exists", "Extra only", f"Default on {col_name}: {definition}"))
                                 self.all_tree_items.append(item)
                             
-                            # Show auto-generated defaults (ignorable - ℹ Info)
+                            # Show auto-generated defaults (ignorable info)
                             for dc_info in default_results.get('auto_generated_in_dest', []):
                                 dc_name = f"{dc_info.get('schema', '')}.{dc_info.get('table', '')}.{dc_info.get('name', '')}"
                                 col_name = dc_info.get('column', '')
                                 item = self.results_tree.insert("", tk.END, text=dc_name,
-                                                       values=(db_name, "N/A", "Exists", "ℹ Auto-Gen", f"Auto-generated default on {col_name} (safe to ignore)"))
+                                                       values=(db_name, "N/A", "Exists", "Auto-Gen", f"Auto-generated default on {col_name} (safe to ignore)"))
                                 self.all_tree_items.append(item)
                         else:
                             # Fallback to simple name-based comparison if signature matching not available
@@ -2336,7 +2336,7 @@ class SchemaValidationTab:
                             
                             for dc in sorted(missing_defaults):
                                 item = self.results_tree.insert("", tk.END, text=dc,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", "DEFAULT_CONSTRAINT not in destination"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", "DEFAULT_CONSTRAINT not in destination"))
                                 self.all_tree_items.append(item)
                             
                             for dc in sorted(extra_defaults):
@@ -2345,10 +2345,10 @@ class SchemaValidationTab:
                                 # Check if auto-generated
                                 if is_cross_db and is_auto_generated_constraint_name and is_auto_generated_constraint_name(name):
                                     item = self.results_tree.insert("", tk.END, text=dc,
-                                                           values=(db_name, "N/A", "Exists", "ℹ Auto-Gen", "Auto-generated (safe to ignore)"))
+                                                           values=(db_name, "N/A", "Exists", "Auto-Gen", "Auto-generated (safe to ignore)"))
                                 else:
                                     item = self.results_tree.insert("", tk.END, text=dc,
-                                                           values=(db_name, "Missing", "Exists", "⚠ Extra", "DEFAULT_CONSTRAINT not in source"))
+                                                           values=(db_name, "Missing", "Exists", "Extra only", "DEFAULT_CONSTRAINT not in source"))
                                 self.all_tree_items.append(item)
                     
                     # Validate all programmables and other objects
@@ -2451,24 +2451,24 @@ class SchemaValidationTab:
                         for obj in sorted(common_objects):
                             if src_objects[obj] != dest_objects[obj]:
                                 item = self.results_tree.insert("", tk.END, text=obj,
-                                                       values=(db_name, "Different", "Different", "✗ Mismatch", "Object type differs"))
+                                                       values=(db_name, "Different", "Different", "Mismatch", "Object type differs"))
                                 self.all_tree_items.append(item)
                             else:
                                 item = self.results_tree.insert("", tk.END, text=obj,
-                                                       values=(db_name, "Exists", "Exists", "✓ Match", ""))
+                                                       values=(db_name, "Exists", "Exists", "Match OK", ""))
                                 self.all_tree_items.append(item)
                         
                         for obj in sorted(missing_in_dest):
                             item = self.results_tree.insert("", tk.END, text=obj,
-                                                   values=(db_name, "Exists", "Missing", "✗ Missing", f"{src_objects[obj]} not in destination"))
+                                                   values=(db_name, "Exists", "Missing", "Missing", f"{src_objects[obj]} not in destination"))
                             self.all_tree_items.append(item)
                         
                         for obj in sorted(extra_in_dest):
                             item = self.results_tree.insert("", tk.END, text=obj,
-                                                   values=(db_name, "Missing", "Exists", "⚠ Extra", f"{dest_objects[obj]} not in source"))
+                                                   values=(db_name, "Missing", "Exists", "Extra only", f"{dest_objects[obj]} not in source"))
                             self.all_tree_items.append(item)
                     
-                    self.validation_log.insert(tk.END, "\n✓ Schema validation completed!\n")
+                    self.validation_log.insert(tk.END, "\n[OK] Schema validation completed!\n")
                     self.export_btn.config(state=tk.NORMAL)
                     self.fix_missing_btn.config(state=tk.NORMAL)
                     messagebox.showinfo("Success", "Schema validation completed!")
@@ -2498,7 +2498,7 @@ class SchemaValidationTab:
                     
             except Exception as e:
                 error_str = str(e)
-                self.validation_log.insert(tk.END, f"\n✗ Error: {error_str}\n")
+                self.validation_log.insert(tk.END, f"\n[X] Error: {error_str}\n")
                 
                 # Check if this is a driver-related error
                 if is_driver_missing_error(error_str):
@@ -2602,7 +2602,7 @@ class SchemaValidationTab:
                     f"ODBC Driver installed successfully!\n\n"
                     f"Driver: {driver_name}\n\n"
                     f"You can now retry the validation.")
-                self.validation_log.insert(tk.END, f"\n✓ ODBC Driver installed: {driver_name}\n")
+                self.validation_log.insert(tk.END, f"\n[OK] ODBC Driver installed: {driver_name}\n")
             else:
                 messagebox.showinfo("Installation Complete", 
                     message + "\n\nPlease restart the application to use the new driver.")
@@ -2697,7 +2697,11 @@ After installation, restart this application.
                     details = str(cols[4]) if len(cols) > 4 else ""
                     
                     # Skip matched if filtering
-                    is_matched = ('✓' in status and 'Mismatch' not in status) or 'Match' in status
+                    st = str(status)
+                    is_matched = (
+                        'Match OK' in st or 'Mapped OK' in st or 'Renamed OK' in st
+                        or (('Match' in st or '[OK]' in st) and 'Mismatch' not in st)
+                    )
                     if export_only_diffs and is_matched:
                         continue
                     
@@ -2748,7 +2752,10 @@ After installation, restart this application.
                                             "DB2 Type": src_type,
                                             "Expected SQL Type": expected_type,
                                             "Actual SQL Type": dest_type,
-                                            "Validation Status": 'SUCCESS' if '✓' in status else ('WARNING' if '⚠' in status else 'ERROR'),
+                                            "Validation Status": (
+                                                'SUCCESS' if ('Match OK' in str(status) or 'Mapped OK' in str(status) or 'Renamed OK' in str(status) or ('[OK]' in str(status) and 'Mismatch' not in str(status)))
+                                                else ('WARNING' if ('Extra only' in str(status) or 'Warning' in str(status) or '[WARN]' in str(status)) else 'ERROR')
+                                            ),
                                             "Message": details
                                         })
                                     except ImportError:
@@ -2756,21 +2763,31 @@ After installation, restart this application.
                     else:
                         table_data.append(row)
             
+            def _export_st_ok(d):
+                t = str(d.get('Status', ''))
+                return 'Match OK' in t or 'Mapped OK' in t or 'Renamed OK' in t or ('[OK]' in t and 'Mismatch' not in t)
+            def _export_st_warn(d):
+                t = str(d.get('Status', ''))
+                return 'Extra only' in t or 'Warning' in t or '[WARN]' in t
+            def _export_st_err(d):
+                t = str(d.get('Status', ''))
+                return 'Missing' in t or 'Mismatch' in t or '[X]' in t or t.strip() == 'Error'
+
             if filename.endswith('.xlsx'):
                 # Export to Excel with multiple sheets
                 with pd.ExcelWriter(filename, engine='openpyxl') as writer:
                     # Summary statistics
                     total = len(all_data)
-                    matched = len([d for d in all_data if '✓' in str(d.get('Status', ''))])
-                    warnings = len([d for d in all_data if '⚠' in str(d.get('Status', ''))])
-                    errors = len([d for d in all_data if '✗' in str(d.get('Status', ''))])
+                    matched = len([d for d in all_data if _export_st_ok(d)])
+                    warnings = len([d for d in all_data if _export_st_warn(d)])
+                    errors = len([d for d in all_data if _export_st_err(d)])
                     match_rate = (matched / total * 100) if total > 0 else 0
                     
                     summary_data = [
                         {'Metric': 'Total Objects Validated', 'Value': total},
-                        {'Metric': 'Matched (✓)', 'Value': matched},
-                        {'Metric': 'Warnings (⚠)', 'Value': warnings},
-                        {'Metric': 'Errors (✗)', 'Value': errors},
+                        {'Metric': 'Matched (OK)', 'Value': matched},
+                        {'Metric': 'Warnings', 'Value': warnings},
+                        {'Metric': 'Errors', 'Value': errors},
                         {'Metric': 'Match Rate', 'Value': f"{match_rate:.1f}%"},
                         {'Metric': '', 'Value': ''},
                         {'Metric': 'Tables Checked', 'Value': len(table_data)},
@@ -2869,9 +2886,9 @@ After installation, restart this application.
                     },
                     "summary": {
                         "total": len(all_data),
-                        "matched": len([d for d in all_data if '✓' in str(d.get('Status', ''))]),
-                        "warnings": len([d for d in all_data if '⚠' in str(d.get('Status', ''))]),
-                        "errors": len([d for d in all_data if '✗' in str(d.get('Status', ''))])
+                        "matched": len([d for d in all_data if _export_st_ok(d)]),
+                        "warnings": len([d for d in all_data if _export_st_warn(d)]),
+                        "errors": len([d for d in all_data if _export_st_err(d)])
                     },
                     "results": all_data,
                     "column_details": column_data,
@@ -3048,17 +3065,17 @@ After installation, restart this application.
                             
                             for table in sorted(common_tables):
                                 item = self.results_tree.insert("", tk.END, text=table,
-                                                       values=(db_name, "Exists", "Exists", "✓ Match", ""))
+                                                       values=(db_name, "Exists", "Exists", "Match OK", ""))
                                 self.all_tree_items.append(item)
                             
                             for table in sorted(missing_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=table,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", "Table not in destination"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", "Table not in destination"))
                                 self.all_tree_items.append(item)
                             
                             for table in sorted(extra_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=table,
-                                                       values=(db_name, "Missing", "Exists", "⚠ Extra", "Table not in source"))
+                                                       values=(db_name, "Missing", "Exists", "Extra only", "Table not in source"))
                                 self.all_tree_items.append(item)
                         
                         # Validate columns
@@ -3090,11 +3107,11 @@ After installation, restart this application.
                                 for col in src_columns:
                                     if col not in dest_columns:
                                         item = self.results_tree.insert("", tk.END, text=f"{table}.{col}",
-                                                               values=(db_name, "Exists", "Missing", "✗ Missing", "Column not in destination"))
+                                                               values=(db_name, "Exists", "Missing", "Missing", "Column not in destination"))
                                         self.all_tree_items.append(item)
                                     elif src_columns[col] != dest_columns[col]:
                                         item = self.results_tree.insert("", tk.END, text=f"{table}.{col}",
-                                                               values=(db_name, "Different", "Different", "✗ Mismatch", "Column definition differs"))
+                                                               values=(db_name, "Different", "Different", "Mismatch", "Column definition differs"))
                                         self.all_tree_items.append(item)
                         
                         # Validate indexes
@@ -3152,17 +3169,17 @@ After installation, restart this application.
                             for idx in sorted(common_indexes):
                                 if src_indexes[idx] != dest_indexes[idx]:
                                     item = self.results_tree.insert("", tk.END, text=idx,
-                                                           values=(db_name, "Different", "Different", "✗ Mismatch", "Index definition differs"))
+                                                           values=(db_name, "Different", "Different", "Mismatch", "Index definition differs"))
                                     self.all_tree_items.append(item)
                             
                             for idx in sorted(missing_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=idx,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", "Index not in destination"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", "Index not in destination"))
                                 self.all_tree_items.append(item)
                             
                             for idx in sorted(extra_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=idx,
-                                                       values=(db_name, "Missing", "Exists", "⚠ Extra", "Index not in source"))
+                                                       values=(db_name, "Missing", "Exists", "Extra only", "Index not in source"))
                                 self.all_tree_items.append(item)
                         
                         # Validate primary keys (CLUSTERED vs NONCLUSTERED, columns) for exact replication
@@ -3242,12 +3259,12 @@ After installation, restart this application.
                                 if not src_info:
                                     obj_name = dest_info[0]
                                     item = self.results_tree.insert("", tk.END, text=obj_name,
-                                                           values=(db_name, "Missing", "Exists", "⚠ Extra", "Primary key not in source"))
+                                                           values=(db_name, "Missing", "Exists", "Extra only", "Primary key not in source"))
                                     self.all_tree_items.append(item)
                                 elif not dest_info:
                                     obj_name = src_info[0]
                                     item = self.results_tree.insert("", tk.END, text=obj_name,
-                                                           values=(db_name, "Exists", "Missing", "✗ Missing", "Primary key not in destination"))
+                                                           values=(db_name, "Exists", "Missing", "Missing", "Primary key not in destination"))
                                     self.all_tree_items.append(item)
                                 else:
                                     obj_name = src_info[0]
@@ -3260,7 +3277,7 @@ After installation, restart this application.
                                         elif src_cols != dest_cols:
                                             detail = "Primary key columns differ"
                                         item = self.results_tree.insert("", tk.END, text=obj_name,
-                                                               values=(db_name, "Different", "Different", "✗ Mismatch", detail))
+                                                               values=(db_name, "Different", "Different", "Mismatch", detail))
                                         self.all_tree_items.append(item)
                         
                         # Validate constraints
@@ -3304,17 +3321,17 @@ After installation, restart this application.
                             for const in sorted(common_constraints):
                                 if src_constraints[const] != dest_constraints[const]:
                                     item = self.results_tree.insert("", tk.END, text=const,
-                                                           values=(db_name, "Different", "Different", "✗ Mismatch", "Constraint type differs"))
+                                                           values=(db_name, "Different", "Different", "Mismatch", "Constraint type differs"))
                                     self.all_tree_items.append(item)
                             
                             for const in sorted(missing_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=const,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", "Constraint not in destination"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", "Constraint not in destination"))
                                 self.all_tree_items.append(item)
                             
                             for const in sorted(extra_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=const,
-                                                       values=(db_name, "Missing", "Exists", "⚠ Extra", "Constraint not in source"))
+                                                       values=(db_name, "Missing", "Exists", "Extra only", "Constraint not in source"))
                                 self.all_tree_items.append(item)
                         
                         # Validate all programmables and other objects
@@ -3360,26 +3377,26 @@ After installation, restart this application.
                             for obj in sorted(common_objects):
                                 if src_objects[obj] != dest_objects[obj]:
                                     item = self.results_tree.insert("", tk.END, text=obj,
-                                                           values=(db_name, "Different", "Different", "✗ Mismatch", "Object type differs"))
+                                                           values=(db_name, "Different", "Different", "Mismatch", "Object type differs"))
                                     self.all_tree_items.append(item)
                                 else:
                                     item = self.results_tree.insert("", tk.END, text=obj,
-                                                           values=(db_name, "Exists", "Exists", "✓ Match", ""))
+                                                           values=(db_name, "Exists", "Exists", "Match OK", ""))
                                     self.all_tree_items.append(item)
                             
                             for obj in sorted(missing_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=obj,
-                                                       values=(db_name, "Exists", "Missing", "✗ Missing", f"{src_objects[obj]} not in destination"))
+                                                       values=(db_name, "Exists", "Missing", "Missing", f"{src_objects[obj]} not in destination"))
                                 self.all_tree_items.append(item)
                             
                             for obj in sorted(extra_in_dest):
                                 item = self.results_tree.insert("", tk.END, text=obj,
-                                                       values=(db_name, "Missing", "Exists", "⚠ Extra", f"{dest_objects[obj]} not in source"))
+                                                       values=(db_name, "Missing", "Exists", "Extra only", f"{dest_objects[obj]} not in source"))
                                 self.all_tree_items.append(item)
                         
                         total_success += 1
                     except Exception as e:
-                        self.validation_log.insert(tk.END, f"✗ Error validating {cfg.get('src_db')}: {str(e)}\n")
+                        self.validation_log.insert(tk.END, f"[X] Error validating {cfg.get('src_db')}: {str(e)}\n")
                         self.validation_log.see(tk.END)
                         if src_conn:
                             try:
@@ -3394,7 +3411,7 @@ After installation, restart this application.
                         total_fail += 1
                         
                 except Exception as e:
-                    self.validation_log.insert(tk.END, f"✗ Error: {str(e)}\n")
+                    self.validation_log.insert(tk.END, f"[X] Error: {str(e)}\n")
                     total_fail += 1
                     
             self.validation_log.insert(tk.END, f"\n{'='*60}\n")
@@ -4062,8 +4079,8 @@ After installation, restart this application.
                 status = self.results_tree.set(item, "Status")
             except Exception:
                 continue
-            is_missing = status and "✗ Missing" in status
-            is_mismatch = status and "✗ Mismatch" in status
+            is_missing = status and "Missing" in status
+            is_mismatch = status and "Mismatch" in status
             if not (is_missing or is_mismatch):
                 continue
             obj_name = self.results_tree.item(item, "text")
@@ -4077,7 +4094,7 @@ After installation, restart this application.
 
         if not missing_objects:
             messagebox.showinfo("Info", "No missing or mismatch objects found to fix!\n\n"
-                                "Run validation first, then look for '✗ Missing' or '✗ Mismatch' in the results.\n"
+                                "Run validation first, then look for 'Missing' or 'Mismatch' in the results.\n"
                                 "Clear any status filter (set to 'All') if you expect to see items.")
             return
 
@@ -4107,7 +4124,7 @@ After installation, restart this application.
                     status = self.results_tree.set(item, "Status")
                 except Exception:
                     continue
-                if not status or ("✗ Missing" not in status and "✗ Mismatch" not in status):
+                if not status or ("Missing" not in status and "Mismatch" not in status):
                     continue
                 obj_name = self.results_tree.item(item, "text")
                 db_name = self.results_tree.set(item, "DB")
@@ -4115,7 +4132,7 @@ After installation, restart this application.
                     if using_excel:
                         continue
                     db_name = f"{self.src_db_var.get()} vs {self.dest_db_var.get()}"
-                row_status = "Mismatch" if "✗ Mismatch" in status else "Missing"
+                row_status = "Mismatch" if "Mismatch" in status else "Missing"
                 objects_to_fix.append((obj_name, db_name, row_status))
             if objects_to_fix:
                 objects_to_fix.sort(key=_fix_order_key)
@@ -4454,7 +4471,7 @@ After installation, restart this application.
             self.validation_log.insert(tk.END, "\nStep 1: Preparing connections...\n")
             self.validation_log.see(tk.END)
             
-            self.validation_log.insert(tk.END, f"  ✓ Preparing connections\n")
+            self.validation_log.insert(tk.END, f"  [OK] Preparing connections\n")
             self.validation_log.insert(tk.END, f"    Source: {src_server} | {src_db} | Auth: {src_auth}\n")
             self.validation_log.insert(tk.END, f"    Destination: {dest_server} | {dest_db} | Auth: {dest_auth}\n")
             self.validation_log.see(tk.END)
@@ -4480,7 +4497,7 @@ After installation, restart this application.
                 self.validation_log.insert(tk.END, f"    Database: {src_db}\n")
                 self.validation_log.see(tk.END)
             except Exception as e:
-                self.validation_log.insert(tk.END, f"  ✗ Error connecting to source: {str(e)}\n")
+                self.validation_log.insert(tk.END, f"  [X] Error connecting to source: {str(e)}\n")
                 self.validation_log.insert(tk.END, f"    Source: {src_server} | {src_db}\n")
                 self.validation_log.insert(tk.END, f"    Auth: {src_auth}\n")
                 self.validation_log.insert(tk.END, f"    User: {src_user}\n")
@@ -4534,7 +4551,7 @@ After installation, restart this application.
                 self.validation_log.see(tk.END)
                 src_cur = src_conn.cursor()
                 dest_cur = dest_conn.cursor()
-                self.validation_log.insert(tk.END, "  ✓ Cursors created\n")
+                self.validation_log.insert(tk.END, "  [OK] Cursors created\n")
                 self.validation_log.see(tk.END)
                 
                 success_count = 0
@@ -4571,10 +4588,10 @@ After installation, restart this application.
                                 fetch_objects, object_definition, wrap_create_or_alter,
                                 export_indexes, export_foreign_keys, export_check_constraints
                             )
-                    self.validation_log.insert(tk.END, "  ✓ Schema backup functions imported successfully\n")
+                    self.validation_log.insert(tk.END, "  [OK] Schema backup functions imported successfully\n")
                     self.validation_log.see(tk.END)
                 except ImportError as import_err:
-                    self.validation_log.insert(tk.END, f"  ✗ Error: Could not import schema backup functions\n")
+                    self.validation_log.insert(tk.END, f"  [X] Error: Could not import schema backup functions\n")
                     self.validation_log.insert(tk.END, f"    Error: {str(import_err)}\n")
                     import traceback
                     self.validation_log.insert(tk.END, f"    Traceback: {traceback.format_exc()}\n")
@@ -4606,14 +4623,14 @@ After installation, restart this application.
                             # Get table definition from source
                             try:
                                 cols = fetch_columns(src_cur, schema, table)
-                                self.validation_log.insert(tk.END, f"    ✓ Found {len(cols)} column(s)\n")
+                                self.validation_log.insert(tk.END, f"    [OK] Found {len(cols)} column(s)\n")
                                 pk_rows = fetch_primary_key(src_cur, schema, table)
-                                self.validation_log.insert(tk.END, f"    ✓ Found {len(pk_rows)} primary key column(s)\n")
+                                self.validation_log.insert(tk.END, f"    [OK] Found {len(pk_rows)} primary key column(s)\n")
                                 create_sql = build_create_table_sql(schema, table, cols, pk_rows)
-                                self.validation_log.insert(tk.END, f"    ✓ Generated CREATE TABLE SQL\n")
+                                self.validation_log.insert(tk.END, f"    [OK] Generated CREATE TABLE SQL\n")
                                 self.validation_log.see(tk.END)
                             except Exception as fetch_err:
-                                self.validation_log.insert(tk.END, f"    ✗ Error fetching table definition: {str(fetch_err)}\n")
+                                self.validation_log.insert(tk.END, f"    [X] Error fetching table definition: {str(fetch_err)}\n")
                                 error_count += 1
                                 continue
                             
@@ -4629,10 +4646,10 @@ After installation, restart this application.
                                         self.validation_log.insert(tk.END, f"    Executing batch {batch_count}...\n")
                                         dest_cur.execute(batch)
                                 dest_conn.commit()
-                                self.validation_log.insert(tk.END, f"  ✓ Created table: {schema}.{table}\n")
+                                self.validation_log.insert(tk.END, f"  [OK] Created table: {schema}.{table}\n")
                                 success_count += 1
                             except Exception as exec_err:
-                                self.validation_log.insert(tk.END, f"  ✗ Error executing CREATE TABLE: {str(exec_err)}\n")
+                                self.validation_log.insert(tk.END, f"  [X] Error executing CREATE TABLE: {str(exec_err)}\n")
                                 self.validation_log.insert(tk.END, f"    SQL: {create_sql[:500]}...\n")
                                 error_count += 1
                                 dest_conn.rollback()
@@ -4686,16 +4703,16 @@ After installation, restart this application.
                                     
                                     idx_row = src_cur.fetchone()
                                     if not idx_row:
-                                        self.validation_log.insert(tk.END, f"    ✗ Index not found in source\n")
+                                        self.validation_log.insert(tk.END, f"    [X] Index not found in source\n")
                                         error_count += 1
                                         continue
                                     
-                                    self.validation_log.insert(tk.END, f"    ✓ Found index definition\n")
+                                    self.validation_log.insert(tk.END, f"    [OK] Found index definition\n")
                                     self.validation_log.insert(tk.END, f"      Type: {idx_row.type_desc}\n")
                                     self.validation_log.insert(tk.END, f"      Unique: {idx_row.is_unique}\n")
                                     self.validation_log.see(tk.END)
                                 except Exception as fetch_err:
-                                    self.validation_log.insert(tk.END, f"    ✗ Error fetching index definition: {str(fetch_err)}\n")
+                                    self.validation_log.insert(tk.END, f"    [X] Error fetching index definition: {str(fetch_err)}\n")
                                     error_count += 1
                                     continue
                                 
@@ -4718,7 +4735,7 @@ After installation, restart this application.
                                         """, f"{schema}.{table}", f"{schema}.{table}", index_name)
                                         
                                         idx_cols = src_cur.fetchall()
-                                        self.validation_log.insert(tk.END, f"      ✓ Found {len(idx_cols)} column(s)\n")
+                                        self.validation_log.insert(tk.END, f"      [OK] Found {len(idx_cols)} column(s)\n")
                                         key_cols = []
                                         inc_cols = []
                                         for c in idx_cols:
@@ -4732,11 +4749,11 @@ After installation, restart this application.
                                         self.validation_log.see(tk.END)
                                         
                                         if not key_cols:
-                                            self.validation_log.insert(tk.END, f"    ✗ Index has no key columns: {obj_name}\n")
+                                            self.validation_log.insert(tk.END, f"    [X] Index has no key columns: {obj_name}\n")
                                             error_count += 1
                                             continue
                                     except Exception as col_err:
-                                        self.validation_log.insert(tk.END, f"    ✗ Error fetching index columns: {str(col_err)}\n")
+                                        self.validation_log.insert(tk.END, f"    [X] Error fetching index columns: {str(col_err)}\n")
                                         error_count += 1
                                         continue
                                     
@@ -4765,14 +4782,14 @@ After installation, restart this application.
                                         
                                         dest_index_row = dest_cur.fetchone()
                                         if dest_index_row and dest_index_row.cnt > 0:
-                                            self.validation_log.insert(tk.END, f"    ✓ Index already exists in destination (type: {dest_index_row.type_desc})\n")
-                                            self.validation_log.insert(tk.END, f"  ✓ Skipped (already exists): {obj_name}\n")
+                                            self.validation_log.insert(tk.END, f"    [OK] Index already exists in destination (type: {dest_index_row.type_desc})\n")
+                                            self.validation_log.insert(tk.END, f"  [OK] Skipped (already exists): {obj_name}\n")
                                             success_count += 1
                                             continue
-                                        self.validation_log.insert(tk.END, f"    ✓ Index does not exist in destination, proceeding...\n")
+                                        self.validation_log.insert(tk.END, f"    [OK] Index does not exist in destination, proceeding...\n")
                                         self.validation_log.see(tk.END)
                                     except Exception as check_err:
-                                        self.validation_log.insert(tk.END, f"    ⚠ Error checking destination: {str(check_err)}, proceeding anyway...\n")
+                                        self.validation_log.insert(tk.END, f"    [WARN] Error checking destination: {str(check_err)}, proceeding anyway...\n")
                                         self.validation_log.see(tk.END)
                                     
                                     # For exact replication: keep CLUSTERED; do not convert to NONCLUSTERED.
@@ -4791,21 +4808,21 @@ After installation, restart this application.
                                             existing_clustered = dest_cur.fetchone()
                                             if existing_clustered:
                                                 existing_name = existing_clustered.name
-                                                self.validation_log.insert(tk.END, f"    ⚠ Table already has clustered index '{existing_name}' (e.g. primary key). For exact replication: use Fix Missing Objects and deploy primary key first (recreate as NONCLUSTERED), then deploy this index as CLUSTERED.\n")
+                                                self.validation_log.insert(tk.END, f"    [WARN] Table already has clustered index '{existing_name}' (e.g. primary key). For exact replication: use Fix Missing Objects and deploy primary key first (recreate as NONCLUSTERED), then deploy this index as CLUSTERED.\n")
                                                 self.validation_log.see(tk.END)
                                                 # Keep typ = CLUSTERED so we generate correct script; deploy may fail until PK is fixed
                                             else:
-                                                self.validation_log.insert(tk.END, f"    ✓ No clustered index conflict\n")
+                                                self.validation_log.insert(tk.END, f"    [OK] No clustered index conflict\n")
                                                 self.validation_log.see(tk.END)
                                         except Exception as conflict_err:
-                                            self.validation_log.insert(tk.END, f"    ⚠ Error checking conflicts: {str(conflict_err)}, proceeding...\n")
+                                            self.validation_log.insert(tk.END, f"    [WARN] Error checking conflicts: {str(conflict_err)}, proceeding...\n")
                                             self.validation_log.see(tk.END)
                                     
                                     # SQL Server doesn't allow INCLUDE columns on clustered indexes
                                     # If this is a clustered index with INCLUDE columns, convert to NONCLUSTERED
                                     if typ == "CLUSTERED" and inc_cols:
                                         typ = "NONCLUSTERED"
-                                        self.validation_log.insert(tk.END, f"    ⚠ Clustered indexes cannot have INCLUDE columns, converting to NONCLUSTERED\n")
+                                        self.validation_log.insert(tk.END, f"    [WARN] Clustered indexes cannot have INCLUDE columns, converting to NONCLUSTERED\n")
                                         self.validation_log.see(tk.END)
                                     
                                     # Debug: Log the index type from source and final type
@@ -4882,7 +4899,7 @@ After installation, restart this application.
                                     create_sql += ";"
                                     
                                     # Log the generated SQL for debugging
-                                    self.validation_log.insert(tk.END, f"    ✓ SQL generated (length: {len(create_sql)} chars)\n")
+                                    self.validation_log.insert(tk.END, f"    [OK] SQL generated (length: {len(create_sql)} chars)\n")
                                     self.validation_log.insert(tk.END, f"    Generated SQL:\n{create_sql}\n")
                                     self.validation_log.see(tk.END)
                                     
@@ -4892,30 +4909,30 @@ After installation, restart this application.
                                         dest_cur.execute(create_sql)
                                         dest_conn.commit()
                                         
-                                        self.validation_log.insert(tk.END, f"    ✓ CREATE INDEX executed successfully\n")
-                                        self.validation_log.insert(tk.END, f"  ✓ Created index: {schema}.{table}.{index_name}\n")
+                                        self.validation_log.insert(tk.END, f"    [OK] CREATE INDEX executed successfully\n")
+                                        self.validation_log.insert(tk.END, f"  [OK] Created index: {schema}.{table}.{index_name}\n")
                                         success_count += 1
                                     except Exception as idx_err:
                                         # Check if index already exists
                                         if "already exists" in str(idx_err).lower() or "duplicate" in str(idx_err).lower():
-                                            self.validation_log.insert(tk.END, f"    ⚠ Index already exists (detected during execution)\n")
-                                            self.validation_log.insert(tk.END, f"  ✓ Index already exists in destination: {obj_name}\n")
+                                            self.validation_log.insert(tk.END, f"    [WARN] Index already exists (detected during execution)\n")
+                                            self.validation_log.insert(tk.END, f"  [OK] Index already exists in destination: {obj_name}\n")
                                             success_count += 1  # Count as success
                                         else:
-                                            self.validation_log.insert(tk.END, f"    ✗ Error executing CREATE INDEX: {str(idx_err)}\n")
+                                            self.validation_log.insert(tk.END, f"    [X] Error executing CREATE INDEX: {str(idx_err)}\n")
                                             self.validation_log.insert(tk.END, f"    SQL that failed:\n{create_sql}\n")
                                             import traceback
                                             self.validation_log.insert(tk.END, f"    Traceback: {traceback.format_exc()}\n")
-                                            self.validation_log.insert(tk.END, f"  ✗ Error creating index {obj_name}: {str(idx_err)}\n")
+                                            self.validation_log.insert(tk.END, f"  [X] Error creating index {obj_name}: {str(idx_err)}\n")
                                             error_count += 1
                                             dest_conn.rollback()
                                     self.validation_log.see(tk.END)
                                 elif force_fix_mode:
                                     # Try to get from export_indexes
-                                    self.validation_log.insert(tk.END, f"⚠ Index not found, skipping: {obj_name}\n")
+                                    self.validation_log.insert(tk.END, f"[WARN] Index not found, skipping: {obj_name}\n")
                                     error_count += 1
                                 else:
-                                    self.validation_log.insert(tk.END, f"✗ Index not found in source: {obj_name}\n")
+                                    self.validation_log.insert(tk.END, f"[X] Index not found in source: {obj_name}\n")
                                     error_count += 1
                                     
                             elif part3.startswith('FK_'):
@@ -4944,15 +4961,15 @@ After installation, restart this application.
                                     
                                     fk_row = src_cur.fetchone()
                                     if not fk_row:
-                                        self.validation_log.insert(tk.END, f"    ✗ Foreign key not found in source\n")
+                                        self.validation_log.insert(tk.END, f"    [X] Foreign key not found in source\n")
                                         error_count += 1
                                         continue
                                     
-                                    self.validation_log.insert(tk.END, f"    ✓ Found foreign key definition\n")
+                                    self.validation_log.insert(tk.END, f"    [OK] Found foreign key definition\n")
                                     self.validation_log.insert(tk.END, f"      References: {fk_row.ref_schema_name}.{fk_row.ref_table_name}\n")
                                     self.validation_log.see(tk.END)
                                 except Exception as fetch_err:
-                                    self.validation_log.insert(tk.END, f"    ✗ Error fetching foreign key definition: {str(fetch_err)}\n")
+                                    self.validation_log.insert(tk.END, f"    [X] Error fetching foreign key definition: {str(fetch_err)}\n")
                                     error_count += 1
                                     continue
                                 
@@ -4976,15 +4993,15 @@ After installation, restart this application.
                                         """, fk_name)
                                         
                                         fk_cols = src_cur.fetchall()
-                                        self.validation_log.insert(tk.END, f"      ✓ Found {len(fk_cols)} column pair(s)\n")
+                                        self.validation_log.insert(tk.END, f"      [OK] Found {len(fk_cols)} column pair(s)\n")
                                         self.validation_log.see(tk.END)
                                         
                                         if not fk_cols:
-                                            self.validation_log.insert(tk.END, f"    ✗ Foreign key has no columns: {obj_name}\n")
+                                            self.validation_log.insert(tk.END, f"    [X] Foreign key has no columns: {obj_name}\n")
                                             error_count += 1
                                             continue
                                     except Exception as col_err:
-                                        self.validation_log.insert(tk.END, f"    ✗ Error fetching foreign key columns: {str(col_err)}\n")
+                                        self.validation_log.insert(tk.END, f"    [X] Error fetching foreign key columns: {str(col_err)}\n")
                                         error_count += 1
                                         continue
                                     
@@ -5009,20 +5026,20 @@ After installation, restart this application.
                                         dest_cur.execute(create_sql)
                                         dest_conn.commit()
                                         
-                                        self.validation_log.insert(tk.END, f"✓ Created foreign key: {schema}.{table}.{fk_name}\n")
+                                        self.validation_log.insert(tk.END, f"[OK] Created foreign key: {schema}.{table}.{fk_name}\n")
                                         success_count += 1
                                     except Exception as fk_err:
                                         # Check if FK already exists
                                         if "already exists" in str(fk_err).lower() or "duplicate" in str(fk_err).lower():
-                                            self.validation_log.insert(tk.END, f"⚠ Foreign key already exists: {obj_name}\n")
+                                            self.validation_log.insert(tk.END, f"[WARN] Foreign key already exists: {obj_name}\n")
                                             error_count += 1
                                         else:
                                             raise
                                 elif force_fix_mode:
-                                    self.validation_log.insert(tk.END, f"⚠ Foreign key not found, skipping: {obj_name}\n")
+                                    self.validation_log.insert(tk.END, f"[WARN] Foreign key not found, skipping: {obj_name}\n")
                                     error_count += 1
                                 else:
-                                    self.validation_log.insert(tk.END, f"✗ Foreign key not found in source: {obj_name}\n")
+                                    self.validation_log.insert(tk.END, f"[X] Foreign key not found in source: {obj_name}\n")
                                     error_count += 1
                                     
                             else:
@@ -5113,7 +5130,7 @@ After installation, restart this application.
                                                     key_cols.append(qident(c.col_name) + direction)
                                             
                                             if not key_cols:
-                                                self.validation_log.insert(tk.END, f"✗ Index has no key columns: {obj_name}\n")
+                                                self.validation_log.insert(tk.END, f"[X] Index has no key columns: {obj_name}\n")
                                                 error_count += 1
                                                 continue
                                             
@@ -5142,7 +5159,7 @@ After installation, restart this application.
                                             
                                             dest_index_row = dest_cur.fetchone()
                                             if dest_index_row and dest_index_row.cnt > 0:
-                                                self.validation_log.insert(tk.END, f"✓ Index already exists in destination (type: {dest_index_row.type_desc}): {obj_name}\n")
+                                                self.validation_log.insert(tk.END, f"[OK] Index already exists in destination (type: {dest_index_row.type_desc}): {obj_name}\n")
                                                 success_count += 1
                                                 continue
                                             
@@ -5156,7 +5173,7 @@ After installation, restart this application.
                                                 """, schema, table, obj_name_only)
                                                 existing = dest_cur.fetchone()
                                                 if existing:
-                                                    self.validation_log.insert(tk.END, f"⚠ Skipping: table already has clustered index '{existing.name}'. For exact replication use Fix Missing Objects: deploy primary key first (as NONCLUSTERED), then this index: {obj_name}\n")
+                                                    self.validation_log.insert(tk.END, f"[WARN] Skipping: table already has clustered index '{existing.name}'. For exact replication use Fix Missing Objects: deploy primary key first (as NONCLUSTERED), then this index: {obj_name}\n")
                                                     error_count += 1
                                                     continue
                                             # For nonclustered indexes (or no conflict), proceed with creation
@@ -5219,14 +5236,14 @@ After installation, restart this application.
                                             try:
                                                 dest_cur.execute(create_sql)
                                                 dest_conn.commit()
-                                                self.validation_log.insert(tk.END, f"✓ Created index: {schema}.{table}.{obj_name_only}\n")
+                                                self.validation_log.insert(tk.END, f"[OK] Created index: {schema}.{table}.{obj_name_only}\n")
                                                 success_count += 1
                                             except Exception as idx_err:
                                                 if "already exists" in str(idx_err).lower() or "duplicate" in str(idx_err).lower():
-                                                    self.validation_log.insert(tk.END, f"✓ Index already exists in destination: {obj_name}\n")
+                                                    self.validation_log.insert(tk.END, f"[OK] Index already exists in destination: {obj_name}\n")
                                                     success_count += 1
                                                 else:
-                                                    self.validation_log.insert(tk.END, f"✗ Error creating index {obj_name}: {str(idx_err)}\n")
+                                                    self.validation_log.insert(tk.END, f"[X] Error creating index {obj_name}: {str(idx_err)}\n")
                                                     self.validation_log.insert(tk.END, f"  SQL that failed:\n{create_sql}\n")
                                                     error_count += 1
                                                     dest_conn.rollback()
@@ -5253,14 +5270,14 @@ After installation, restart this application.
                                             create_sql = f"ALTER TABLE {qident(schema)}.{qident(table)} ADD CONSTRAINT {qident(default_row.constraint_name)} DEFAULT {default_row.definition} FOR {qident(default_row.column_name)}"
                                             dest_cur.execute(create_sql)
                                             dest_conn.commit()
-                                            self.validation_log.insert(tk.END, f"✓ Created default constraint: {schema}.{table}.{obj_name_only}\n")
+                                            self.validation_log.insert(tk.END, f"[OK] Created default constraint: {schema}.{table}.{obj_name_only}\n")
                                             success_count += 1
                                         except Exception as dc_err:
                                             if "already exists" in str(dc_err).lower():
-                                                self.validation_log.insert(tk.END, f"✓ Default constraint already exists: {obj_name}\n")
+                                                self.validation_log.insert(tk.END, f"[OK] Default constraint already exists: {obj_name}\n")
                                                 success_count += 1
                                             else:
-                                                self.validation_log.insert(tk.END, f"✗ Error creating default constraint {obj_name}: {str(dc_err)}\n")
+                                                self.validation_log.insert(tk.END, f"[X] Error creating default constraint {obj_name}: {str(dc_err)}\n")
                                                 error_count += 1
                                                 dest_conn.rollback()
                                         continue
@@ -5283,14 +5300,14 @@ After installation, restart this application.
                                             create_sql = f"ALTER TABLE {qident(schema)}.{qident(table)} ADD CONSTRAINT {qident(check_row.constraint_name)} CHECK {check_row.definition}"
                                             dest_cur.execute(create_sql)
                                             dest_conn.commit()
-                                            self.validation_log.insert(tk.END, f"✓ Created check constraint: {schema}.{table}.{obj_name_only}\n")
+                                            self.validation_log.insert(tk.END, f"[OK] Created check constraint: {schema}.{table}.{obj_name_only}\n")
                                             success_count += 1
                                         except Exception as cc_err:
                                             if "already exists" in str(cc_err).lower():
-                                                self.validation_log.insert(tk.END, f"✓ Check constraint already exists: {obj_name}\n")
+                                                self.validation_log.insert(tk.END, f"[OK] Check constraint already exists: {obj_name}\n")
                                                 success_count += 1
                                             else:
-                                                self.validation_log.insert(tk.END, f"✗ Error creating check constraint {obj_name}: {str(cc_err)}\n")
+                                                self.validation_log.insert(tk.END, f"[X] Error creating check constraint {obj_name}: {str(cc_err)}\n")
                                                 error_count += 1
                                                 dest_conn.rollback()
                                         continue
@@ -5327,18 +5344,18 @@ After installation, restart this application.
                                                 create_sql = f"ALTER TABLE {qident(schema)}.{qident(table)} ADD CONSTRAINT {qident(unique_row.constraint_name)} UNIQUE ({cols_list})"
                                                 dest_cur.execute(create_sql)
                                                 dest_conn.commit()
-                                                self.validation_log.insert(tk.END, f"✓ Created unique constraint: {schema}.{table}.{obj_name_only}\n")
+                                                self.validation_log.insert(tk.END, f"[OK] Created unique constraint: {schema}.{table}.{obj_name_only}\n")
                                                 success_count += 1
                                             except Exception as uq_err:
                                                 if "already exists" in str(uq_err).lower():
-                                                    self.validation_log.insert(tk.END, f"✓ Unique constraint already exists: {obj_name}\n")
+                                                    self.validation_log.insert(tk.END, f"[OK] Unique constraint already exists: {obj_name}\n")
                                                     success_count += 1
                                                 else:
-                                                    self.validation_log.insert(tk.END, f"✗ Error creating unique constraint {obj_name}: {str(uq_err)}\n")
+                                                    self.validation_log.insert(tk.END, f"[X] Error creating unique constraint {obj_name}: {str(uq_err)}\n")
                                                     error_count += 1
                                                     dest_conn.rollback()
                                         else:
-                                            self.validation_log.insert(tk.END, f"✗ Could not find columns for unique constraint: {obj_name}\n")
+                                            self.validation_log.insert(tk.END, f"[X] Could not find columns for unique constraint: {obj_name}\n")
                                             error_count += 1
                                         continue
                                     
@@ -5348,7 +5365,7 @@ After installation, restart this application.
                                         WHERE parent_object_id = OBJECT_ID(?, 'U') AND name = ? AND type = 'PK'
                                     """, f"{schema}.{table}", obj_name_only)
                                     if src_cur.fetchone():
-                                        self.validation_log.insert(tk.END, f"⚠ Primary key constraint {obj_name} - table should already have a primary key. Skipping.\n")
+                                        self.validation_log.insert(tk.END, f"[WARN] Primary key constraint {obj_name} - table should already have a primary key. Skipping.\n")
                                         error_count += 1
                                         continue
                                 
@@ -5385,10 +5402,10 @@ After installation, restart this application.
                                         dest_cur.execute(alter_sql)
                                         dest_conn.commit()
                                         
-                                        self.validation_log.insert(tk.END, f"✓ Added column: {schema}.{table}.{column}\n")
+                                        self.validation_log.insert(tk.END, f"[OK] Added column: {schema}.{table}.{column}\n")
                                         success_count += 1
                                     else:
-                                        self.validation_log.insert(tk.END, f"✗ Column definition not found: {obj_name}\n")
+                                        self.validation_log.insert(tk.END, f"[X] Column definition not found: {obj_name}\n")
                                         error_count += 1
                                         
                                 else:
@@ -5429,26 +5446,26 @@ After installation, restart this application.
                                         
                                         row = src_cur.fetchone()
                                         if not row:
-                                            self.validation_log.insert(tk.END, f"    ✗ {obj_type} not found in source\n")
+                                            self.validation_log.insert(tk.END, f"    [X] {obj_type} not found in source\n")
                                             error_count += 1
                                             continue
                                         
                                         obj_id = row[0]
-                                        self.validation_log.insert(tk.END, f"    ✓ Found {obj_type} (object_id: {obj_id})\n")
+                                        self.validation_log.insert(tk.END, f"    [OK] Found {obj_type} (object_id: {obj_id})\n")
                                         self.validation_log.insert(tk.END, f"    Getting object definition...\n")
                                         self.validation_log.see(tk.END)
                                         
                                         definition = object_definition(src_cur, obj_id)
                                         
                                         if not definition:
-                                            self.validation_log.insert(tk.END, f"    ✗ Could not get definition for {obj_type}\n")
+                                            self.validation_log.insert(tk.END, f"    [X] Could not get definition for {obj_type}\n")
                                             error_count += 1
                                             continue
                                         
-                                        self.validation_log.insert(tk.END, f"    ✓ Got definition (length: {len(definition)} chars)\n")
+                                        self.validation_log.insert(tk.END, f"    [OK] Got definition (length: {len(definition)} chars)\n")
                                         self.validation_log.see(tk.END)
                                     except Exception as fetch_err:
-                                        self.validation_log.insert(tk.END, f"    ✗ Error fetching {obj_type} definition: {str(fetch_err)}\n")
+                                        self.validation_log.insert(tk.END, f"    [X] Error fetching {obj_type} definition: {str(fetch_err)}\n")
                                         error_count += 1
                                         continue
                                     
@@ -5479,7 +5496,7 @@ After installation, restart this application.
                                         
                                         if incompatible_found:
                                             pattern, reason = incompatible_found
-                                            self.validation_log.insert(tk.END, f"⚠ Skipping {obj_type} {schema}.{obj_name_only}: {reason} ('{pattern}')\n")
+                                            self.validation_log.insert(tk.END, f"[WARN] Skipping {obj_type} {schema}.{obj_name_only}: {reason} ('{pattern}')\n")
                                             self.validation_log.insert(tk.END, f"  This object is not compatible with Azure SQL Database and requires manual review.\n")
                                             error_count += 1
                                             continue
@@ -5489,10 +5506,10 @@ After installation, restart this application.
                                         self.validation_log.see(tk.END)
                                         try:
                                             sql = wrap_create_or_alter(schema, obj_name_only, definition, obj_type)
-                                            self.validation_log.insert(tk.END, f"    ✓ SQL wrapped (length: {len(sql)} chars)\n")
+                                            self.validation_log.insert(tk.END, f"    [OK] SQL wrapped (length: {len(sql)} chars)\n")
                                             self.validation_log.see(tk.END)
                                         except Exception as wrap_err:
-                                            self.validation_log.insert(tk.END, f"    ✗ Error wrapping SQL: {str(wrap_err)}\n")
+                                            self.validation_log.insert(tk.END, f"    [X] Error wrapping SQL: {str(wrap_err)}\n")
                                             error_count += 1
                                             continue
                                         
@@ -5508,54 +5525,54 @@ After installation, restart this application.
                                                     self.validation_log.insert(tk.END, f"      Executing batch {batch_count}...\n")
                                                     dest_cur.execute(batch)
                                             dest_conn.commit()
-                                            self.validation_log.insert(tk.END, f"    ✓ All batches executed successfully\n")
-                                            self.validation_log.insert(tk.END, f"  ✓ Created {obj_type}: {schema}.{obj_name_only}\n")
+                                            self.validation_log.insert(tk.END, f"    [OK] All batches executed successfully\n")
+                                            self.validation_log.insert(tk.END, f"  [OK] Created {obj_type}: {schema}.{obj_name_only}\n")
                                             success_count += 1
                                         except Exception as exec_err:
-                                            self.validation_log.insert(tk.END, f"    ✗ Error executing CREATE OR ALTER: {str(exec_err)}\n")
+                                            self.validation_log.insert(tk.END, f"    [X] Error executing CREATE OR ALTER: {str(exec_err)}\n")
                                             self.validation_log.insert(tk.END, f"    SQL (first 500 chars): {sql[:500]}...\n")
                                             import traceback
                                             self.validation_log.insert(tk.END, f"    Traceback: {traceback.format_exc()}\n")
-                                            self.validation_log.insert(tk.END, f"  ✗ Error creating {obj_type} {obj_name}: {str(exec_err)}\n")
+                                            self.validation_log.insert(tk.END, f"  [X] Error creating {obj_type} {obj_name}: {str(exec_err)}\n")
                                             error_count += 1
                                             dest_conn.rollback()
                                         self.validation_log.see(tk.END)
                                         
                         else:
-                            self.validation_log.insert(tk.END, f"✗ Unsupported object format: {obj_name}\n")
+                            self.validation_log.insert(tk.END, f"[X] Unsupported object format: {obj_name}\n")
                             error_count += 1
                                 
                     except Exception as e:
-                        self.validation_log.insert(tk.END, f"  ✗ Error fixing {obj_name}: {str(e)}\n")
+                        self.validation_log.insert(tk.END, f"  [X] Error fixing {obj_name}: {str(e)}\n")
                         import traceback
                         self.validation_log.insert(tk.END, f"    Traceback: {traceback.format_exc()}\n")
                         self.validation_log.see(tk.END)
                         error_count += 1
                         try:
                             dest_conn.rollback()
-                            self.validation_log.insert(tk.END, f"    ✓ Transaction rolled back\n")
+                            self.validation_log.insert(tk.END, f"    [OK] Transaction rolled back\n")
                         except Exception as rollback_err:
-                            self.validation_log.insert(tk.END, f"    ⚠ Error during rollback: {str(rollback_err)}\n")
+                            self.validation_log.insert(tk.END, f"    [WARN] Error during rollback: {str(rollback_err)}\n")
                         self.validation_log.see(tk.END)
                 
                 # Success message after processing all objects for this database
                 self.validation_log.insert(tk.END, f"\n{'='*60}\n")
                 self.validation_log.insert(tk.END, f"FIX OPERATION COMPLETE\n")
                 self.validation_log.insert(tk.END, f"  Total objects processed: {len(missing_objects)}\n")
-                self.validation_log.insert(tk.END, f"  ✓ Succeeded: {success_count}\n")
-                self.validation_log.insert(tk.END, f"  ✗ Failed: {error_count}\n")
+                self.validation_log.insert(tk.END, f"  [OK] Succeeded: {success_count}\n")
+                self.validation_log.insert(tk.END, f"  [X] Failed: {error_count}\n")
                 self.validation_log.insert(tk.END, f"  Success rate: {(success_count/len(missing_objects)*100) if missing_objects else 0:.1f}%\n")
                 self.validation_log.see(tk.END)
                 return (success_count, error_count)
                     
             except Exception as e:
-                self.validation_log.insert(tk.END, f"\n✗ Error processing objects: {str(e)}\n")
+                self.validation_log.insert(tk.END, f"\n[X] Error processing objects: {str(e)}\n")
                 import traceback
                 self.validation_log.insert(tk.END, f"Traceback: {traceback.format_exc()}\n")
                 return (0, len(missing_objects))
                     
         except Exception as e:
-            self.validation_log.insert(tk.END, f"\n✗ Error: {str(e)}\n")
+            self.validation_log.insert(tk.END, f"\n[X] Error: {str(e)}\n")
             import traceback
             self.validation_log.insert(tk.END, f"Traceback: {traceback.format_exc()}\n")
             return (0, len(missing_objects))

@@ -75,28 +75,29 @@ class MainWindow:
         self._create_menu()
         
         # Lazy-loaded tabs: create content only when tab is first selected
-        # Order: Projects → Backup & Restore → ... → Data Validation → ADF Pipeline Trigger
+        # Order: Projects, Backup & Restore, ... Data Validation
+        # ADF Pipeline and IDENTITY (CDC) are under Tools > Experiments (POC) — separate windows.
         self._project_path = None
-        self._tab_created = {i: False for i in range(8)}
+        self._poc_experiment_tabs = []  # tab instances opened from Experiments menu (for set_project_path)
+        self._tab_created = {i: False for i in range(7)}
         self._tab_instances = {}
         self._tab_labels = [
-            "📁 Projects",
-            "📦 Backup & Restore",
-            "🚀 Full Migration",
-            "📋 Schema Backup/Migration",
-            "📊 Data Migration",
-            "🔍 Schema Validation",
-            "✅ Data Validation",
-            "⚡ ADF Pipeline",
+            "Projects",
+            "Backup & Restore",
+            "Full Migration",
+            "Schema Backup/Migration",
+            "Data Migration",
+            "Schema Validation",
+            "Data Validation",
         ]
         
         # Create notebook (tabs)
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Add 8 placeholder frames (one per tab)
+        # Add 7 placeholder frames (one per tab)
         self._tab_placeholders = []
-        for i in range(8):
+        for i in range(7):
             ph = ttk.Frame(self.notebook)
             lbl = tk.Label(ph, text="Loading...", font=("Arial", 10), fg="gray")
             lbl.pack(expand=True, pady=50)
@@ -134,7 +135,7 @@ class MainWindow:
             idx = self.notebook.index(self.notebook.select())
         except Exception:
             return
-        if idx is None or idx < 0 or idx >= 8 or self._tab_created.get(idx, False):
+        if idx is None or idx < 0 or idx >= 7 or self._tab_created.get(idx, False):
             return
         self._ensure_tab_created(idx)
     
@@ -145,7 +146,7 @@ class MainWindow:
             if tab is not None:
                 return tab
         # Map index to (module_path, class_name); try azure_migration_tool first, then gui for path compatibility
-        # Legacy Data and Compare DB2 are under Tools menu (open in separate window)
+        # ADF Pipeline / IDENTITY (CDC): Tools > Experiments (POC)
         tab_specs = [
             ("azure_migration_tool.gui.tabs.project_tab", "ProjectTab"),
             ("azure_migration_tool.gui.tabs.backup_restore_tab", "BackupRestoreTab"),
@@ -154,7 +155,6 @@ class MainWindow:
             ("azure_migration_tool.gui.tabs.data_migration_tab", "DataMigrationTab"),
             ("azure_migration_tool.gui.tabs.schema_validation_tab", "SchemaValidationTab"),
             ("azure_migration_tool.gui.tabs.data_validation_tab", "DataValidationTab"),
-            ("azure_migration_tool.gui.tabs.adf_trigger_tab", "ADFTriggerTab"),
         ]
         mod_name, class_name = tab_specs[idx]
         try:
@@ -198,7 +198,8 @@ class MainWindow:
                 "2. Go to the \"Full Migration\" tab.\n"
                 "3. Enter your source and destination database details.\n"
                 "4. Click Run to migrate.\n\n"
-                "Need help? Use Help > About or Tools > Check what's installed."
+                "Need help? Use Help > About or Tools > Check what's installed.\n\n"
+                "POC features: Tools > Experiments (POC) — ADF Pipeline, IDENTITY (CDC)."
             )
             messagebox.showinfo("Getting started", msg)
             os.makedirs(welcome_dir, exist_ok=True)
@@ -237,6 +238,17 @@ class MainWindow:
         tools_menu.add_separator()
         tools_menu.add_command(label="Legacy Data Validation...", command=self._open_legacy_data_window)
         tools_menu.add_command(label="Compare DB2 (Schema)...", command=self._open_compare_db2_window)
+        tools_menu.add_separator()
+        experiments_menu = tk.Menu(tools_menu, tearoff=0)
+        tools_menu.add_cascade(label="Experiments (POC)", menu=experiments_menu)
+        experiments_menu.add_command(
+            label="ADF Pipeline...",
+            command=self._open_adf_pipeline_experiment,
+        )
+        experiments_menu.add_command(
+            label="IDENTITY (CDC)...",
+            command=self._open_identity_cdc_experiment,
+        )
         tools_menu.add_separator()
         tools_menu.add_command(label="Settings...", command=self._show_settings)
         
@@ -283,7 +295,41 @@ class MainWindow:
             "Compare DB2 (Schema)",
         )
 
-    def _open_tool_window(self, mod_name, class_name, title):
+    def _open_adf_pipeline_experiment(self):
+        """Open ADF Pipeline in a separate window (Tools > Experiments POC)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.adf_trigger_tab",
+            "ADFTriggerTab",
+            "ADF Pipeline [POC]",
+            poc_experiment=True,
+        )
+
+    def _open_identity_cdc_experiment(self):
+        """Open IDENTITY (CDC) in a separate window (Tools > Experiments POC)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.identity_cdc_tab",
+            "IdentityCDCTab",
+            "IDENTITY (CDC) [POC]",
+            poc_experiment=True,
+        )
+
+    def _unregister_poc_experiment_tab(self, tab):
+        try:
+            self._poc_experiment_tabs.remove(tab)
+        except ValueError:
+            pass
+
+    def notify_poc_experiment_tabs_project_path(self, project_path):
+        """When a project is loaded, update any open Experiments (POC) windows."""
+        self._project_path = project_path
+        for tab in list(self._poc_experiment_tabs):
+            if tab is not None and hasattr(tab, "set_project_path"):
+                try:
+                    tab.set_project_path(project_path)
+                except Exception:
+                    pass
+
+    def _open_tool_window(self, mod_name, class_name, title, poc_experiment=False):
         """Open a tab class in a new Toplevel window."""
         try:
             try:
@@ -302,6 +348,14 @@ class MainWindow:
             tab.frame.pack(fill=tk.BOTH, expand=True)
             if hasattr(self, "_project_path") and self._project_path and hasattr(tab, "set_project_path"):
                 tab.set_project_path(self._project_path)
+            if poc_experiment:
+                self._poc_experiment_tabs.append(tab)
+
+                def _on_destroy(event):
+                    if event.widget == win:
+                        self._unregister_poc_experiment_tab(tab)
+
+                win.bind("<Destroy>", _on_destroy)
         except Exception as e:
             messagebox.showerror("Error", f"Could not open {title}: {e}")
     

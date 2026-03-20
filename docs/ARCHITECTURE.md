@@ -79,6 +79,7 @@ flowchart TB
     subgraph Tools["Menu: Tools"]
         LEGACY_DATA[Legacy Data Validation window]
         COMPARE_DB2[Compare DB2 Schema window]
+        EXP_MENU[Experiments POC: adf_trigger_tab, identity_cdc_tab — Toplevel windows]
     end
 
     NB --> T0 & T1 & T2 & T3 & T4 & T5 & T6

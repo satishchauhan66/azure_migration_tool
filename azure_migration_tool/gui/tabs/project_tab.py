@@ -248,6 +248,7 @@ class ProjectTab:
             )
             
             # Update main window tabs with project info
+            self.main_window._project_path = project_path
             if hasattr(self.main_window, 'full_migration_tab'):
                 self.main_window.full_migration_tab.set_project_path(project_path)
             if hasattr(self.main_window, 'schema_tab'):
@@ -258,7 +259,9 @@ class ProjectTab:
                 self.main_window.data_validation_tab.set_project_path(project_path)
             if hasattr(self.main_window, 'schema_validation_tab'):
                 self.main_window.schema_validation_tab.set_project_path(project_path)
-                
+            if hasattr(self.main_window, 'notify_poc_experiment_tabs_project_path'):
+                self.main_window.notify_poc_experiment_tabs_project_path(project_path)
+
     def _save_project(self):
         """Save project configuration."""
         if not self.project_path:

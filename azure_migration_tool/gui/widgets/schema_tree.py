@@ -107,19 +107,19 @@ class SchemaTree(ttk.Frame):
                 self.tree.item(category_node, tags=("category", "has_missing"))
                 # Add checkbox for the entire category
                 item = self.tree.insert(category_node, tk.END,
-                                       text="☐", values=("Missing", "", obj_type),
+                                       text="[ ]", values=("Missing", "", obj_type),
                                        tags=("missing", "checkbox"))
             elif status == 'extra':
                 self.tree.set(category_node, "status", "Extra in destination")
                 self.tree.item(category_node, tags=("category", "has_extra"))
                 item = self.tree.insert(category_node, tk.END,
-                                       text="☐", values=("Extra", "", obj_type),
+                                       text="[ ]", values=("Extra", "", obj_type),
                                        tags=("extra", "checkbox"))
             elif status == 'different':
                 self.tree.set(category_node, "status", "Different")
                 self.tree.item(category_node, tags=("category", "has_different"))
                 item = self.tree.insert(category_node, tk.END,
-                                       text="☐", values=("Different", "", obj_type),
+                                       text="[ ]", values=("Different", "", obj_type),
                                        tags=("different", "checkbox"))
             elif status == 'match':
                 self.tree.set(category_node, "status", "Match")
@@ -149,14 +149,14 @@ class SchemaTree(ttk.Frame):
                             schema, name = obj
                             obj_key = (obj_type, schema, name)
                             item = self.tree.insert(category_node, tk.END, 
-                                                   text="☐", values=("Missing", schema, name),
+                                                   text="[ ]", values=("Missing", schema, name),
                                                    tags=("missing", "checkbox"))
                             self.tree.item(item, tags=("missing", "checkbox"))
                         elif len(obj) == 3:  # (schema, name, table) for triggers
                             schema, name, table = obj
                             obj_key = (obj_type, schema, name)
                             item = self.tree.insert(category_node, tk.END,
-                                                   text="☐", values=("Missing", schema, f"{name} (on {table})"),
+                                                   text="[ ]", values=("Missing", schema, f"{name} (on {table})"),
                                                    tags=("missing", "checkbox"))
                             self.tree.item(item, tags=("missing", "checkbox"))
             
@@ -168,13 +168,13 @@ class SchemaTree(ttk.Frame):
                             schema, name = obj
                             obj_key = (obj_type, schema, name)
                             item = self.tree.insert(category_node, tk.END,
-                                                   text="☐", values=("Extra", schema, name),
+                                                   text="[ ]", values=("Extra", schema, name),
                                                    tags=("extra", "checkbox"))
                         elif len(obj) == 3:
                             schema, name, table = obj
                             obj_key = (obj_type, schema, name)
                             item = self.tree.insert(category_node, tk.END,
-                                                   text="☐", values=("Extra", schema, f"{name} (on {table})"),
+                                                   text="[ ]", values=("Extra", schema, f"{name} (on {table})"),
                                                    tags=("extra", "checkbox"))
         
         # Configure tag colors (only once, at the end)
@@ -197,8 +197,8 @@ class SchemaTree(ttk.Frame):
                 if "checkbox" in tags:
                     # Toggle checkbox
                     current_text = self.tree.item(item, "text")
-                    if current_text == "☐":
-                        self.tree.item(item, text="☑")
+                    if current_text == "[ ]":
+                        self.tree.item(item, text="[x]")
                         # Get object info
                         values = self.tree.item(item, "values")
                         if values:
@@ -222,7 +222,7 @@ class SchemaTree(ttk.Frame):
                                 if name:  # Only add if we have a name
                                     self.selected_objects.add((obj_type, schema, name))
                     else:
-                        self.tree.item(item, text="☐")
+                        self.tree.item(item, text="[ ]")
                         # Remove from selection
                         values = self.tree.item(item, "values")
                         if values:
@@ -310,7 +310,7 @@ class SchemaTree(ttk.Frame):
         for item in self.tree.get_children(category_item):
             tags = self.tree.item(item, "tags")
             if "checkbox" in tags:
-                self.tree.item(item, text="☑")
+                self.tree.item(item, text="[x]")
                 values = self.tree.item(item, "values")
                 if values:
                     schema = values[1] if len(values) > 1 else ""
@@ -344,7 +344,7 @@ class SchemaTree(ttk.Frame):
         for item in self.tree.get_children(category_item):
             tags = self.tree.item(item, "tags")
             if "checkbox" in tags:
-                self.tree.item(item, text="☐")
+                self.tree.item(item, text="[ ]")
             for child in self.tree.get_children(item):
                 self._deselect_all_in_category(child)
     
@@ -362,7 +362,7 @@ class SchemaTree(ttk.Frame):
         for item in self.tree.get_children(category_item):
             tags = self.tree.item(item, "tags")
             if "checkbox" in tags and "missing" in tags:
-                self.tree.item(item, text="☑")
+                self.tree.item(item, text="[x]")
                 values = self.tree.item(item, "values")
                 if values:
                     schema = values[1] if len(values) > 1 else ""

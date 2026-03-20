@@ -92,7 +92,7 @@ class FullMigrationTab:
         # Description
         desc_label = tk.Label(
             scrollable_frame,
-            text="Orchestrates complete migration: Backup → Restore Tables → Migrate Data → Restore Complete Schema",
+            text="Orchestrates complete migration: Backup -> Restore Tables -> Migrate Data -> Restore Complete Schema",
             font=("Arial", 10),
             fg="gray"
         )
@@ -282,9 +282,9 @@ class FullMigrationTab:
         excel_btn_frame = ttk.Frame(excel_frame)
         excel_btn_frame.pack(fill=tk.X)
         
-        ttk.Button(excel_btn_frame, text="📥 Download Sample Template", 
+        ttk.Button(excel_btn_frame, text="Download Sample Template", 
                   command=lambda: self._download_template("full_migration")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(excel_btn_frame, text="📤 Upload Excel File", 
+        ttk.Button(excel_btn_frame, text="Upload Excel File", 
                   command=self._upload_excel).pack(side=tk.LEFT, padx=5)
         
         self.excel_file_var = tk.StringVar()
@@ -470,16 +470,16 @@ class FullMigrationTab:
                 summary = run_full_migration.run_full_migration(cfg)
                 
                 if summary["status"] == "success":
-                    self.full_migration_log.insert(tk.END, f"\n✓ Full migration completed successfully!\n")
+                    self.full_migration_log.insert(tk.END, f"\n[OK] Full migration completed successfully!\n")
                     self.full_migration_log.insert(tk.END, f"Run ID: {summary.get('run_id', 'N/A')}\n")
                     messagebox.showinfo("Success", "Full migration completed successfully!")
                 else:
-                    self.full_migration_log.insert(tk.END, f"\n✗ Full migration completed with errors!\n")
+                    self.full_migration_log.insert(tk.END, f"\n[FAIL] Full migration completed with errors!\n")
                     self.full_migration_log.insert(tk.END, f"Errors: {summary.get('errors', [])}\n")
                     messagebox.showwarning("Warning", "Full migration completed with errors! Check log for details.")
                     
             except Exception as e:
-                self.full_migration_log.insert(tk.END, f"\n✗ Error: {str(e)}\n")
+                self.full_migration_log.insert(tk.END, f"\n[ERROR] {str(e)}\n")
                 messagebox.showerror("Error", f"Full migration failed: {str(e)}")
             finally:
                 self.progress_bar.stop()
@@ -618,13 +618,13 @@ class FullMigrationTab:
                     summary = run_full_migration.run_full_migration(full_cfg)
                     
                     if summary["status"] == "success":
-                        self.full_migration_log.insert(tk.END, f"✓ Success: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
+                        self.full_migration_log.insert(tk.END, f"[OK] Success: {cfg.get('src_db')} -> {cfg.get('dest_db')}\n")
                         success_count += 1
                     else:
-                        self.full_migration_log.insert(tk.END, f"✗ Failed: {cfg.get('src_db')} -> {cfg.get('dest_db')} - {summary.get('errors', [])}\n")
+                        self.full_migration_log.insert(tk.END, f"[FAIL] Failed: {cfg.get('src_db')} -> {cfg.get('dest_db')} - {summary.get('errors', [])}\n")
                         fail_count += 1
                 except Exception as e:
-                    self.full_migration_log.insert(tk.END, f"✗ Error: {cfg.get('src_db')} -> {cfg.get('dest_db')} - {str(e)}\n")
+                    self.full_migration_log.insert(tk.END, f"[ERROR] {cfg.get('src_db')} -> {cfg.get('dest_db')} - {str(e)}\n")
                     fail_count += 1
                     
             self.progress_bar.stop()

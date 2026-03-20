@@ -828,13 +828,10 @@ def compare_columns_with_defaults(
 # SUMMARY FUNCTIONS
 # =============================================================================
 
-def get_index_matching_summary(results: Dict[str, Any], use_unicode: bool = True) -> str:
+def get_index_matching_summary(results: Dict[str, Any], use_unicode: bool = False) -> str:
     """Generate a summary string for index matching results."""
     summary = results.get('summary', {})
-    
-    ok = "✓" if use_unicode else "[OK]"
-    warn = "⚠" if use_unicode else "[WARN]"
-    err = "✗" if use_unicode else "[ERR]"
+    ok, warn, err = "[OK]", "[WARN]", "[ERR]"
     
     lines = [
         "Index Comparison Summary:",
@@ -850,13 +847,10 @@ def get_index_matching_summary(results: Dict[str, Any], use_unicode: bool = True
     return '\n'.join(lines)
 
 
-def get_fk_matching_summary(results: Dict[str, Any], use_unicode: bool = True) -> str:
+def get_fk_matching_summary(results: Dict[str, Any], use_unicode: bool = False) -> str:
     """Generate a summary string for FK matching results."""
     summary = results.get('summary', {})
-    
-    ok = "✓" if use_unicode else "[OK]"
-    warn = "⚠" if use_unicode else "[WARN]"
-    err = "✗" if use_unicode else "[ERR]"
+    ok, warn, err = "[OK]", "[WARN]", "[ERR]"
     
     lines = [
         "Foreign Key Comparison Summary:",

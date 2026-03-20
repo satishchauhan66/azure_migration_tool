@@ -207,7 +207,7 @@ class AzureTokenCache:
         except Exception as e:
             error_msg = str(e)
             if "AADSTS700016" in error_msg or "application" in error_msg.lower() and "not found" in error_msg.lower():
-                print(f"\n⚠ Authentication Error: The application ID '{AZURE_CLIENT_ID}' is not registered in your tenant.")
+                print(f"\n[WARN] Authentication Error: The application ID '{AZURE_CLIENT_ID}' is not registered in your tenant.")
                 print(f"   This can happen if your organization restricts which applications can be used.")
                 print(f"\n   Solutions:")
                 print(f"   1. Contact your Azure AD administrator to register this application ID")
@@ -249,11 +249,11 @@ class AzureTokenCache:
             error = result.get('error_description', result.get('error', 'Unknown error'))
             error_code = result.get('error', '')
             
-            print(f"✗ Authentication failed: {error}\n")
+            print(f"[FAIL] Authentication failed: {error}\n")
             
             # Provide helpful error messages for common issues
             if "AADSTS700016" in error or ("application" in error.lower() and "not found" in error.lower()):
-                print(f"⚠ The application ID '{AZURE_CLIENT_ID}' is not registered in your tenant.")
+                print(f"[WARN] The application ID '{AZURE_CLIENT_ID}' is not registered in your tenant.")
                 print(f"\n   Solutions:")
                 print(f"   1. Contact your Azure AD administrator to register this application ID")
                 print(f"   2. Or set a custom client ID via environment variable:")

@@ -32,7 +32,7 @@ from db2_azure_validation.schemas.common import ensure_all_columns_as_strings, g
 
 
 class PySparkBehaviorValidationService(PySparkSchemaComparisonService):
-    """Behavior/readiness validations for DB2 → Azure."""
+    """Behavior/readiness validations for DB2 to Azure."""
 
     @staticmethod
     def _default_fetchsize() -> str:
@@ -1198,10 +1198,10 @@ class PySparkBehaviorValidationService(PySparkSchemaComparisonService):
 
 
 class PySparkBehaviorValidationAzureService(PySparkBehaviorValidationService, PySparkAzureSchemaComparisonService):
-    """Behavior validations for Azure → Azure (inherits Azure config)."""
+    """Behavior validations for Azure to Azure (inherits Azure config)."""
 
     def __init__(self, *, access_token_override: Optional[str] = None):
-        # PySparkAzureSchemaComparisonService already sets Azure→Azure configs in its __init__
+        # PySparkAzureSchemaComparisonService already sets Azure-to-Azure configs in its __init__
         PySparkAzureSchemaComparisonService.__init__(self, access_token_override=access_token_override)  # type: ignore
 
     @log_duration("save_comparison_to_csv")

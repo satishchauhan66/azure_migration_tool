@@ -305,12 +305,12 @@ class LegacySchemaValidationTab:
         buttons_frame = ttk.Frame(scrollable_frame)
         buttons_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        self.run_btn = ttk.Button(buttons_frame, text="▶ Run Schema Validation", command=self._run_validation)
+        self.run_btn = ttk.Button(buttons_frame, text="Run Schema Validation", command=self._run_validation)
         self.run_btn.pack(side=tk.LEFT, padx=5)
         
-        ttk.Button(buttons_frame, text="📂 Open Output Folder", command=self._open_output_folder).pack(side=tk.LEFT, padx=5)
-        ttk.Button(buttons_frame, text="📊 Export to Excel", command=self._export_to_excel).pack(side=tk.LEFT, padx=5)
-        ttk.Button(buttons_frame, text="🔄 Clear Results", command=self._clear_results).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="Open Output Folder", command=self._open_output_folder).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="Export to Excel", command=self._export_to_excel).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="Clear Results", command=self._clear_results).pack(side=tk.LEFT, padx=5)
         
         # Progress frame
         progress_frame = ttk.Frame(scrollable_frame)

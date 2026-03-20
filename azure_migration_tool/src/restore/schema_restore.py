@@ -438,12 +438,12 @@ def execute_sql_file(
         # Log summary of what happened
         if result["batches_already_existed"] > 0:
             logger.info(
-                "  → %d object(s) already existed (skipped gracefully)",
+                "  -> %d object(s) already existed (skipped gracefully)",
                 result["batches_already_existed"]
             )
         if result["batches_failed"] > 0:
             logger.warning(
-                "  → %d batch(es) failed (see errors above)",
+                "  -> %d batch(es) failed (see errors above)",
                 result["batches_failed"]
             )
 
