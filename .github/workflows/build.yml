@@ -89,15 +89,26 @@ jobs:
 
       - name: Install NSIS
         shell: pwsh
+        continue-on-error: true
         run: choco install nsis -y
 
       - name: Build installer
         shell: pwsh
+        id: installer
         run: |
           cd azure_migration_tool
           .\installer\build_installer.ps1
+          $ver = "${{ steps.version.outputs.build_version }}"
+          $setup = "dist\AzureMigrationTool_Setup_$ver.exe"
+          if (Test-Path $setup) {
+            "has_installer=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "has_installer=false" >> $env:GITHUB_OUTPUT
+            Write-Host "Installer not created (NSIS may be missing); standalone exe is still available." -ForegroundColor Yellow
+          }
 
       - name: Prepare installer artifact
+        if: steps.installer.outputs.has_installer == 'true'
         shell: pwsh
         run: |
           $ver = "${{ steps.version.outputs.version }}"
@@ -113,6 +124,7 @@ jobs:
           path: dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
 
       - name: Upload installer artifact
+        if: steps.installer.outputs.has_installer == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: AzureMigrationTool_Setup-${{ steps.version.outputs.version }}.exe
@@ -132,6 +144,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Collect release files
+        id: release_files
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.version }}"
+          $files = @("dist-versioned/AzureMigrationTool-$ver.exe")
+          $setup = "dist-versioned/AzureMigrationTool_Setup_$ver.exe"
+          if (Test-Path $setup) { $files += $setup }
+          $joined = $files -join "`n"
+          # Write multiline output
+          "files<<EOF" >> $env:GITHUB_OUTPUT
+          $joined >> $env:GITHUB_OUTPUT
+          "EOF" >> $env:GITHUB_OUTPUT
+
       - name: Create or update Release (push to main – show on Releases page)
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: softprops/action-gh-release@v2
@@ -139,9 +165,7 @@ jobs:
           tag_name: latest
           name: Latest (main)
           body: "Built from main. Download **AzureMigrationTool-${{ steps.version.outputs.version }}.exe** (standalone) or **AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe** (installer)."
-          files: |
-            dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
-            dist-versioned/AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe
+          files: ${{ steps.release_files.outputs.files }}
           allow_updates: true
           make_latest: true
         env:
@@ -153,9 +177,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
-          files: |
-            dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
-            dist-versioned/AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe
-          fail_on_unmatched_files: true
+          files: ${{ steps.release_files.outputs.files }}
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

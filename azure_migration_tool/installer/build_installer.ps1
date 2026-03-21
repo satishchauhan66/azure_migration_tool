@@ -104,11 +104,11 @@ foreach ($candidate in @("makensis", "C:\Program Files (x86)\NSIS\makensis.exe",
 }
 if (-not $makensis) {
     Write-Host ""
-    Write-Host "NSIS (makensis) not found. The installer file cannot be built without it." -ForegroundColor Yellow
-    Write-Host "Install NSIS from: https://nsis.sourceforge.io/Download" -ForegroundColor Yellow
-    Write-Host "Or run as Administrator: choco install nsis -y" -ForegroundColor Yellow
-    Write-Host "Then run this script again to create AzureMigrationTool_Setup.exe" -ForegroundColor Yellow
-    Pause-IfError; exit 1
+    Write-Host "NSIS (makensis) not found. Skipping installer creation." -ForegroundColor Yellow
+    Write-Host "The standalone exe is still available at: $DistExe" -ForegroundColor Green
+    Write-Host "To also build the Setup installer, install NSIS:" -ForegroundColor Yellow
+    Write-Host "  https://nsis.sourceforge.io/Download  or  choco install nsis -y" -ForegroundColor Yellow
+    exit 0
 }
 
 # 5. Version already read above; if missing, setup output will be unversioned
