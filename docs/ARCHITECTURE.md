@@ -362,13 +362,15 @@ Workflow: `.github/workflows/build.yml`.
 
 **Releases (push to `main` / `master`):**
 
-| Target | Tag | Purpose |
-|--------|-----|---------|
-| **Latest** | `latest` | Single “current build” release; previous assets on that release are removed each run so the Assets list stays short. |
-| **Archive** | `build/<version>` | One release per CI run (e.g. `build/1.2.123`). Tag uses `build/` so it does **not** match the workflow’s `v*` trigger and does not start a second build. |
-| **Artifacts** | — | Same binaries uploaded per run; **90-day** retention (Actions tab). |
+| What | Details |
+|------|---------|
+| **One release per push** | Tag `build/<version>` (e.g. `build/1.2.456`). Each release has only that run’s EXE + optional installer — no shared release or piled-up assets. |
+| **GitHub “Latest”** | `make_latest: true` on that release so the newest main build is the default download. |
+| **No `latest` tag** | Avoids recycling one release and deleting assets; history is a list of releases. |
+| **Tag shape** | `build/*` does **not** match the workflow’s `v*` trigger → no second workflow run when the tag is created. |
+| **Artifacts** | Same binaries per run; **90-day** retention (Actions tab). |
 
-Manual **semver** releases still use tags `v*` (separate workflow path).
+Manual **semver** releases still use tags `v*` (workflow attaches binaries and sets `make_latest`).
 
 ```mermaid
 flowchart LR
@@ -379,8 +381,7 @@ flowchart LR
     BUILD --> EXE[dist-versioned/AzureMigrationTool-<ver>.exe]
     EXE --> NSIS[Install NSIS, build_installer.ps1]
     NSIS --> SETUP[dist-versioned/AzureMigrationTool_Setup_<ver>.exe]
-    SETUP --> ARCH[Release: tag build/<ver>]
-    ARCH --> LATEST[Release: tag latest]
+    SETUP --> REL[GitHub Release: build/<ver>, make_latest]
     SETUP --> ART[Artifacts 90d]
 ```
 
