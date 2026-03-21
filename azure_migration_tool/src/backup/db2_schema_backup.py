@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..utils.logging import setup_logger
-from ..utils.paths import safe_name, short_slug, utc_iso, utc_ts_compact
+from ..utils.paths import safe_name, safe_table_filename, short_slug, utc_iso, utc_ts_compact, win_safe_path
 from .db2_backup_exporters import (
     build_db2_create_table_sql,
     export_db2_check_constraints,
@@ -174,8 +174,8 @@ def run_db2_backup(cfg: dict) -> dict:
                     logger.warning("Table %s: skipped (no DDL). %s", fqn, warning or "")
                     continue
                 tables_all.append(table_sql)
-                per_file = paths["tables_dir"] / f"{safe_name(t.schema_name)}.{safe_name(t.table_name)}.sql"
-                per_file.write_text(table_sql, encoding="utf-8")
+                per_file = paths["tables_dir"] / safe_table_filename(t.schema_name, t.table_name)
+                win_safe_path(per_file).write_text(table_sql, encoding="utf-8")
                 summary["tables"].append({
                     "schema": t.schema_name,
                     "table": t.table_name,

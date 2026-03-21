@@ -1,6 +1,12 @@
 # Build Azure Migration Tool exe and NSIS installer.
 # Triggers: push to main, tags v*, or manual run.
 # Artifacts: AzureMigrationTool-<version>.exe, AzureMigrationTool_Setup_<version>.exe
+#
+# Release model (push to main):
+# - "latest" tag: always the current main build (only 2 assets; old assets removed each run).
+# - "build/<version>" tag: immutable snapshot per run (separate release = archive/history).
+#   Uses build/* not v* so creating the tag does not re-trigger this workflow.
+# - Actions artifacts: same binaries, retention 90 days.
 
 name: Build EXE and Installer
 
@@ -122,6 +128,7 @@ jobs:
         with:
           name: AzureMigrationTool-${{ steps.version.outputs.version }}.exe
           path: dist-versioned/AzureMigrationTool-${{ steps.version.outputs.version }}.exe
+          retention-days: 90
 
       - name: Upload installer artifact
         if: steps.installer.outputs.has_installer == 'true'
@@ -129,6 +136,7 @@ jobs:
         with:
           name: AzureMigrationTool_Setup-${{ steps.version.outputs.version }}.exe
           path: dist-versioned/AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe
+          retention-days: 90
 
       # Push to main: update "latest" tag and create/update release so it shows on Releases page
       - name: Update latest tag (push to main only)
@@ -144,6 +152,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Clean old assets from the "latest" release so only the current build shows
+      - name: Remove old assets from latest release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        shell: bash
+        continue-on-error: true
+        run: |
+          # List all asset IDs on the "latest" release and delete them
+          assets=$(gh api repos/${{ github.repository }}/releases/tags/latest --jq '.assets[].id' 2>/dev/null || true)
+          for id in $assets; do
+            echo "Deleting old asset $id"
+            gh api -X DELETE repos/${{ github.repository }}/releases/assets/$id 2>/dev/null || true
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Collect release files
         id: release_files
         shell: pwsh
@@ -153,18 +176,57 @@ jobs:
           $setup = "dist-versioned/AzureMigrationTool_Setup_$ver.exe"
           if (Test-Path $setup) { $files += $setup }
           $joined = $files -join "`n"
-          # Write multiline output
           "files<<EOF" >> $env:GITHUB_OUTPUT
           $joined >> $env:GITHUB_OUTPUT
           "EOF" >> $env:GITHUB_OUTPUT
+
+      # Immutable snapshot: tag build/<version> does NOT match v* → no second workflow run
+      - name: Create archive release (build/<version>)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build/${{ steps.version.outputs.version }}
+          name: Build ${{ steps.version.outputs.version }}
+          body: |
+            Archived snapshot from `main` (same binaries as **Latest** at publish time).
+
+            | | |
+            |-|-|
+            | **Version** | `${{ steps.version.outputs.version }}` |
+            | **Commit** | `${{ github.sha }}` |
+            | **CI run** | [Workflow run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+            **Tip:** [All releases](${{ github.server_url }}/${{ github.repository }}/releases) lists every `build/*` snapshot. For the newest build only, use the [**latest**](${{ github.server_url }}/${{ github.repository }}/releases/tag/latest) release.
+
+            Workflow **Artifacts** (this run) keep copies for ~90 days under the Actions tab.
+          files: ${{ steps.release_files.outputs.files }}
+          fail_on_unmatched_files: false
+          make_latest: false
+          allow_updates: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create or update Release (push to main – show on Releases page)
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Latest (main)
-          body: "Built from main. Download **AzureMigrationTool-${{ steps.version.outputs.version }}.exe** (standalone) or **AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe** (installer)."
+          name: Latest build (v${{ steps.version.outputs.version }})
+          body: |
+            **Recommended download** — current `main` build (only the files below; older files are removed each run).
+
+            | | |
+            |-|-|
+            | **Version** | `${{ steps.version.outputs.version }}` |
+            | **Commit** | `${{ github.sha }}` |
+            | **CI run** | [Workflow run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+            | File | Description |
+            |------|-------------|
+            | `AzureMigrationTool-${{ steps.version.outputs.version }}.exe` | Standalone executable (no install needed) |
+            | `AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe` | Installer with ODBC driver (if built) |
+
+            **Older main builds:** each push also creates a permanent release tagged `build/${{ steps.version.outputs.version }}` — browse [all releases](${{ github.server_url }}/${{ github.repository }}/releases). **Last ~90 days:** download **Artifacts** from the [Actions](${{ github.server_url }}/${{ github.repository }}/actions) tab for this workflow.
           files: ${{ steps.release_files.outputs.files }}
           allow_updates: true
           make_latest: true

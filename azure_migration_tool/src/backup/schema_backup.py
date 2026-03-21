@@ -11,7 +11,7 @@ import pyodbc
 
 from ..utils.database import build_conn_str, pick_sql_driver, connect_to_database
 from ..utils.logging import setup_logger
-from ..utils.paths import safe_name, short_slug, utc_iso, utc_ts_compact
+from ..utils.paths import safe_name, safe_table_filename, short_slug, utc_iso, utc_ts_compact, win_safe_path
 from ..utils.sql import sql_header
 from .exporters import (
     build_create_table_sql,
@@ -51,7 +51,7 @@ def setup_run_folders(backup_root: Path, server: str, db: str, run_id: str):
     }
 
     for k in ["run_root", "logs_dir", "meta_dir", "schema_dir", "tables_dir", "prog_dir", "cx_dir"]:
-        paths[k].mkdir(parents=True, exist_ok=True)
+        win_safe_path(paths[k]).mkdir(parents=True, exist_ok=True)
 
     paths.update(
         {
@@ -188,8 +188,8 @@ def run_backup(cfg: dict):
                 
                 tables_all.append(table_sql)
 
-                per_file = paths["tables_dir"] / f"{safe_name(schema_name)}.{safe_name(table_name)}.sql"
-                per_file.write_text(table_sql, encoding="utf-8")
+                per_file = paths["tables_dir"] / safe_table_filename(schema_name, table_name)
+                win_safe_path(per_file).write_text(table_sql, encoding="utf-8")
 
                 summary["tables"].append(
                     {

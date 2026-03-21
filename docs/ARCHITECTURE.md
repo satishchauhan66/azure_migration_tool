@@ -358,6 +358,18 @@ flowchart TB
 
 ## 13. CI/CD (GitHub Actions)
 
+Workflow: `.github/workflows/build.yml`.
+
+**Releases (push to `main` / `master`):**
+
+| Target | Tag | Purpose |
+|--------|-----|---------|
+| **Latest** | `latest` | Single “current build” release; previous assets on that release are removed each run so the Assets list stays short. |
+| **Archive** | `build/<version>` | One release per CI run (e.g. `build/1.2.123`). Tag uses `build/` so it does **not** match the workflow’s `v*` trigger and does not start a second build. |
+| **Artifacts** | — | Same binaries uploaded per run; **90-day** retention (Actions tab). |
+
+Manual **semver** releases still use tags `v*` (separate workflow path).
+
 ```mermaid
 flowchart LR
     TRIGGER[Push main/master, tag v*, release, workflow_dispatch]
@@ -367,7 +379,9 @@ flowchart LR
     BUILD --> EXE[dist-versioned/AzureMigrationTool-<ver>.exe]
     EXE --> NSIS[Install NSIS, build_installer.ps1]
     NSIS --> SETUP[dist-versioned/AzureMigrationTool_Setup_<ver>.exe]
-    SETUP --> RELEASE[Create/update GitHub Release]
+    SETUP --> ARCH[Release: tag build/<ver>]
+    ARCH --> LATEST[Release: tag latest]
+    SETUP --> ART[Artifacts 90d]
 ```
 
 ---
