@@ -59,8 +59,12 @@ InstallDir "$PROGRAMFILES64\${PRODUCT_NAME}"
 Unicode True
 
 ; ---------------------------------------------------------------------------
-; UI
+; UI (custom icon if present: run python build_exe.py — creates ..\resources\app.ico)
 ; ---------------------------------------------------------------------------
+!if /FileExists "..\resources\app.ico"
+  !define MUI_ICON "..\resources\app.ico"
+  !define MUI_UNICON "..\resources\app.ico"
+!endif
 !define MUI_ABORTWARNING
 !define MUI_BRANDINGTEXT "Developed by 66Degrees"
 !define MUI_WELCOMEPAGE_TITLE "Welcome to ${PRODUCT_NAME} Setup"

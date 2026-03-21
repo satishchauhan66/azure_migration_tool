@@ -16,12 +16,80 @@ import shutil
 import subprocess
 import argparse
 from pathlib import Path
+from typing import Optional
 
 
 def print_header(text):
     print("\n" + "=" * 60)
     print(f" {text}")
     print("=" * 60)
+
+
+def _write_ico_from_png(png_path: Path, ico_path: Path, app_dir: Path) -> bool:
+    """Create a multi-resolution Windows .ico from a PNG (needs Pillow)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        print("  Installing Pillow for icon generation...")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "pillow", "-q"],
+            capture_output=True,
+            text=True,
+        )
+        try:
+            from PIL import Image
+        except ImportError:
+            print(
+                "  [WARN] Pillow not available — install with: pip install pillow\n"
+                "         Exe/installer will build without a custom icon until app.ico exists."
+            )
+            return False
+    try:
+        img = Image.open(png_path).convert("RGBA")
+        sizes = [
+            (16, 16),
+            (24, 24),
+            (32, 32),
+            (48, 48),
+            (64, 64),
+            (128, 128),
+            (256, 256),
+        ]
+        ico_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(ico_path, format="ICO", sizes=sizes)
+        rel = ico_path.relative_to(app_dir)
+        print(f"  [OK] Wrote {rel} (from {png_path.name})")
+        return True
+    except Exception as e:
+        print(f"  [WARN] Could not create app.ico: {e}")
+        return False
+
+
+def ensure_app_ico(app_dir: Path) -> Optional[Path]:
+    """
+    Resolve resources/logo.png (or legacy build/logo.png), refresh resources/app.ico.
+    Returns path to app.ico if it exists or was created.
+    """
+    resources = app_dir / "resources"
+    png_res = resources / "logo.png"
+    png_build = app_dir / "build" / "logo.png"
+    png = png_res if png_res.exists() else png_build
+    if not png.exists():
+        return None
+    resources.mkdir(parents=True, exist_ok=True)
+    if png == png_build and not png_res.exists():
+        try:
+            shutil.copy2(png, png_res)
+            png = png_res
+            print(f"  Copied build/logo.png -> resources/logo.png")
+        except OSError as e:
+            print(f"  [WARN] Could not copy logo to resources/: {e}")
+    ico = resources / "app.ico"
+    need = not ico.exists() or ico.stat().st_mtime < png.stat().st_mtime
+    if need:
+        if not _write_ico_from_png(png, ico, app_dir):
+            return ico if ico.exists() else None
+    return ico if ico.exists() else None
 
 
 def build_pyinstaller(app_dir: Path, console: bool = False) -> bool:
@@ -52,6 +120,13 @@ def build_pyinstaller(app_dir: Path, console: bool = False) -> bool:
     
     datas_str = repr(datas_list)
     console_str = "True" if console else "False"
+
+    icon_path = ensure_app_ico(app_dir)
+    icon_line = ""
+    if icon_path and icon_path.is_file():
+        # Forward slashes work in PyInstaller spec on Windows
+        icon_spec = icon_path.resolve().as_posix()
+        icon_line = f'\n    icon=r"{icon_spec}",'
 
     # Create spec file
     spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
@@ -129,7 +204,7 @@ exe = EXE(
     strip=False,
     upx=False,
     runtime_tmpdir=None,
-    console={console_str},
+    console={console_str},{icon_line}
 )
 '''
     

@@ -333,6 +333,8 @@ flowchart LR
     E --> F[dist/AzureMigrationTool_Setup_<version>.exe]
 ```
 
+**Branding:** Put `resources/logo.png` in the app package. `build_exe.py` uses **Pillow** (auto-installed if missing) to generate `resources/app.ico`, embeds it in the PyInstaller **exe**, and the NSIS script uses the same `.ico` for the installer wizard when `app.ico` exists (`!if /FileExists`). See `resources/README.md` and `requirements-build.txt`.
+
 The NSIS script (`installer/AzureMigrationTool.nsi`) uses the **MultiUser** plugin: installers can target **current user** (default under `%LOCALAPPDATA%\Programs\`, HKCU, per-user Start Menu) or **all users** (`Program Files`, HKLM, common Start Menu; UAC when needed). Bundled **ODBC 18 MSI** runs only for **all-users** installs; per-user installs skip it (install ODBC separately). Silent flags: `/CurrentUser` or `/AllUsers` with `/S`.
 
 ```mermaid

@@ -63,28 +63,31 @@ def main():
         from setup.auto_setup import DependencyChecker
         checker = DependencyChecker()
         
-        # Check all dependencies
-        all_ok, issues = checker.quick_check()
+        # quick_check returns (all_ok, blocking_issues, optional_notes)
+        result = checker.quick_check()
+        all_ok, issues = result[0], result[1]
+        optional_notes = result[2] if len(result) > 2 else []
         
         if not all_ok:
-            # Build user-friendly message (plain English, not jargon)
-            msg = "This tool needs a few things installed to work. We'll help you install them.\n\n"
+            msg = "This tool needs a few things installed to work.\n\n"
             
             for issue in issues:
                 msg += f"• {issue}\n"
             
             msg += "\n--- What to do ---\n\n"
             
-            if any("Java" in i for i in issues):
-                msg += "• Java (for DB2 connection only): https://adoptium.net/\n"
             if any("ODBC" in i for i in issues):
                 msg += "• Database driver (for SQL Server): use Tools > Install database driver, or https://aka.ms/downloadmsodbcsql\n"
             if any("Python" in i for i in issues):
                 msg += "• Python: https://python.org/downloads/\n"
-            if any("JDBC" in i for i in issues):
-                msg += "• DB2 driver file: place db2jcc4.jar in the app's drivers folder (for Compare DB2 tabs)\n"
             
-            msg += "\nTip: For normal SQL Server migration you only need the database driver. Legacy DB2 comparisons run without PySpark."
+            if optional_notes:
+                msg += "\n--- Optional (DB2 source only) ---\n\n"
+                for note in optional_notes:
+                    msg += f"• {note}\n"
+                msg += "\nThese are NOT required for SQL Server / Azure SQL migrations.\n"
+            
+            msg += "\nTip: For normal SQL Server migration you only need the database driver."
             
             messagebox.showwarning("Setup needed", msg)
     except ImportError:

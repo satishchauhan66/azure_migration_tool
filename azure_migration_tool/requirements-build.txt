@@ -1,0 +1,3 @@
+# Optional: build AzureMigrationTool.exe (PyInstaller) and generate app.ico from resources/logo.png
+pyinstaller>=6.0.0
+pillow>=9.0.0

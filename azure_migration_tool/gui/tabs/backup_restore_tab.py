@@ -26,7 +26,28 @@ class BackupRestoreTab:
         self.main_window = main_window
         self.frame = ttk.Frame(parent)
         self.project_path = None
+
+        # Shared blob connection vars (used by both Backup-to-Blob and Restore sub-tabs)
+        self.blob_conn_var = tk.StringVar()
+        self.blob_container_var = tk.StringVar(value="db2-stage")
+        self._load_blob_settings_into_shared()
+
         self._create_widgets()
+
+    def _load_blob_settings_into_shared(self):
+        """Pre-load blob connection string and container into shared vars."""
+        try:
+            path = self._get_bak_blob_config_path()
+            if not path.exists():
+                return
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data.get("blob_connection_string"), str):
+                self.blob_conn_var.set(data["blob_connection_string"])
+            if isinstance(data.get("container"), str):
+                self.blob_container_var.set(data["container"])
+        except Exception:
+            pass
 
     def set_project_path(self, project_path):
         """Set the current project path."""
@@ -104,8 +125,8 @@ class BackupRestoreTab:
 
         step1 = ttk.LabelFrame(parent, text="Step 1: On-prem source database", padding=10)
         step1.pack(fill=tk.X, padx=5, pady=5)
-        self.bak_server_var = tk.StringVar()
-        self.bak_db_var = tk.StringVar()
+        self.bak_server_var = self.main_window.shared_src_server
+        self.bak_db_var = self.main_window.shared_src_db
         self.bak_auth_var = tk.StringVar(value="windows")
         self.bak_user_var = tk.StringVar()
         self.bak_password_var = tk.StringVar()
@@ -125,17 +146,16 @@ class BackupRestoreTab:
         tk.Label(step2, text="Connection string (AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net):").pack(
             anchor=tk.W
         )
-        self.bak_blob_conn_var = tk.StringVar()
+        self.bak_blob_conn_var = self.blob_conn_var
         ttk.Entry(step2, textvariable=self.bak_blob_conn_var, width=70).pack(fill=tk.X, pady=2)
         tk.Label(step2, text="Container name (e.g. db2-stage):").pack(anchor=tk.W, pady=(8, 0))
-        self.bak_container_var = tk.StringVar(value="db2-stage")
+        self.bak_container_var = self.blob_container_var
         ttk.Entry(step2, textvariable=self.bak_container_var, width=30).pack(fill=tk.X, pady=2)
         blob_btn_row = ttk.Frame(step2)
         blob_btn_row.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(blob_btn_row, text="Save connection string", command=self._save_bak_blob_settings).pack(
             side=tk.LEFT, padx=5
         )
-        self._load_bak_blob_settings()
 
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(pady=10)
@@ -148,21 +168,6 @@ class BackupRestoreTab:
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.bak_to_blob_log = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
         self.bak_to_blob_log.pack(fill=tk.BOTH, expand=True)
-
-    def _load_bak_blob_settings(self):
-        """Load saved blob connection string and container into the form."""
-        try:
-            path = self._get_bak_blob_config_path()
-            if not path.exists():
-                return
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data.get("blob_connection_string"), str):
-                self.bak_blob_conn_var.set(data["blob_connection_string"])
-            if isinstance(data.get("container"), str):
-                self.bak_container_var.set(data["container"])
-        except Exception:
-            pass
 
     def _save_bak_blob_settings(self):
         """Save current blob connection string and container to disk."""
@@ -255,18 +260,17 @@ class BackupRestoreTab:
 
         step1 = ttk.LabelFrame(parent, text="Step 1: Azure Blob storage", padding=10)
         step1.pack(fill=tk.X, padx=5, pady=5)
-        tk.Label(step1, text="Connection string (same as .bak to Blob; load/save shared):").pack(anchor=tk.W)
-        self.restore_blob_conn_var = tk.StringVar()
+        tk.Label(step1, text="Connection string (shared with .bak to Blob tab):").pack(anchor=tk.W)
+        self.restore_blob_conn_var = self.blob_conn_var
         ttk.Entry(step1, textvariable=self.restore_blob_conn_var, width=70).pack(fill=tk.X, pady=2)
         tk.Label(step1, text="Container name (e.g. db2-stage):").pack(anchor=tk.W, pady=(8, 0))
-        self.restore_container_var = tk.StringVar(value="db2-stage")
+        self.restore_container_var = self.blob_container_var
         ttk.Entry(step1, textvariable=self.restore_container_var, width=30).pack(fill=tk.X, pady=2)
         blob_btn_row = ttk.Frame(step1)
         blob_btn_row.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(blob_btn_row, text="Save connection string", command=self._save_restore_blob_settings).pack(
             side=tk.LEFT, padx=5
         )
-        self._load_restore_blob_settings()
 
         tk.Label(
             step1,
@@ -304,13 +308,13 @@ class BackupRestoreTab:
         self.restore_blob_path_var = tk.StringVar()
         tk.Label(step1, textvariable=self.restore_blob_path_var, fg="gray").pack(anchor=tk.W, pady=(2, 0))
 
-        step2 = ttk.LabelFrame(parent, text="Step 2: Target SQL Server", padding=10)
+        step2 = ttk.LabelFrame(parent, text="Step 2: Target SQL Server (Staging MI)", padding=10)
         step2.pack(fill=tk.X, padx=5, pady=5)
-        self.restore_blob_server_var = tk.StringVar()
-        self.restore_blob_db_var = tk.StringVar()
-        self.restore_blob_auth_var = tk.StringVar(value="windows")
-        self.restore_blob_user_var = tk.StringVar()
-        self.restore_blob_password_var = tk.StringVar()
+        self.restore_blob_server_var = self.main_window.shared_dest_server
+        self.restore_blob_db_var = self.main_window.shared_dest_db
+        self.restore_blob_auth_var = self.main_window.shared_dest_auth
+        self.restore_blob_user_var = self.main_window.shared_dest_user
+        self.restore_blob_password_var = self.main_window.shared_dest_password
         self.restore_blob_managed_instance_var = tk.BooleanVar(value=False)
         ConnectionWidget(
             parent=step2,
@@ -339,21 +343,6 @@ class BackupRestoreTab:
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.restore_from_blob_log = scrolledtext.ScrolledText(log_frame, height=8, wrap=tk.WORD)
         self.restore_from_blob_log.pack(fill=tk.BOTH, expand=True)
-
-    def _load_restore_blob_settings(self):
-        """Load blob connection string and container into restore fields (same file as .bak to Blob)."""
-        try:
-            path = self._get_bak_blob_config_path()
-            if not path.exists():
-                return
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data.get("blob_connection_string"), str):
-                self.restore_blob_conn_var.set(data["blob_connection_string"])
-            if isinstance(data.get("container"), str):
-                self.restore_container_var.set(data["container"])
-        except Exception:
-            pass
 
     def _save_restore_blob_settings(self):
         """Save restore blob connection string and container (same file as .bak to Blob)."""

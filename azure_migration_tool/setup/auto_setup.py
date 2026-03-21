@@ -562,28 +562,33 @@ class DependencyChecker:
         setup_marker = self.app_data / '.setup_complete'
         return setup_marker.exists()
     
-    def quick_check(self) -> Tuple[bool, List[str]]:
-        """Quick check of all dependencies without installing."""
+    def quick_check(self) -> Tuple[bool, List[str], List[str]]:
+        """Quick check of all dependencies without installing.
+
+        Returns (all_ok, issues) where *issues* only contains items that
+        block normal SQL-Server-to-Azure workflows.  Java and JDBC are
+        optional (only needed for DB2 source connections) and are reported
+        separately via *optional_notes*.
+        """
         issues = []
-        
-        java_ok, java_msg = self.check_java()
-        if not java_ok:
-            issues.append(f"Java: {java_msg}")
-        
+        optional_notes: List[str] = []
+
         odbc_ok, odbc_msg = self.check_odbc_driver()
         if not odbc_ok:
             issues.append(f"ODBC: {odbc_msg}")
-        
-        # Do NOT require Python/PySpark when running as frozen exe: the built exe uses
-        # Legacy validation (Python-only, no PySpark). Requiring them would show false
-        # "dependency" errors on every PC without Python installed.
-        # (Python/PySpark checks are still used by the full setup flow if user opts in.)
-        
+
+        # Java & JDBC are only needed for DB2 source connections.
+        # Report them as optional notes so the startup dialog can mention
+        # them without blocking the user.
+        java_ok, java_msg = self.check_java()
+        if not java_ok:
+            optional_notes.append(f"Java: {java_msg}")
+
         jdbc_ok, jdbc_msg = self.check_jdbc_drivers()
         if not jdbc_ok:
-            issues.append(f"JDBC: {jdbc_msg}")
-        
-        return len(issues) == 0, issues
+            optional_notes.append(f"JDBC: {jdbc_msg}")
+
+        return len(issues) == 0, issues, optional_notes
 
 
 def show_setup_dialog(parent=None):
@@ -680,7 +685,7 @@ def ensure_dependencies(parent=None) -> bool:
     checker = DependencyChecker()
     
     # Quick check first
-    all_ok, issues = checker.quick_check()
+    all_ok, issues, _optional = checker.quick_check()
     
     if all_ok:
         return True
