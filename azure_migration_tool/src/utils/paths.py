@@ -65,6 +65,28 @@ def win_safe_path(p: Path) -> Path:
     return Path(s)
 
 
+def app_data_dir() -> Path:
+    """Return a user-writable directory for application data (backups, logs, etc.).
+
+    When the app runs from ``C:\\Program Files`` or another admin-only location,
+    relative paths like ``backups/`` are unwritable for regular users.  This
+    function returns a per-user writable directory instead.
+
+    Priority:
+      1. ``%LOCALAPPDATA%/AzureMigrationTool``  (Windows typical)
+      2. ``~/.azure_migration_tool``             (Linux / fallback)
+    """
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA", "")
+        if not base:
+            base = os.path.expanduser("~")
+        root = Path(base) / "AzureMigrationTool"
+    else:
+        root = Path(os.path.expanduser("~")) / ".azure_migration_tool"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def qident(name: str) -> str:
     """Quote SQL identifier: [name] (handles ] by doubling)"""
     return "[" + name.replace("]", "]]") + "]"

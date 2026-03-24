@@ -981,7 +981,16 @@ class SchemaTab:
 
         def run_backup():
             try:
-                backup_root = self.backup_output_var.get() or (self.project_path / "backups" if self.project_path else "backups")
+                if self.backup_output_var.get():
+                    backup_root = self.backup_output_var.get()
+                elif self.project_path:
+                    backup_root = str(self.project_path / "backups")
+                else:
+                    try:
+                        from src.utils.paths import app_data_dir
+                    except ImportError:
+                        from utils.paths import app_data_dir
+                    backup_root = str(app_data_dir() / "backups")
                 backup_root = str(backup_root)
 
                 if is_db2:
@@ -1021,7 +1030,16 @@ class SchemaTab:
                     
                     # Auto-fill restore backup path with the backup that was just created
                     # Construct backup path from summary data
-                    backup_root = self.backup_output_var.get() or (self.project_path / "backups" if self.project_path else "backups")
+                    if self.backup_output_var.get():
+                        backup_root = self.backup_output_var.get()
+                    elif self.project_path:
+                        backup_root = str(self.project_path / "backups")
+                    else:
+                        try:
+                            from src.utils.paths import app_data_dir as _add
+                        except ImportError:
+                            from utils.paths import app_data_dir as _add
+                        backup_root = str(_add() / "backups")
                     run_id = summary.get('run_id', '')
                     server = summary.get('server', '')
                     database = summary.get('database', '')
@@ -1223,7 +1241,16 @@ class SchemaTab:
                     log_widget.see(tk.END)
                 log(f"\n[{idx}/{len(self.backup_configs)}] {cfg.get('src_server')}/{cfg.get('src_db')}...\n")
                 try:
-                    backup_root = self.backup_output_var.get() or (self.project_path / "backups" if self.project_path else "backups")
+                    if self.backup_output_var.get():
+                        backup_root = self.backup_output_var.get()
+                    elif self.project_path:
+                        backup_root = str(self.project_path / "backups")
+                    else:
+                        try:
+                            from src.utils.paths import app_data_dir
+                        except ImportError:
+                            from utils.paths import app_data_dir
+                        backup_root = str(app_data_dir() / "backups")
                     backup_cfg = {
                         "server": cfg.get("src_server"),
                         "database": cfg.get("src_db"),

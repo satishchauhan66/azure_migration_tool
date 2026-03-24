@@ -66,9 +66,16 @@ jobs:
             }
           }
           "version=$ver" >> $env:GITHUB_OUTPUT
-          $buildVer = python -c "import sys; sys.path.insert(0, 'azure_migration_tool'); from __init__ import __version__; print(__version__)"
-          "build_version=$buildVer" >> $env:GITHUB_OUTPUT
-          Write-Host "Using version: $ver (build_version: $buildVer)"
+          "build_version=$ver" >> $env:GITHUB_OUTPUT
+          Write-Host "Using version: $ver"
+
+      - name: Stamp version into __init__.py
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.version }}"
+          $initFile = "azure_migration_tool/__init__.py"
+          (Get-Content $initFile -Raw) -replace '__version__\s*=\s*"[^"]*"', "__version__ = `"$ver`"" | Set-Content $initFile -NoNewline
+          Write-Host "Stamped __init__.py with version: $ver"
 
       - name: Install dependencies
         run: |
@@ -170,7 +177,7 @@ jobs:
             | File | Description |
             |------|-------------|
             | `AzureMigrationTool-${{ steps.version.outputs.version }}.exe` | Standalone executable |
-            | `AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe` | Installer (if NSIS succeeded) |
+            | `AzureMigrationTool_Setup_${{ steps.version.outputs.version }}.exe` | Installer |
 
             **Older builds:** [All releases](${{ github.server_url }}/${{ github.repository }}/releases). **~90 days:** [Actions artifacts](${{ github.server_url }}/${{ github.repository }}/actions).
           files: ${{ steps.release_files.outputs.files }}

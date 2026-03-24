@@ -395,6 +395,9 @@ class FullMigrationTab:
                     return
                 
                 cfg = {
+                    # Project path for writable output dir
+                    "project_path": str(self.project_path) if self.project_path else None,
+
                     # Backup (uses source database)
                     "backup_src_server": src_server,
                     "backup_src_db": src_db,
@@ -550,6 +553,7 @@ class FullMigrationTab:
                 try:
                     # Build full migration config from Excel row
                     full_cfg = {
+                        "project_path": str(self.project_path) if self.project_path else None,
                         "backup_src_server": cfg.get("src_server"),
                         "backup_src_db": cfg.get("src_db"),
                         "backup_src_auth": cfg.get("src_auth", cfg.get("auth", "entra_mfa")),

@@ -14,7 +14,7 @@ from ..backup import run_backup
 from ..migration import run_migration
 from ..restore import run_restore
 from ..utils.logging import setup_logger
-from ..utils.paths import short_slug, utc_iso
+from ..utils.paths import app_data_dir, short_slug, utc_iso
 
 
 def find_latest_backup(backup_root: Path, server: str, db: str) -> Optional[Path]:
@@ -47,9 +47,10 @@ def run_full_migration(cfg: dict):
     # Get log callback for streaming to GUI (optional)
     gui_log_callback = cfg.get("log_callback")
 
-    # Setup logging
-    logs_dir = Path("migration_runs") / run_id / "logs"
-    meta_dir = Path("migration_runs") / run_id / "meta"
+    # Use project path if provided, otherwise user-writable app data dir
+    data_root = Path(cfg["project_path"]) if cfg.get("project_path") else app_data_dir()
+    logs_dir = data_root / "migration_runs" / run_id / "logs"
+    meta_dir = data_root / "migration_runs" / run_id / "meta"
     logs_dir.mkdir(parents=True, exist_ok=True)
     meta_dir.mkdir(parents=True, exist_ok=True)
 
@@ -106,7 +107,7 @@ def run_full_migration(cfg: dict):
                 "auth": cfg["backup_src_auth"],
                 "user": cfg["backup_src_user"],
                 "password": cfg["backup_src_password"],
-                "backup_root": cfg.get("backup_root", "backups"),
+                "backup_root": cfg.get("backup_root", str(data_root / "backups")),
                 "log_table_sample": cfg.get("backup_log_table_sample", 20),
                 "export_defaults_separately": cfg.get("backup_export_defaults_separately", True),
             }
@@ -117,7 +118,7 @@ def run_full_migration(cfg: dict):
             summary["steps"]["backup"]["status"] = backup_summary["status"]
             summary["steps"]["backup"]["run_id"] = backup_summary["run_id"]
             summary["steps"]["backup"]["backup_path"] = str(
-                Path("backups") / short_slug(backup_cfg["server"]) / short_slug(backup_cfg["database"]) / "runs" / backup_summary["run_id"]
+                Path(backup_cfg["backup_root"]) / short_slug(backup_cfg["server"]) / short_slug(backup_cfg["database"]) / "runs" / backup_summary["run_id"]
             )
 
             if backup_summary["status"] != "success":
@@ -154,7 +155,7 @@ def run_full_migration(cfg: dict):
                 log_msg(f"Using backup from Step 1: {restore_backup_path}")
             elif not restore_backup_path:
                 # Auto-detect from latest backup
-                backup_root = Path("backups")
+                backup_root = Path(cfg.get("backup_root", str(data_root / "backups")))
                 restore_backup_path = find_latest_backup(backup_root, cfg["backup_src_server"], cfg["backup_src_db"])
                 if not restore_backup_path:
                     raise ValueError("Could not find backup path. Please specify --restore-backup-path.")
@@ -285,7 +286,7 @@ def run_full_migration(cfg: dict):
             restore_backup_path = cfg["restore_backup_path"]
             if not restore_backup_path:
                 # Auto-detect from latest backup
-                backup_root = Path("backups")
+                backup_root = Path(cfg.get("backup_root", str(data_root / "backups")))
                 restore_backup_path = find_latest_backup(backup_root, cfg["backup_src_server"], cfg["backup_src_db"])
                 if not restore_backup_path:
                     raise ValueError("Could not find backup path. Please specify --restore-backup-path.")

@@ -15,7 +15,7 @@ import pyodbc
 
 from ..utils.database import build_conn_str, pick_sql_driver, connect_to_database, resolve_password
 from ..utils.logging import setup_logger
-from ..utils.paths import qident, short_slug, utc_ts_compact
+from ..utils.paths import app_data_dir, qident, short_slug, utc_ts_compact
 
 
 def parse_csv_list(s: Optional[str]) -> List[str]:
@@ -991,10 +991,11 @@ def run_migration(cfg: dict, log_callback=None):
 
     run_id = utc_ts_compact()
 
-    # SHORT paths to avoid Windows MAX_PATH issues
+    # Use project path if provided, otherwise user-writable app data dir
+    data_root = Path(cfg["project_path"]) if cfg.get("project_path") else app_data_dir()
     src_tag = short_slug(f"{cfg['src_server']}__{cfg['src_db']}")
     dest_tag = short_slug(f"{cfg['dest_server']}__{cfg['dest_db']}")
-    root = Path("migrations") / run_id / f"{src_tag}__to__{dest_tag}"
+    root = data_root / "migrations" / run_id / f"{src_tag}__to__{dest_tag}"
 
     logs_dir = root / "logs"
     meta_dir = root / "meta"
