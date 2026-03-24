@@ -162,6 +162,7 @@ def run_full_migration(cfg: dict):
                 log_msg(f"Auto-detected backup path: {restore_backup_path}")
 
             restore_tables_cfg = {
+                "project_path": cfg.get("project_path"),
                 "dest_server": restore_dest_server,
                 "dest_db": restore_dest_db,
                 "dest_auth": restore_dest_auth,
@@ -216,6 +217,7 @@ def run_full_migration(cfg: dict):
             log_msg("=" * 60)
 
             migrate_cfg = {
+                "project_path": cfg.get("project_path"),
                 "src_server": cfg["migrate_src_server"],
                 "src_db": cfg["migrate_src_db"],
                 "src_auth": cfg["migrate_src_auth"],
@@ -293,6 +295,7 @@ def run_full_migration(cfg: dict):
                 log_msg(f"Auto-detected backup path: {restore_backup_path}")
 
             restore_cfg = {
+                "project_path": cfg.get("project_path"),
                 "dest_server": restore_dest_server,
                 "dest_db": restore_dest_db,
                 "dest_auth": restore_dest_auth,

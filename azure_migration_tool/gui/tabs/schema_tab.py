@@ -1104,6 +1104,7 @@ class SchemaTab:
                         pass
                 
                 cfg = {
+                    "project_path": str(self.project_path) if self.project_path else None,
                     "backup_path": self.restore_backup_path_var.get(),
                     "dest_server": self.restore_server_var.get(),
                     "dest_db": self.restore_db_var.get(),
@@ -1301,6 +1302,7 @@ class SchemaTab:
                 log(f"\n[{idx}/{len(self.restore_configs)}] {cfg.get('dest_server')}/{cfg.get('dest_db')}...\n")
                 try:
                     restore_cfg = {
+                        "project_path": str(self.project_path) if self.project_path else None,
                         "backup_path": cfg.get("backup_path"),
                         "dest_server": cfg.get("dest_server"),
                         "dest_db": cfg.get("dest_db"),

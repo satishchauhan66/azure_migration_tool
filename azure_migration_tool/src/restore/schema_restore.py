@@ -20,7 +20,7 @@ from ..utils.azure_compat import (
 )
 from ..utils.database import build_conn_str, pick_sql_driver, resolve_password, connect_to_database
 from ..utils.logging import setup_logger
-from ..utils.paths import short_slug, utc_iso, utc_ts_compact
+from ..utils.paths import app_data_dir, short_slug, utc_iso, utc_ts_compact
 from ..utils.sql import split_sql_on_go
 from .nullability_fix import apply_nullability_fixes
 
@@ -461,6 +461,9 @@ def run_restore(cfg: dict):
     """Run schema restore with provided configuration"""
     run_id = utc_ts_compact()
 
+    # Use project path if provided, otherwise user-writable app data dir
+    data_root = Path(cfg["project_path"]) if cfg.get("project_path") else app_data_dir()
+
     # Determine backup path
     backup_path = None
     if cfg["backup_path"]:
@@ -469,7 +472,7 @@ def run_restore(cfg: dict):
             raise ValueError(f"Backup path does not exist: {backup_path}")
     else:
         # Try to find latest backup
-        backup_root = Path("backups")
+        backup_root = data_root / "backups"
         if backup_root.exists():
             backup_path = find_latest_backup(backup_root, cfg["dest_server"], cfg["dest_db"])
             if backup_path:
@@ -483,7 +486,7 @@ def run_restore(cfg: dict):
             raise ValueError("No backup path specified and 'backups' folder not found. Use --backup-path.")
 
     # Setup logging
-    restore_root = Path("restores") / run_id
+    restore_root = data_root / "restores" / run_id
     logs_dir = restore_root / "logs"
     meta_dir = restore_root / "meta"
     logs_dir.mkdir(parents=True, exist_ok=True)
