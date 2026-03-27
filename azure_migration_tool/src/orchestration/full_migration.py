@@ -12,7 +12,7 @@ from typing import Optional
 
 from ..backup import run_backup
 from ..migration import run_migration
-from ..restore import run_restore
+from ..restore import effective_restore_primary_keys, run_restore
 from ..utils.logging import setup_logger
 from ..utils.paths import app_data_dir, short_slug, utc_iso
 
@@ -169,15 +169,16 @@ def run_full_migration(cfg: dict):
                 "dest_user": restore_dest_user,
                 "dest_password": restore_dest_password,
                 "backup_path": str(restore_backup_path),
-                "restore_tables": True,  # Only restore tables
-                "restore_programmables": False,  # Skip for now
-                "restore_constraints": False,  # Skip for now
-                "restore_indexes": False,  # Skip for now
+                "restore_tables": True,  # Raw table skeletons only (default backup DDL)
+                "restore_programmables": False,
+                "restore_constraints": False,
+                "restore_indexes": False,
                 "continue_on_error": True,  # Always continue on error for table restore (some tables may succeed)
                 "dry_run": cfg.get("restore_dry_run", False),
             }
 
             log_msg(f"Restoring tables to: {restore_dest_server} | {restore_dest_db}")
+            log_msg("Table restore: raw shells only — PKs, indexes, and FKs run after data migration (Step 4).")
             restore_tables_summary = run_restore(restore_tables_cfg)
 
             summary["steps"]["restore_tables"]["status"] = restore_tables_summary["status"]
@@ -274,7 +275,7 @@ def run_full_migration(cfg: dict):
         if not cfg["skip_restore"]:
             log_msg("")
             log_msg("=" * 60)
-            log_msg("STEP 4: SCHEMA RESTORE")
+            log_msg("STEP 4: SCHEMA RESTORE (after data — PKs, indexes, constraints, programmables)")
             log_msg("=" * 60)
 
             # Determine restore destination (defaults to migration destination)
@@ -310,6 +311,15 @@ def run_full_migration(cfg: dict):
             }
 
             log_msg(f"Restoring schema to: {restore_dest_server} | {restore_dest_db}")
+            log_msg(
+                "Post-data flags: programmables=%s, constraints=%s, indexes=%s, primary_keys_script=%s"
+                % (
+                    cfg["restore_programmables"],
+                    cfg["restore_constraints"],
+                    cfg["restore_indexes"],
+                    effective_restore_primary_keys(restore_cfg),
+                )
+            )
             restore_summary = run_restore(restore_cfg)
 
             summary["steps"]["restore"]["status"] = restore_summary["status"]

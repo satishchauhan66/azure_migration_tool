@@ -21,6 +21,13 @@ from gui.utils.server_config import (
 )
 from gui.utils.database_utils import list_databases
 try:
+    from gui.utils import input_history as input_history_mod
+except ImportError:
+    try:
+        from azure_migration_tool.gui.utils import input_history as input_history_mod
+    except ImportError:
+        input_history_mod = None
+try:
     from gui.utils.tooltip import add_tooltip
 except ImportError:
     def add_tooltip(widget, text, delay_ms=500):
@@ -122,6 +129,7 @@ class ConnectionWidget:
         self.server_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.server_combo.bind("<<ComboboxSelected>>", self._on_server_selected)
         self.server_combo.bind("<FocusOut>", self._on_server_focus_out)
+        self.server_combo.configure(postcommand=self._refresh_server_list)
         
         # Save/Delete buttons for server
         btn_frame = ttk.Frame(server_frame)
@@ -192,11 +200,17 @@ class ConnectionWidget:
         self.auth_var.trace_add("write", self._sync_auth_display)
         self._auth_row_start = row_start
         
-        # User row (hidden when Windows auth is selected)
+        # User row (hidden when Windows auth is selected) — Combobox for recent usernames
         self.user_label = tk.Label(self.frame, text="User:")
         self.user_label.grid(row=row_start+6, column=0, sticky=tk.W, pady=5)
-        self.user_entry = ttk.Entry(self.frame, textvariable=self.user_var, width=40)
-        self.user_entry.grid(row=row_start+6, column=1, pady=5, padx=5, sticky=tk.EW)
+        self.user_combo = ttk.Combobox(
+            self.frame,
+            textvariable=self.user_var,
+            width=40,
+            state="normal",
+            postcommand=self._on_user_combo_postcommand,
+        )
+        self.user_combo.grid(row=row_start+6, column=1, pady=5, padx=5, sticky=tk.EW)
         
         # Password row (hidden when Windows auth is selected)
         self.password_label = tk.Label(self.frame, text="Password:")
@@ -214,8 +228,9 @@ class ConnectionWidget:
         # Configure column weights
         self.frame.columnconfigure(1, weight=1)
         
-        # Load saved servers
+        # Load saved servers + recent hosts / users
         self._refresh_server_list()
+        self._on_user_combo_postcommand()
     
     def _on_db_type_combo_selected(self, event=None):
         """When user selects a database type from the combo, store internal value and update UI."""
@@ -337,6 +352,7 @@ class ConnectionWidget:
                 conn.close()
                 
                 def update_ui():
+                    self._record_input_history_success()
                     self.schema_combo['values'] = schemas
                     # Restore previous value or set to user's ID
                     if current_schema and current_schema in schemas:
@@ -371,7 +387,7 @@ class ConnectionWidget:
             self.auth_label.grid_remove()
             self.auth_combo.grid_remove()
             self.user_label.grid()
-            self.user_entry.grid()
+            self.user_combo.grid()
             self.password_label.grid()
             self.password_entry.grid()
             self.windows_auth_hint.grid_remove()
@@ -381,31 +397,71 @@ class ConnectionWidget:
             if auth == "windows":
                 # Windows auth uses current Windows identity; no username/password
                 self.user_label.grid_remove()
-                self.user_entry.grid_remove()
+                self.user_combo.grid_remove()
                 self.password_label.grid_remove()
                 self.password_entry.grid_remove()
                 self.windows_auth_hint.grid()
+            elif auth == "entra_mfa":
+                # Interactive / MFA — user principal only, no password field
+                self.windows_auth_hint.grid_remove()
+                self.user_label.grid()
+                self.user_combo.grid()
+                self.password_label.grid_remove()
+                self.password_entry.grid_remove()
             else:
                 self.windows_auth_hint.grid_remove()
                 self.user_label.grid()
-                self.user_entry.grid()
+                self.user_combo.grid()
                 self.password_label.grid()
                 self.password_entry.grid()
     
     def _refresh_server_list(self):
-        """Refresh the server dropdown with saved servers."""
+        """Refresh server dropdown: saved profiles + app-wide recent hostnames."""
         saved_servers = get_server_display_names()
-        current_value = self.server_var.get()
-        
-        # Update combobox values
-        if saved_servers:
-            self.server_combo['values'] = saved_servers
-        else:
-            self.server_combo['values'] = []
-        
-        # Restore current value if it's still valid
-        if current_value and current_value in saved_servers:
+        current_value = (self.server_var.get() or "").strip()
+        hist: list = []
+        if input_history_mod:
+            try:
+                hist = input_history_mod.get_servers()
+            except Exception:
+                hist = []
+        seen = set()
+        merged = []
+        for x in list(saved_servers) + list(hist):
+            t = (x or "").strip()
+            if not t:
+                continue
+            tl = t.lower()
+            if tl in seen:
+                continue
+            seen.add(tl)
+            merged.append(t)
+        self.server_combo["values"] = tuple(merged) if merged else ()
+        if current_value and current_value in merged:
             self.server_var.set(current_value)
+
+    def _on_user_combo_postcommand(self):
+        if input_history_mod:
+            try:
+                self.user_combo["values"] = tuple(input_history_mod.get_usernames())
+            except Exception:
+                pass
+
+    def _record_input_history_success(self):
+        """After a successful connection, remember server and user (no passwords)."""
+        if not input_history_mod:
+            return
+        try:
+            s = (self.server_var.get() or "").strip()
+            if s:
+                input_history_mod.record_server(s)
+            auth = (self.auth_var.get() or "").strip()
+            if auth != "windows":
+                u = (self.user_var.get() or "").strip()
+                if u:
+                    input_history_mod.record_username(u)
+        except Exception:
+            pass
     
     def _on_server_selected(self, event=None):
         """Handle server selection from dropdown."""
@@ -455,7 +511,7 @@ class ConnectionWidget:
                 # Clear database list for SQL Server (will be populated when clicked)
                 self.db_combo['values'] = []
                 self.db_var.set("")
-            
+            self._record_input_history_success()
             print(f"DEBUG: Loaded saved server config - Server: '{server}', Auth: '{auth}', User: '{user}', DB Type: '{db_type}', Database: '{database}', Schema: '{schema}'")
     
     def _on_server_focus_out(self, event=None):
@@ -636,6 +692,7 @@ class ConnectionWidget:
                         conn.close()
                         # Connection successful - keep the database name
                         def show_success():
+                            self._record_input_history_success()
                             self.db_var.set(test_db)
                             self.db_combo['values'] = [test_db]  # Add to dropdown for convenience
                             messagebox.showinfo(
@@ -679,6 +736,7 @@ class ConnectionWidget:
     def _update_database_list(self, databases, previous_value=None):
         """Update database dropdown with list of databases."""
         try:
+            self._record_input_history_success()
             print(f"DEBUG: Updating database list with {len(databases)} databases")
             
             # Update the values list
@@ -830,6 +888,7 @@ class ConnectionWidget:
             )
             
             if success:
+                self._record_input_history_success()
                 messagebox.showinfo("Success", f"Server configuration saved!\n\nDatabase: {database}\nSchema: {schema}" if db_type == "db2" else "Server configuration saved!")
                 self._refresh_server_list()
             else:

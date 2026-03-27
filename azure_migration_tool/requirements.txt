@@ -9,6 +9,7 @@ openpyxl>=3.0.0
 msal>=1.20.0
 azure-identity>=1.15.0
 azure-mgmt-datafactory>=4.0.0
+azure-keyvault-secrets>=4.7.0
 
 # .bak backup to Azure Blob (on-prem to blob)
 azure-storage-blob>=12.19.0

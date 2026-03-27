@@ -70,21 +70,32 @@ class MainWindow:
         self.shared_dest_auth = tk.StringVar(value="entra_mfa")
         self.shared_dest_user = tk.StringVar()
         self.shared_dest_password = tk.StringVar()
+
+        # Azure Blob (.bak <-> Blob) — same vars on every tab that needs them
+        try:
+            from gui.utils.blob_config import load_blob_settings
+        except ImportError:
+            from azure_migration_tool.gui.utils.blob_config import load_blob_settings
+
+        _blob_conn, _blob_cont = load_blob_settings()
+        self.shared_blob_connection_string = tk.StringVar(value=_blob_conn)
+        self.shared_blob_container = tk.StringVar(value=_blob_cont)
         
         # Create menu bar
         self._create_menu()
         
         # Lazy-loaded tabs: create content only when tab is first selected
-        # Order: Projects, Backup & Restore, ... Data Validation
-        # ADF Pipeline and IDENTITY (CDC) are under Tools > Experiments (POC) — separate windows.
+        # Order: Projects, Backup & Restore, Full Migration, ADF Migration, ...
+        # IDENTITY (CDC) is under Tools > Experiments (POC) — separate window.
         self._project_path = None
         self._poc_experiment_tabs = []  # tab instances opened from Experiments menu (for set_project_path)
-        self._tab_created = {i: False for i in range(7)}
+        self._tab_created = {i: False for i in range(8)}
         self._tab_instances = {}
         self._tab_labels = [
             "Projects",
             "Backup & Restore",
             "Full Migration",
+            "ADF Migration",
             "Schema Backup/Migration",
             "Data Migration",
             "Schema Validation",
@@ -95,9 +106,9 @@ class MainWindow:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Add 7 placeholder frames (one per tab)
+        # Add 8 placeholder frames (one per tab)
         self._tab_placeholders = []
-        for i in range(7):
+        for i in range(8):
             ph = ttk.Frame(self.notebook)
             lbl = tk.Label(ph, text="Loading...", font=("Arial", 10), fg="gray")
             lbl.pack(expand=True, pady=50)
@@ -135,7 +146,7 @@ class MainWindow:
             idx = self.notebook.index(self.notebook.select())
         except Exception:
             return
-        if idx is None or idx < 0 or idx >= 7 or self._tab_created.get(idx, False):
+        if idx is None or idx < 0 or idx >= 8 or self._tab_created.get(idx, False):
             return
         self._ensure_tab_created(idx)
     
@@ -151,6 +162,7 @@ class MainWindow:
             ("azure_migration_tool.gui.tabs.project_tab", "ProjectTab"),
             ("azure_migration_tool.gui.tabs.backup_restore_tab", "BackupRestoreTab"),
             ("azure_migration_tool.gui.tabs.full_migration_tab", "FullMigrationTab"),
+            ("azure_migration_tool.gui.tabs.adf_trigger_tab", "ADFTriggerTab"),
             ("azure_migration_tool.gui.tabs.schema_tab", "SchemaTab"),
             ("azure_migration_tool.gui.tabs.data_migration_tab", "DataMigrationTab"),
             ("azure_migration_tool.gui.tabs.schema_validation_tab", "SchemaValidationTab"),
@@ -199,7 +211,8 @@ class MainWindow:
                 "3. Enter your source and destination database details.\n"
                 "4. Click Run to migrate.\n\n"
                 "Need help? Use Help > About or Tools > Check what's installed.\n\n"
-                "POC features: Tools > Experiments (POC) — ADF Pipeline, IDENTITY (CDC)."
+                "ADF migration: use the 'ADF Migration' tab.\n"
+                "POC features: Tools > Experiments (POC) — IDENTITY (CDC)."
             )
             messagebox.showinfo("Getting started", msg)
             os.makedirs(welcome_dir, exist_ok=True)
@@ -239,12 +252,9 @@ class MainWindow:
         tools_menu.add_command(label="Legacy Data Validation...", command=self._open_legacy_data_window)
         tools_menu.add_command(label="Compare DB2 (Schema)...", command=self._open_compare_db2_window)
         tools_menu.add_separator()
+        tools_menu.add_command(label="ADF Migration...", command=self._goto_adf_tab)
         experiments_menu = tk.Menu(tools_menu, tearoff=0)
         tools_menu.add_cascade(label="Experiments (POC)", menu=experiments_menu)
-        experiments_menu.add_command(
-            label="ADF Pipeline...",
-            command=self._open_adf_pipeline_experiment,
-        )
         experiments_menu.add_command(
             label="IDENTITY (CDC)...",
             command=self._open_identity_cdc_experiment,
@@ -295,14 +305,10 @@ class MainWindow:
             "Compare DB2 (Schema)",
         )
 
-    def _open_adf_pipeline_experiment(self):
-        """Open ADF Pipeline in a separate window (Tools > Experiments POC)."""
-        self._open_tool_window(
-            "azure_migration_tool.gui.tabs.adf_trigger_tab",
-            "ADFTriggerTab",
-            "ADF Pipeline [POC]",
-            poc_experiment=True,
-        )
+    def _goto_adf_tab(self):
+        """Switch to the ADF Migration tab (index 3)."""
+        self._ensure_tab_created(3)
+        self.notebook.select(3)
 
     def _open_identity_cdc_experiment(self):
         """Open IDENTITY (CDC) in a separate window (Tools > Experiments POC)."""

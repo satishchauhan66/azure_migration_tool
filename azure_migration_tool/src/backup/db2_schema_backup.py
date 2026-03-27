@@ -90,12 +90,15 @@ def run_db2_backup(cfg: dict) -> dict:
     schema_filter = (cfg.get("schema") or "").strip() or None
 
     paths = setup_run_folders(backup_root, host, database, run_id)
+    run_root_resolved = str(paths["run_root"].resolve())
     log_file = paths["logs_dir"] / f"run_{run_id}.log"
     logger = setup_logger(log_file, "db2_schema_backup")
 
     start = time.time()
     summary = {
         "run_id": run_id,
+        "run_root": run_root_resolved,
+        "backup_path": run_root_resolved,
         "server": host,
         "database": database,
         "source_type": "db2",
@@ -245,7 +248,13 @@ def run_db2_backup(cfg: dict) -> dict:
     finally:
         summary["ended_utc"] = utc_iso()
         summary["duration_seconds"] = round(time.time() - start, 3)
-        paths["summary_file"].write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        run_root_str = str(paths["run_root"].resolve())
+        summary["run_root"] = run_root_str
+        summary["backup_path"] = run_root_str
+        try:
+            paths["summary_file"].write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        except (TypeError, ValueError) as ser_exc:
+            logger.warning("Could not serialize run summary JSON: %s", ser_exc)
         logger.info("Run status: %s", summary["status"])
         logger.info("Duration: %s seconds", summary["duration_seconds"])
 

@@ -1027,6 +1027,13 @@ class SchemaTab:
                 if summary["status"] == "success":
                     self.backup_log.insert(tk.END, f"\n[OK] Backup completed successfully!\n")
                     self.backup_log.insert(tk.END, f"Run ID: {summary.get('run_id', 'N/A')}\n")
+                    if not is_db2:
+                        self.backup_log.insert(
+                            tk.END,
+                            "Note: Default backup uses raw CREATE TABLE (no inline PK/column defaults). "
+                            "After data load, run restore with Constraints and/or Indexes to apply primary_keys.sql, "
+                            "indexes, checks, defaults, and FKs.\n",
+                        )
                     
                     # Auto-fill restore backup path with the backup that was just created
                     # Construct backup path from summary data

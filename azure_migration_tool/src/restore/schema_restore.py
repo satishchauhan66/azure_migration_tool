@@ -457,6 +457,19 @@ def execute_sql_file(
     return result
 
 
+def effective_restore_primary_keys(cfg: dict) -> bool:
+    """
+    Whether to run primary_keys.sql.
+
+    If restore_primary_keys is set explicitly, that wins. Otherwise PKs are applied only when
+    restoring constraints and/or indexes — so a tables-only restore leaves heaps for bulk load;
+    a second restore (or full restore with those flags) adds PKs before FKs/index work.
+    """
+    if "restore_primary_keys" in cfg:
+        return bool(cfg["restore_primary_keys"])
+    return bool(cfg.get("restore_constraints", False) or cfg.get("restore_indexes", False))
+
+
 def run_restore(cfg: dict):
     """Run schema restore with provided configuration"""
     run_id = utc_ts_compact()
@@ -519,6 +532,7 @@ def run_restore(cfg: dict):
     logger.info("Restore programmables: %s", cfg["restore_programmables"])
     logger.info("Restore constraints: %s", cfg["restore_constraints"])
     logger.info("Restore indexes: %s", cfg["restore_indexes"])
+    logger.info("Restore primary keys: %s (effective)", effective_restore_primary_keys(cfg))
     logger.info("Continue on error: %s", cfg["continue_on_error"])
     logger.info("Mirror source (no Azure filter): %s", cfg.get("mirror_source", False))
     logger.info("Dry run: %s", cfg["dry_run"])
@@ -606,9 +620,18 @@ def run_restore(cfg: dict):
             logger.info("Connected. DB=%s Login=%s ServerTime=%s", db_name, login_name, server_time)
 
             # If restoring tables, ensure all required schemas exist first
-            if cfg.get("restore_tables", False) and "tables_file" in backup_paths:
+            tables_sql_path = None
+            if cfg.get("restore_tables", False):
+                use_no_pk = cfg.get("use_tables_no_pk", False)
+                if use_no_pk and "tables_no_pk_file" in backup_paths:
+                    tables_sql_path = backup_paths["tables_no_pk_file"]
+                elif "tables_file" in backup_paths:
+                    tables_sql_path = backup_paths["tables_file"]
+                elif "tables_no_pk_file" in backup_paths:
+                    tables_sql_path = backup_paths["tables_no_pk_file"]
+            if tables_sql_path is not None:
                 logger.info("Extracting schemas from tables SQL file...")
-                tables_sql = backup_paths["tables_file"].read_text(encoding="utf-8")
+                tables_sql = tables_sql_path.read_text(encoding="utf-8")
                 required_schemas = extract_schemas_from_sql(tables_sql)
                 if required_schemas:
                     logger.info("Found schemas in backup: %s", ", ".join(sorted(required_schemas)))
@@ -649,8 +672,8 @@ def run_restore(cfg: dict):
                     restore_order.append(("tables_no_pk_file", "TABLES (without PKs)", backup_paths["tables_no_pk_file"]))
                     logger.warning("Using tables_no_pk_file - primary keys will need to be restored separately before foreign keys")
                 elif "tables_file" in backup_paths:
-                    restore_order.append(("tables_file", "TABLES (with PKs)", backup_paths["tables_file"]))
-                    logger.info("Using tables_file with primary keys included")
+                    restore_order.append(("tables_file", "TABLES", backup_paths["tables_file"]))
+                    logger.info("Using tables_file for table DDL")
                 elif "tables_no_pk_file" in backup_paths:
                     # Fallback to no_pk version if tables_file doesn't exist
                     restore_order.append(("tables_no_pk_file", "TABLES (without PKs)", backup_paths["tables_no_pk_file"]))
@@ -660,11 +683,13 @@ def run_restore(cfg: dict):
                     # This compares source (backup) vs destination (current) and applies ALTER statements
                     if cfg.get("fix_nullability", True):  # Default to True
                         logger.info("Nullability fix enabled - will check and fix mismatches after table restore")
-                        restore_order.append(("nullability_fix", "NULLABILITY_FIX", backup_paths["tables_file"]))
+                        ref_tables = backup_paths.get("tables_file") or backup_paths.get("tables_no_pk_file")
+                        if ref_tables:
+                            restore_order.append(("nullability_fix", "NULLABILITY_FIX", ref_tables))
 
             # Restore Primary Keys BEFORE indexes and foreign keys
             # (PKs create clustered indexes which are needed for foreign key references)
-            if "primary_keys_file" in backup_paths:
+            if effective_restore_primary_keys(cfg) and "primary_keys_file" in backup_paths:
                 restore_order.append(("primary_keys_file", "PRIMARY_KEYS", backup_paths["primary_keys_file"]))
                 logger.info("Primary keys will be restored before indexes and foreign keys")
 

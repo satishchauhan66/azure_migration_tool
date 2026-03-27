@@ -20,6 +20,7 @@ from .exporters import (
     export_extended_properties,
     export_foreign_keys,
     export_indexes,
+    export_primary_keys,
     export_sequences,
     export_synonyms,
     export_triggers,
@@ -67,6 +68,7 @@ def setup_run_folders(backup_root: Path, server: str, db: str, run_id: str):
             "checks_file": paths["cx_dir"] / "check_constraints.sql",
             "defaults_file": paths["cx_dir"] / "default_constraints.sql",
             "indexes_file": paths["cx_dir"] / "indexes.sql",
+            "primary_keys_file": paths["cx_dir"] / "primary_keys.sql",
             "extended_properties_file": paths["cx_dir"] / "extended_properties.sql",
         }
     )
@@ -78,6 +80,7 @@ def run_backup(cfg: dict):
     run_id = utc_ts_compact()
     backup_root = Path(cfg["backup_root"])
     paths = setup_run_folders(backup_root, cfg["server"], cfg["database"], run_id)
+    run_root_resolved = str(paths["run_root"].resolve())
 
     log_file = paths["logs_dir"] / f"run_{run_id}.log"
     logger = setup_logger(log_file, "schema_backup")
@@ -86,6 +89,8 @@ def run_backup(cfg: dict):
 
     summary = {
         "run_id": run_id,
+        "run_root": run_root_resolved,
+        "backup_path": run_root_resolved,
         "server": cfg["server"],
         "database": cfg["database"],
         "auth": cfg["auth"],
@@ -123,6 +128,16 @@ def run_backup(cfg: dict):
     logger.info("Python exe: %s", sys.executable)
     logger.info("Output root: %s", str(paths["run_root"].resolve()))
     logger.info("Log file: %s", str(log_file.resolve()))
+
+    # Default True: migration-friendly DDL (heaps + primary_keys.sql / default_constraints for post-data restore).
+    raw_table_ddl = bool(cfg.get("raw_table_ddl", True))
+    if raw_table_ddl:
+        logger.info(
+            "raw_table_ddl=True (default): CREATE TABLE omits inline PK and column DEFAULTs; "
+            "primary_keys.sql is emitted for restore after data load. Set raw_table_ddl=False for inline PK/defaults."
+        )
+    else:
+        logger.info("raw_table_ddl=False: inline PRIMARY KEY and column DEFAULTs in CREATE TABLE.")
 
     try:
         driver = pick_sql_driver(logger)
@@ -172,7 +187,14 @@ def run_backup(cfg: dict):
                 pk = fetch_primary_key(cur, schema_name, table_name)
                 row_count = fetch_row_count(cur, schema_name, table_name)
 
-                table_sql, table_warning = build_create_table_sql(schema_name, table_name, cols, pk)
+                table_sql, table_warning = build_create_table_sql(
+                    schema_name,
+                    table_name,
+                    cols,
+                    pk,
+                    include_primary_key=not raw_table_ddl,
+                    include_inline_defaults=not raw_table_ddl,
+                )
                 
                 # Log warning if any
                 if table_warning:
@@ -206,6 +228,16 @@ def run_backup(cfg: dict):
 
             paths["tables_all_file"].write_text("\n".join(tables_all), encoding="utf-8")
             logger.info("Wrote tables script: %s", str(paths["tables_all_file"].resolve()))
+
+            if raw_table_ddl:
+                pk_sql = sql_header(
+                    "03 - PRIMARY KEYS (run after data load)",
+                    cfg["server"],
+                    cfg["database"],
+                    run_id,
+                ) + export_primary_keys(cur)
+                paths["primary_keys_file"].write_text(pk_sql, encoding="utf-8")
+                logger.info("Wrote primary keys script: %s", str(paths["primary_keys_file"].resolve()))
 
             # 2) SEQUENCES AND SYNONYMS (run before tables/views that use them)
             logger.info("Exporting sequences...")
@@ -319,7 +351,14 @@ def run_backup(cfg: dict):
     finally:
         summary["ended_utc"] = utc_iso()
         summary["duration_seconds"] = round(time.time() - start, 3)
-        paths["summary_file"].write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        # Run folder path (callers such as ADF Migration and restore expect this)
+        run_root_str = str(paths["run_root"].resolve())
+        summary["run_root"] = run_root_str
+        summary["backup_path"] = run_root_str
+        try:
+            paths["summary_file"].write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        except (TypeError, ValueError) as ser_exc:
+            logger.warning("Could not serialize run summary JSON: %s", ser_exc)
 
         logger.info("Run status: %s", summary["status"])
         logger.info("Duration: %s seconds", summary["duration_seconds"])

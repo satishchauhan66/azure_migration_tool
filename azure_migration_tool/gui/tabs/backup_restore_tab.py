@@ -10,7 +10,6 @@ from pathlib import Path
 import threading
 import sys
 import os
-import json
 
 parent_dir = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(parent_dir))
@@ -27,27 +26,11 @@ class BackupRestoreTab:
         self.frame = ttk.Frame(parent)
         self.project_path = None
 
-        # Shared blob connection vars (used by both Backup-to-Blob and Restore sub-tabs)
-        self.blob_conn_var = tk.StringVar()
-        self.blob_container_var = tk.StringVar(value="db2-stage")
-        self._load_blob_settings_into_shared()
+        # Blob settings: app-wide (MainWindow) so every screen uses the same connection string
+        self.blob_conn_var = self.main_window.shared_blob_connection_string
+        self.blob_container_var = self.main_window.shared_blob_container
 
         self._create_widgets()
-
-    def _load_blob_settings_into_shared(self):
-        """Pre-load blob connection string and container into shared vars."""
-        try:
-            path = self._get_bak_blob_config_path()
-            if not path.exists():
-                return
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data.get("blob_connection_string"), str):
-                self.blob_conn_var.set(data["blob_connection_string"])
-            if isinstance(data.get("container"), str):
-                self.blob_container_var.set(data["container"])
-        except Exception:
-            pass
 
     def set_project_path(self, project_path):
         """Set the current project path."""
@@ -94,16 +77,6 @@ class BackupRestoreTab:
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-    def _get_bak_blob_config_path(self):
-        """Path to saved blob connection string (per-user app data)."""
-        if os.name == "nt":
-            base = os.environ.get("APPDATA", os.path.expanduser("~"))
-            base = Path(base) / "AzureMigrationTool"
-        else:
-            base = Path(os.path.expanduser("~")) / ".azure_migration_tool"
-        base.mkdir(parents=True, exist_ok=True)
-        return base / "blob_settings.json"
 
     def _create_bak_to_blob_widgets(self, parent):
         """On-prem .bak backup to Azure Blob (BACKUP TO URL)."""
@@ -172,16 +145,18 @@ class BackupRestoreTab:
     def _save_bak_blob_settings(self):
         """Save current blob connection string and container to disk."""
         try:
-            path = self._get_bak_blob_config_path()
-            data = {
-                "blob_connection_string": self.bak_blob_conn_var.get().strip(),
-                "container": (self.bak_container_var.get() or "db2-stage").strip() or "db2-stage",
-            }
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            try:
+                from gui.utils.blob_config import save_blob_settings
+            except ImportError:
+                from azure_migration_tool.gui.utils.blob_config import save_blob_settings
+
+            save_blob_settings(
+                self.bak_blob_conn_var.get(),
+                self.bak_container_var.get() or "db2-stage",
+            )
             messagebox.showinfo(
                 "Saved",
-                "Blob connection string and container have been saved.\nThey will be loaded next time you open this tab.",
+                "Blob connection string and container have been saved.\nThey load automatically next app start.",
             )
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
@@ -260,7 +235,10 @@ class BackupRestoreTab:
 
         step1 = ttk.LabelFrame(parent, text="Step 1: Azure Blob storage", padding=10)
         step1.pack(fill=tk.X, padx=5, pady=5)
-        tk.Label(step1, text="Connection string (shared with .bak to Blob tab):").pack(anchor=tk.W)
+        tk.Label(
+            step1,
+            text="Connection string (same as .bak to Blob — shared across the app):",
+        ).pack(anchor=tk.W)
         self.restore_blob_conn_var = self.blob_conn_var
         ttk.Entry(step1, textvariable=self.restore_blob_conn_var, width=70).pack(fill=tk.X, pady=2)
         tk.Label(step1, text="Container name (e.g. db2-stage):").pack(anchor=tk.W, pady=(8, 0))
@@ -347,13 +325,15 @@ class BackupRestoreTab:
     def _save_restore_blob_settings(self):
         """Save restore blob connection string and container (same file as .bak to Blob)."""
         try:
-            path = self._get_bak_blob_config_path()
-            data = {
-                "blob_connection_string": self.restore_blob_conn_var.get().strip(),
-                "container": (self.restore_container_var.get() or "db2-stage").strip() or "db2-stage",
-            }
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            try:
+                from gui.utils.blob_config import save_blob_settings
+            except ImportError:
+                from azure_migration_tool.gui.utils.blob_config import save_blob_settings
+
+            save_blob_settings(
+                self.restore_blob_conn_var.get(),
+                self.restore_container_var.get() or "db2-stage",
+            )
             messagebox.showinfo("Saved", "Blob connection string and container have been saved.")
         except Exception as e:
             messagebox.showerror("Save failed", str(e))

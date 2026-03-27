@@ -117,10 +117,21 @@ def fetch_row_count(cur, schema_name: str, table_name: str) -> int:
     return int(r[0] or 0)
 
 
-def build_create_table_sql(schema_name: str, table_name: str, cols, pk_rows) -> Tuple[str, Optional[str]]:
+def build_create_table_sql(
+    schema_name: str,
+    table_name: str,
+    cols,
+    pk_rows,
+    *,
+    include_primary_key: bool = True,
+    include_inline_defaults: bool = True,
+) -> Tuple[str, Optional[str]]:
     """
-    Build CREATE TABLE SQL statement
-    
+    Build CREATE TABLE SQL statement.
+
+    When include_primary_key is False, omit inline PRIMARY KEY (use exported primary_keys.sql after load).
+    When include_inline_defaults is False, omit inline DEFAULT constraints (use default_constraints.sql after load).
+
     Returns:
         Tuple of (sql_text, warning_message or None)
     """
@@ -163,7 +174,7 @@ def build_create_table_sql(schema_name: str, table_name: str, cols, pk_rows) -> 
         col_def += " NULL" if r.is_nullable else " NOT NULL"
 
         # Defaults inline: use source constraint name so restore is a mirror (no "renamed" defaults)
-        if r.default_definition_str and str(r.default_definition_str).strip():
+        if include_inline_defaults and r.default_definition_str and str(r.default_definition_str).strip():
             df_name = getattr(r, "default_constraint_name", None) or f"DF_{table_name}_{r.column_name}"
             if df_name and str(df_name).strip():
                 col_def += f" CONSTRAINT {qident(str(df_name).strip())} DEFAULT {r.default_definition_str}"
@@ -176,7 +187,7 @@ def build_create_table_sql(schema_name: str, table_name: str, cols, pk_rows) -> 
         warning = f"Table {schema_name}.{table_name}: No valid columns to create"
         return "", warning
 
-    if pk_rows:
+    if include_primary_key and pk_rows:
         # Validate primary key columns exist in table columns
         pk_col_names = [x.col_name for x in pk_rows if x.col_name]
         table_col_names = [r.column_name for r in cols if r.column_name]

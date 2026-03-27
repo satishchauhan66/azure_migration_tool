@@ -1,0 +1,1930 @@
+{
+    "name": "ChildPipelineTableLoad_LACERA1",
+    "properties": {
+        "activities": [
+            {
+                "name": "usp_InsertADFPipelineInfo",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "7.00:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": "[dbo].[usp_InsertADFPipelineInfo]",
+                    "storedProcedureParameters": {
+                        "ADFPipelineID": {
+                            "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "ADFPipelineName": {
+                            "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "ADFPipelineTriggername": {
+                            "value": {
+                                "value": "@pipeline().TriggerName",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "AzureDataFactoryName": {
+                            "value": {
+                                "value": "@pipeline().DataFactory",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "CreatedBy": {
+                            "value": {
+                                "value": "@pipeline().TriggerType",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "CreatedDateTime": {
+                            "value": {
+                                "value": "@pipeline().TriggerTime",
+                                "type": "Expression"
+                            },
+                            "type": "DateTime"
+                        },
+                        "TableName": {
+                            "value": {
+                                "value": "@pipeline().parameters.parm_TargetTableName",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "Master_SQLMigrationConfigDatabase",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                        "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                    }
+                }
+            },
+            {
+                "name": "usp_LogException_ChildPipeline",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "usp_InsertADFPipelineInfo",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "7.00:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": "usp_LogException",
+                    "storedProcedureParameters": {
+                        "ADFPipelineName": {
+                            "value": {
+                                "value": "@pipeline().Pipeline",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "AzureDataFactoryName": {
+                            "value": {
+                                "value": "@pipeline().DataFactory",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "AzureDataFactoryPipelineId": {
+                            "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "CreatedBy": {
+                            "value": {
+                                "value": "@pipeline().TriggerName",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "CreatedDateTime": {
+                            "value": {
+                                "value": "@pipeline().TriggerTime",
+                                "type": "Expression"
+                            },
+                            "type": "DateTime"
+                        },
+                        "ErrorCode": {
+                            "value": {
+                                "value": "@activity('usp_InsertADFPipelineInfo').Error.ErrorCode",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "ErrorMessage": {
+                            "value": {
+                                "value": "@activity('usp_InsertADFPipelineInfo').Error.Message",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "FailedActivity": {
+                            "value": "Start of Child Pipeline failed",
+                            "type": "String"
+                        },
+                        "FailureType": {
+                            "value": {
+                                "value": "@activity('usp_InsertADFPipelineInfo').Error.Details",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "Master_SQLMigrationConfigDatabase",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                        "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                    }
+                }
+            },
+            {
+                "name": "Evaluate Load Types",
+                "type": "Switch",
+                "dependsOn": [
+                    {
+                        "activity": "Concat target schema and Table Name",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "on": {
+                        "value": "@pipeline().parameters.parm_LoadType",
+                        "type": "Expression"
+                    },
+                    "cases": [
+                        {
+                            "value": "FullLoad",
+                            "activities": [
+                                {
+                                    "name": "Copy_FullLoad",
+                                    "type": "Copy",
+                                    "dependsOn": [],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "source": {
+                                            "type": "AzureSqlSource",
+                                            "queryTimeout": "02:00:00",
+                                            "partitionOption": "None"
+                                        },
+                                        "sink": {
+                                            "type": "AzureSqlSink",
+                                            "disableMetricsCollection": false
+                                        },
+                                        "enableStaging": false,
+                                        "parallelCopies": 32,
+                                        "enableSkipIncompatibleRow": true,
+                                        "translator": {
+                                            "type": "TabularTranslator",
+                                            "typeConversion": true,
+                                            "typeConversionSettings": {
+                                                "allowDataTruncation": true,
+                                                "treatBooleanAsNumber": false
+                                            }
+                                        }
+                                    },
+                                    "inputs": [
+                                        {
+                                            "referenceName": "SourceSqlDataset",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "SchemaName": {
+                                                    "value": "@pipeline().parameters.parm_SrcSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "TableName": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "SourceServer": {
+                                                    "value": "@pipeline().parameters.param_srcDBServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "SourceDatabase": {
+                                                    "value": "@pipeline().parameters.param_srcDatabaseName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ],
+                                    "outputs": [
+                                        {
+                                            "referenceName": "SQLDB_DSNINJA_DataSet21",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "TargetSchemaName": {
+                                                    "value": "@pipeline().parameters.parm_TargetSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetTableName": {
+                                                    "value": "@pipeline().parameters.parm_TargetTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetDbServerName": {
+                                                    "value": "@pipeline().parameters.param_TargetDBServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetDatabaseName": {
+                                                    "value": "@pipeline().parameters.param_TargetDatabaseName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "usp_Exception_FullLoad",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy_FullLoad",
+                                            "dependencyConditions": [
+                                                "Failed"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "usp_LogException",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryPipelineId": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerType",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerTime",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "ErrorCode": {
+                                                "value": {
+                                                    "value": "@activity('Copy_FullLoad').Error.ErrorCode",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ErrorMessage": {
+                                                "value": {
+                                                    "value": "@activity('Copy_FullLoad').Error.Message",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "FailedActivity": {
+                                                "value": "Full Load Failed",
+                                                "type": "String"
+                                            },
+                                            "FailureType": {
+                                                "value": {
+                                                    "value": "@activity('Copy_FullLoad').Error.Details",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                },
+                                {
+                                    "name": "usp_Success_Full_Load",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy_FullLoad",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "dbo.usp_Success_Full_Load",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineID": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerType",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerTime",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "DataReadInBytes": {
+                                                "value": {
+                                                    "value": "@activity('Copy_FullLoad').output.dataRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Decimal"
+                                            },
+                                            "DataWrittenInBytes": {
+                                                "value": {
+                                                    "value": "@activity('Copy_FullLoad').output.dataWritten",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Decimal"
+                                            },
+                                            "DurationInSeconds": {
+                                                "value": {
+                                                    "value": "@activity('Copy_FullLoad').output.copyDuration",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "FilesWritten": {
+                                                "value": {
+                                                    "value": "0",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "MigratedRowCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy_FullLoad').output.rowsCopied",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "RowsRead": {
+                                                "value": {
+                                                    "value": "@activity('Copy_FullLoad').output.rowsRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "TransactionalDate": {
+                                                "value": {
+                                                    "value": "@String(variables('v_BeginTimeStamp'))",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "string"
+                                            },
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ADFPipelineTriggername": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "value": "Incremental",
+                            "activities": [
+                                {
+                                    "name": "CopyIncrementalData",
+                                    "type": "Copy",
+                                    "dependsOn": [],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "source": {
+                                            "type": "AzureSqlSource",
+                                            "queryTimeout": "02:00:00",
+                                            "partitionOption": "None"
+                                        },
+                                        "sink": {
+                                            "type": "AzureSqlSink"
+                                        },
+                                        "enableStaging": false,
+                                        "parallelCopies": 4,
+                                        "translator": {
+                                            "type": "TabularTranslator",
+                                            "typeConversion": true,
+                                            "typeConversionSettings": {
+                                                "allowDataTruncation": true,
+                                                "treatBooleanAsNumber": false
+                                            }
+                                        }
+                                    },
+                                    "inputs": [
+                                        {
+                                            "referenceName": "SourceSqlDataset",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "SchemaName": {
+                                                    "value": "@pipeline().parameters.parm_SrcSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "TableName": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "SourceServer": {
+                                                    "value": "@pipeline().parameters.param_srcDBServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "SourceDatabase": {
+                                                    "value": "@pipeline().parameters.param_srcDatabaseName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ],
+                                    "outputs": [
+                                        {
+                                            "referenceName": "SQLDB_DSNINJA_DataSet21",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "TargetSchemaName": {
+                                                    "value": "@pipeline().parameters.parm_TargetSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetTableName": {
+                                                    "value": "@pipeline().parameters.parm_TargetTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetDbServerName": {
+                                                    "value": "@pipeline().parameters.param_TargetDBServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetDatabaseName": {
+                                                    "value": "@pipeline().parameters.param_TargetDatabaseName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "usp_ExceptionUpatingWatermark",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Update WaterMark Value",
+                                            "dependencyConditions": [
+                                                "Failed"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[usp_InsertPipelineExceptionDetails]",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryPipelineId": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@utcnow()",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "ErrorCode": {
+                                                "value": {
+                                                    "value": "@activity('Update WaterMark Value').Error.ErrorCode",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ErrorMessage": {
+                                                "value": {
+                                                    "value": "@activity('Update WaterMark Value').Error.Message",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "FailedActivity": {
+                                                "value": "Update WaterMark Value for Incremental",
+                                                "type": "String"
+                                            },
+                                            "FailureType": {
+                                                "value": {
+                                                    "value": "@activity('Update WaterMark Value').Error.Details",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                },
+                                {
+                                    "name": "usp_Succesfull_IncrementalLoad",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "CopyIncrementalData",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "dbo.usp_Succesfull_IncrementalLoad",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineID": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerType",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerTime",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "DataReadInBytes": {
+                                                "value": {
+                                                    "value": "@activity('CopyIncrementalData').output.dataRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Decimal"
+                                            },
+                                            "DataWrittenInBytes": {
+                                                "value": {
+                                                    "value": "@activity('CopyIncrementalData').output.dataWritten",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Decimal"
+                                            },
+                                            "DurationInSeconds": {
+                                                "value": {
+                                                    "value": "@activity('CopyIncrementalData').output.copyDuration",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "FilesWritten": {
+                                                "value": {
+                                                    "value": "0",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "MigratedRowCount": {
+                                                "value": {
+                                                    "value": "@activity('CopyIncrementalData').output.rowsCopied",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "RowsRead": {
+                                                "value": {
+                                                    "value": "@activity('CopyIncrementalData').output.rowsRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "TransactionalDate": {
+                                                "value": {
+                                                    "value": "@string(variables('v_BeginTimeStamp'))",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "string"
+                                            },
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ADFPipelineTriggername": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                },
+                                {
+                                    "name": "Update WaterMark Value",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "usp_Succesfull_IncrementalLoad",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[usp_update_ADFWatermarkIntValue]",
+                                        "storedProcedureParameters": {
+                                            "EndDate": {
+                                                "value": {
+                                                    "value": "@variables('v_EndTimeStamp')",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "SchemaName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.parm_SrcSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                },
+                                {
+                                    "name": "usp_Exception_IncrementalLoad",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "CopyIncrementalData",
+                                            "dependencyConditions": [
+                                                "Failed"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "usp_LogException",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryPipelineId": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerType",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerTime",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "ErrorCode": {
+                                                "value": {
+                                                    "value": "@activity('CopyIncrementalData').Error.ErrorCode",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ErrorMessage": {
+                                                "value": {
+                                                    "value": "@activity('CopyIncrementalData').Error.Message",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "FailedActivity": {
+                                                "value": "Incremental Load Failed",
+                                                "type": "String"
+                                            },
+                                            "FailureType": {
+                                                "value": {
+                                                    "value": "@activity('CopyIncrementalData').Error.Details",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "value": "UpsertTMS",
+                            "activities": [
+                                {
+                                    "name": "Copy_UpsertDataWithTimestamp",
+                                    "type": "Copy",
+                                    "dependsOn": [],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "source": {
+                                            "type": "AzureSqlSource",
+                                            "queryTimeout": "02:00:00",
+                                            "partitionOption": "None"
+                                        },
+                                        "sink": {
+                                            "type": "AzureSqlSink",
+                                            "sqlWriterStoredProcedureName": {
+                                                "value": "@pipeline().parameters.parm_TargetSPName",
+                                                "type": "Expression"
+                                            },
+                                            "sqlWriterTableType": {
+                                                "value": "@pipeline().parameters.parm_TargetSPParm",
+                                                "type": "Expression"
+                                            },
+                                            "storedProcedureTableTypeParameterName": {
+                                                "value": "@pipeline().parameters.parm_TargetSPParm",
+                                                "type": "Expression"
+                                            },
+                                            "disableMetricsCollection": false
+                                        },
+                                        "enableStaging": false,
+                                        "parallelCopies": 4,
+                                        "translator": {
+                                            "type": "TabularTranslator",
+                                            "typeConversion": true,
+                                            "typeConversionSettings": {
+                                                "allowDataTruncation": true,
+                                                "treatBooleanAsNumber": false
+                                            }
+                                        }
+                                    },
+                                    "inputs": [
+                                        {
+                                            "referenceName": "SourceSqlDataset",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "SchemaName": {
+                                                    "value": "@pipeline().parameters.parm_SrcSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "TableName": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "SourceServer": {
+                                                    "value": "@pipeline().parameters.param_srcDBServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "SourceDatabase": {
+                                                    "value": "@pipeline().parameters.param_srcDatabaseName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ],
+                                    "outputs": [
+                                        {
+                                            "referenceName": "SQLDB_DSNINJA_DataSet21",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "TargetSchemaName": {
+                                                    "value": "@pipeline().parameters.parm_TargetSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetTableName": {
+                                                    "value": "@pipeline().parameters.parm_TargetTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetDbServerName": {
+                                                    "value": "@pipeline().parameters.param_TargetDBServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetDatabaseName": {
+                                                    "value": "@pipeline().parameters.param_TargetDatabaseName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "usp_Exception_Upating_Watermark",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Update WaterMark Table",
+                                            "dependencyConditions": [
+                                                "Failed"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[usp_update_ADFWatermarkIntValue]",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryPipelineId": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@utcnow()",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "ErrorCode": {
+                                                "value": {
+                                                    "value": "@activity('Update WaterMark Table').Error.ErrorCode",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ErrorMessage": {
+                                                "value": {
+                                                    "value": "@activity('Update WaterMark Table').Error.Message",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "FailedActivity": {
+                                                "value": "Update WaterMark Value for Upsert",
+                                                "type": "String"
+                                            },
+                                            "FailureType": {
+                                                "value": {
+                                                    "value": "@activity('Update WaterMark Table').Error.Details",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                },
+                                {
+                                    "name": "usp_Success_Upsert_Load",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy_UpsertDataWithTimestamp",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[usp_InsertProcessingDetails]",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineID": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerType",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerTime",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "DataReadInBytes": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithTimestamp').output.dataRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Decimal"
+                                            },
+                                            "DataWrittenInBytes": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithTimestamp').output.dataWritten",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Decimal"
+                                            },
+                                            "DurationInSeconds": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithTimestamp').output.copyDuration",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "FilesWritten": {
+                                                "value": {
+                                                    "value": "0",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "MigratedRowCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithTimestamp').output.rowsCopied",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "RowsRead": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithTimestamp').output.rowsRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "TransactionalDate": {
+                                                "value": {
+                                                    "value": "@string(variables('v_BeginTimeStamp'))",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "string"
+                                            },
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ADFPipelineTriggername": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                },
+                                {
+                                    "name": "Update WaterMark Table",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "usp_Success_Upsert_Load",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "[dbo].[usp_update_ADFWatermarkIntValue]",
+                                        "storedProcedureParameters": {
+                                            "EndDate": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.parm_EndTimeStamp",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "SrcSchemaName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.parm_SrcSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "SrcTableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                },
+                                {
+                                    "name": "usp_Exception_UpsertLoad",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy_UpsertDataWithTimestamp",
+                                            "dependencyConditions": [
+                                                "Failed"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "usp_LogException",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryPipelineId": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerType",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerTime",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "ErrorCode": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithTimestamp').Error.ErrorCode",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ErrorMessage": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithTimestamp').Error.Message",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "FailedActivity": {
+                                                "value": "Upsert Load Failed",
+                                                "type": "String"
+                                            },
+                                            "FailureType": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithTimestamp').Error.Details",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "value": "UpsertKEY",
+                            "activities": [
+                                {
+                                    "name": "Copy_UpsertDataWithKey",
+                                    "type": "Copy",
+                                    "dependsOn": [],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "source": {
+                                            "type": "AzureSqlSource",
+                                            "queryTimeout": "02:00:00",
+                                            "partitionOption": "None"
+                                        },
+                                        "sink": {
+                                            "type": "AzureSqlSink",
+                                            "sqlWriterStoredProcedureName": {
+                                                "value": "@pipeline().parameters.parm_TargetSPName",
+                                                "type": "Expression"
+                                            },
+                                            "sqlWriterTableType": {
+                                                "value": "@pipeline().parameters.parm_TargetSPParm",
+                                                "type": "Expression"
+                                            },
+                                            "storedProcedureTableTypeParameterName": {
+                                                "value": "@pipeline().parameters.parm_TargetSPParm",
+                                                "type": "Expression"
+                                            },
+                                            "disableMetricsCollection": false
+                                        },
+                                        "enableStaging": false,
+                                        "parallelCopies": 4,
+                                        "translator": {
+                                            "type": "TabularTranslator",
+                                            "typeConversion": true,
+                                            "typeConversionSettings": {
+                                                "allowDataTruncation": true,
+                                                "treatBooleanAsNumber": false
+                                            }
+                                        }
+                                    },
+                                    "inputs": [
+                                        {
+                                            "referenceName": "SourceSqlDataset",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "SchemaName": {
+                                                    "value": "@pipeline().parameters.parm_SrcSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "TableName": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "SourceServer": {
+                                                    "value": "@pipeline().parameters.param_srcDBServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "SourceDatabase": {
+                                                    "value": "@pipeline().parameters.param_srcDatabaseName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ],
+                                    "outputs": [
+                                        {
+                                            "referenceName": "SQLDB_DSNINJA_DataSet21",
+                                            "type": "DatasetReference",
+                                            "parameters": {
+                                                "TargetSchemaName": {
+                                                    "value": "@pipeline().parameters.parm_TargetSchemaName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetTableName": {
+                                                    "value": "@pipeline().parameters.parm_TargetTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetDbServerName": {
+                                                    "value": "@pipeline().parameters.param_TargetDBServerName",
+                                                    "type": "Expression"
+                                                },
+                                                "TargetDatabaseName": {
+                                                    "value": "@pipeline().parameters.param_TargetDatabaseName",
+                                                    "type": "Expression"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "usp_Success_UpsertKEY_Load",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy_UpsertDataWithKey",
+                                            "dependencyConditions": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "dbo.usp_Exception_UpsertKEY_Load",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineID": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerType",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerTime",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "DataReadInBytes": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithKey').output.dataRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Decimal"
+                                            },
+                                            "DataWrittenInBytes": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithKey').output.dataWritten",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Decimal"
+                                            },
+                                            "DurationInSeconds": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithKey').output.copyDuration",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "FilesWritten": {
+                                                "value": {
+                                                    "value": "0",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "MigratedRowCount": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithKey').output.rowsCopied",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "RowsRead": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithKey').output.rowsRead",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "Int32"
+                                            },
+                                            "TableName": {
+                                                "value": {
+                                                    "value": "@pipeline().parameters.parm_SrcTableName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "TransactionalDate": {
+                                                "value": {
+                                                    "value": "@string(variables('v_BeginTimeStamp'))",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "string"
+                                            },
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ADFPipelineTriggername": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerName",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                },
+                                {
+                                    "name": "usp_Exception_UpsertKEY_Load",
+                                    "type": "SqlServerStoredProcedure",
+                                    "dependsOn": [
+                                        {
+                                            "activity": "Copy_UpsertDataWithKey",
+                                            "dependencyConditions": [
+                                                "Failed"
+                                            ]
+                                        }
+                                    ],
+                                    "policy": {
+                                        "timeout": "7.00:00:00",
+                                        "retry": 0,
+                                        "retryIntervalInSeconds": 30,
+                                        "secureOutput": false,
+                                        "secureInput": false
+                                    },
+                                    "userProperties": [],
+                                    "typeProperties": {
+                                        "storedProcedureName": "dbo.usp_Exception_UpsertKEY_Load",
+                                        "storedProcedureParameters": {
+                                            "ADFPipelineName": {
+                                                "value": {
+                                                    "value": "@pipeline().Pipeline",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryName": {
+                                                "value": {
+                                                    "value": "@pipeline().DataFactory",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "AzureDataFactoryPipelineId": {
+                                                "value": {
+                                                    "value": "@pipeline().RunId",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedBy": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerType",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "CreatedDateTime": {
+                                                "value": {
+                                                    "value": "@pipeline().TriggerTime",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "DateTime"
+                                            },
+                                            "ErrorCode": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithKey').Error.ErrorCode",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "ErrorMessage": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithKey').Error.Message",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            },
+                                            "FailedActivity": {
+                                                "value": "Upsert Key Load Failed",
+                                                "type": "String"
+                                            },
+                                            "FailureType": {
+                                                "value": {
+                                                    "value": "@activity('Copy_UpsertDataWithKey').Error.Details",
+                                                    "type": "Expression"
+                                                },
+                                                "type": "String"
+                                            }
+                                        }
+                                    },
+                                    "linkedServiceName": {
+                                        "referenceName": "Master_SQLMigrationConfigDatabase",
+                                        "type": "LinkedServiceReference",
+                                        "parameters": {
+                                            "master_SQLConfigDBServerName": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net",
+                                            "master_SQLConfigDatabaseName": "SQLMigrationGenericDB"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Set Start Timestamp",
+                "type": "SetVariable",
+                "dependsOn": [
+                    {
+                        "activity": "usp_InsertADFPipelineInfo",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "variableName": "v_BeginTimeStamp",
+                    "value": {
+                        "value": "@pipeline().parameters.parm_StartTimeStamp",
+                        "type": "Expression"
+                    }
+                }
+            },
+            {
+                "name": "Set End Timestamp",
+                "type": "SetVariable",
+                "dependsOn": [
+                    {
+                        "activity": "Set Start Timestamp",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "variableName": "v_EndTimeStamp",
+                    "value": {
+                        "value": "@pipeline().parameters.parm_EndTimeStamp",
+                        "type": "Expression"
+                    }
+                }
+            },
+            {
+                "name": "Concat target schema and Table Name",
+                "type": "SetVariable",
+                "dependsOn": [
+                    {
+                        "activity": "Set End Timestamp",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "variableName": "v_TargetschemaTableName",
+                    "value": {
+                        "value": "@concat(pipeline().parameters.parm_TargetSchemaName, '.' , pipeline().parameters.parm_TargetTableName)",
+                        "type": "Expression"
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "parm_Query": {
+                "type": "string",
+                "defaultValue": "SELECT * FROM ASKHAND.BULKTEST"
+            },
+            "parm_SrcSchemaName": {
+                "type": "string",
+                "defaultValue": "ASKHAND"
+            },
+            "parm_SrcTableName": {
+                "type": "string",
+                "defaultValue": "BULKTEST"
+            },
+            "parm_TargetSchemaName": {
+                "type": "string",
+                "defaultValue": "dbo"
+            },
+            "parm_TargetTableName": {
+                "type": "string",
+                "defaultValue": "BULKTEST"
+            },
+            "parm_MasterPipelineID": {
+                "type": "string",
+                "defaultValue": "1111"
+            },
+            "parm_StartTimeStamp": {
+                "type": "string",
+                "defaultValue": "2001-05-16 19:48:31.2633333"
+            },
+            "parm_EndTimeStamp": {
+                "type": "string",
+                "defaultValue": "2020-05-16 19:48:31.2633333"
+            },
+            "parm_LoadType": {
+                "type": "string",
+                "defaultValue": "Upsert"
+            },
+            "parm_StartKey": {
+                "type": "string",
+                "defaultValue": "1100614"
+            },
+            "parm_EndKey": {
+                "type": "string",
+                "defaultValue": "1100714"
+            },
+            "parm_TargetSPName": {
+                "type": "string",
+                "defaultValue": "usp_UpsertBULKTEST"
+            },
+            "parm_TargetSPParm": {
+                "type": "string",
+                "defaultValue": "BULKTESTType"
+            },
+            "param_srcDBServerName": {
+                "type": "string",
+                "defaultValue": "TEST"
+            },
+            "param_TargetDBServerName": {
+                "type": "string",
+                "defaultValue": "TEST"
+            },
+            "param_srcDatabaseName": {
+                "type": "string",
+                "defaultValue": "TEST"
+            },
+            "param_TargetDatabaseName": {
+                "type": "string",
+                "defaultValue": "TEST"
+            }
+        },
+        "variables": {
+            "v_BeginTimeStamp": {
+                "type": "String"
+            },
+            "v_PipelineName": {
+                "type": "String"
+            },
+            "v_FlagRowsMismatch": {
+                "type": "String"
+            },
+            "v_ExceptionCount": {
+                "type": "String"
+            },
+            "v_EndTimeStamp": {
+                "type": "String"
+            },
+            "v_LoadType": {
+                "type": "String",
+                "defaultValue": "I"
+            },
+            "v_TargetschemaTableName": {
+                "type": "String"
+            }
+        },
+        "folder": {
+            "name": "LACERA"
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-03-11T11:16:30Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}
