@@ -5,6 +5,8 @@
 import re
 from typing import List, Tuple, Dict, Optional
 
+import pyodbc
+
 from ..utils.paths import qident
 from ..utils.sql import type_sql
 
@@ -49,24 +51,20 @@ def fetch_tables(cur):
     return cur.fetchall()
 
 
-def fetch_columns(cur, schema_name: str, table_name: str):
-    """Fetch column metadata for a table"""
-    # Note: cast to NVARCHAR to avoid pyodbc "ODBC SQL type -16 not supported" issues
-    cur.execute(
-        """
+_FETCH_COLUMNS_SQL_PRIMARY = """
         SELECT
-            c.column_id,
-            c.name AS column_name,
-            ty.name AS type_name,
-            c.max_length,
-            c.precision,
-            c.scale,
-            c.is_nullable,
-            c.is_identity,
+            CAST(c.column_id AS INT) AS column_id,
+            CAST(c.name AS NVARCHAR(256)) AS column_name,
+            CAST(ty.name AS NVARCHAR(256)) AS type_name,
+            CAST(c.max_length AS INT) AS max_length,
+            CAST(c.precision AS INT) AS precision,
+            CAST(c.scale AS INT) AS scale,
+            CASE WHEN c.is_nullable = 1 THEN 1 ELSE 0 END AS is_nullable,
+            CASE WHEN c.is_identity = 1 THEN 1 ELSE 0 END AS is_identity,
             CAST(ic.seed_value AS NVARCHAR(100)) AS seed_value_str,
             CAST(ic.increment_value AS NVARCHAR(100)) AS increment_value_str,
             CAST(dc.definition AS NVARCHAR(MAX)) AS default_definition_str,
-            dc.name AS default_constraint_name
+            CAST(dc.name AS NVARCHAR(256)) AS default_constraint_name
         FROM sys.columns c
         JOIN sys.types ty ON c.user_type_id = ty.user_type_id
         LEFT JOIN sys.identity_columns ic
@@ -75,11 +73,64 @@ def fetch_columns(cur, schema_name: str, table_name: str):
             ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
         WHERE c.object_id = OBJECT_ID(?, ?)
         ORDER BY c.column_id;
-        """,
-        f"{schema_name}.{table_name}",
-        "U",
-    )
-    return cur.fetchall()
+"""
+
+# Some ODBC stacks still map NVARCHAR/bit oddly; VARCHAR + CASE is the most compatible path.
+_FETCH_COLUMNS_SQL_FALLBACK = """
+        SELECT
+            CAST(c.column_id AS INT) AS column_id,
+            CAST(c.name AS VARCHAR(512)) AS column_name,
+            CAST(ty.name AS VARCHAR(256)) AS type_name,
+            CAST(c.max_length AS INT) AS max_length,
+            CAST(c.precision AS INT) AS precision,
+            CAST(c.scale AS INT) AS scale,
+            CASE WHEN c.is_nullable = 1 THEN 1 ELSE 0 END AS is_nullable,
+            CASE WHEN c.is_identity = 1 THEN 1 ELSE 0 END AS is_identity,
+            CONVERT(VARCHAR(100), ic.seed_value) AS seed_value_str,
+            CONVERT(VARCHAR(100), ic.increment_value) AS increment_value_str,
+            CONVERT(VARCHAR(MAX), dc.definition) AS default_definition_str,
+            CAST(dc.name AS VARCHAR(256)) AS default_constraint_name
+        FROM sys.columns c
+        JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+        LEFT JOIN sys.identity_columns ic
+            ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+        LEFT JOIN sys.default_constraints dc
+            ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+        WHERE c.object_id = OBJECT_ID(?, ?)
+        ORDER BY c.column_id;
+"""
+
+
+def fetch_columns(cur, schema_name: str, table_name: str):
+    """Fetch column metadata for a table.
+
+    Primary query uses explicit casts. If pyodbc still raises HY106 / unsupported ODBC type (-16),
+    retry with a VARCHAR-heavy fallback (same logical columns for ``build_create_table_sql``).
+    Schema backup registers ``register_pyodbc_backup_converters`` on the connection to reduce
+    these errors without changing other app connections.
+    """
+    params = (f"{schema_name}.{table_name}", "U")
+    last_err: Optional[Exception] = None
+    for sql in (_FETCH_COLUMNS_SQL_PRIMARY, _FETCH_COLUMNS_SQL_FALLBACK):
+        try:
+            cur.execute(sql, params)
+            return cur.fetchall()
+        except pyodbc.ProgrammingError as e:
+            last_err = e
+            msg = str(e).lower()
+            if (
+                "not yet supported" in msg
+                or "type -16" in msg
+                or "-16" in msg
+                or "type -25" in msg
+                or "-25" in msg
+                or "hy106" in msg
+            ):
+                continue
+            raise
+    if last_err:
+        raise last_err
+    raise RuntimeError("fetch_columns: no SQL variant executed")
 
 
 def fetch_primary_key(cur, schema_name: str, table_name: str):

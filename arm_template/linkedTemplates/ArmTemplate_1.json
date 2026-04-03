@@ -1,0 +1,1027 @@
+{
+    "$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "factoryName": {
+            "type": "string",
+            "metadata": "Data Factory name",
+            "defaultValue": "pgs-mi-to-sql-sbx-eus2-adf"
+        },
+        "master_SQLConfigDatabase_password": {
+            "type": "secureString",
+            "metadata": "Secure string for 'password' of 'master_SQLConfigDatabase'"
+        },
+        "master_SQLConfigDatabase_properties_typeProperties_server": {
+            "type": "string",
+            "defaultValue": "@{linkedService().SQLConfigDatabaseServerName}"
+        },
+        "master_SQLConfigDatabase_properties_typeProperties_database": {
+            "type": "string",
+            "defaultValue": "@{linkedService().SQLConfigDatabaseName}"
+        },
+        "master_SQLConfigDatabase_properties_typeProperties_userName": {
+            "type": "string",
+            "defaultValue": "svc_azdm_q"
+        }
+    },
+    "variables": {
+        "factoryId": "[concat('Microsoft.DataFactory/factories/', parameters('factoryName'))]"
+    },
+    "resources": [
+        {
+            "name": "[concat(parameters('factoryName'), '/master_SQLConfigDatabase')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "parameters": {
+                    "SQLConfigDatabaseServerName": {
+                        "type": "String",
+                        "defaultValue": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net"
+                    },
+                    "SQLConfigDatabaseName": {
+                        "type": "String",
+                        "defaultValue": "SQLMigrationGenericDB"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlDatabase",
+                "typeProperties": {
+                    "server": "[parameters('master_SQLConfigDatabase_properties_typeProperties_server')]",
+                    "database": "[parameters('master_SQLConfigDatabase_properties_typeProperties_database')]",
+                    "encrypt": "mandatory",
+                    "trustServerCertificate": false,
+                    "authenticationType": "SQL",
+                    "userName": "[parameters('master_SQLConfigDatabase_properties_typeProperties_userName')]",
+                    "password": {
+                        "type": "SecureString",
+                        "value": "[parameters('master_SQLConfigDatabase_password')]"
+                    }
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/Db2_Dataset_D12FD0372')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "Db21",
+                    "type": "LinkedServiceReference"
+                },
+                "parameters": {
+                    "SchemaName": {
+                        "type": "string"
+                    },
+                    "TableName": {
+                        "type": "string"
+                    }
+                },
+                "folder": {
+                    "name": "Demo"
+                },
+                "annotations": [],
+                "type": "Db2Table",
+                "schema": [],
+                "typeProperties": {
+                    "schema": {
+                        "value": "@dataset().SchemaName",
+                        "type": "Expression"
+                    },
+                    "table": {
+                        "value": "@dataset().TableName",
+                        "type": "Expression"
+                    }
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/Db2_Dataset_D12FD03721')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "Db21",
+                    "type": "LinkedServiceReference"
+                },
+                "parameters": {
+                    "SchemaName": {
+                        "type": "string"
+                    },
+                    "TableName": {
+                        "type": "string"
+                    }
+                },
+                "folder": {
+                    "name": "Demo"
+                },
+                "annotations": [],
+                "type": "Db2Table",
+                "schema": [],
+                "typeProperties": {
+                    "schema": {
+                        "value": "@dataset().SchemaName",
+                        "type": "Expression"
+                    },
+                    "table": {
+                        "value": "@dataset().TableName",
+                        "type": "Expression"
+                    }
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlTable1')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureSqlDatabaseDestination",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DestinationDBName": "SurveyDesign"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlTable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "CultureResource"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMITable1')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureStagingMI",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DbName": "SurveyDesign_preprod2"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMITable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "CultureResource"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMITable2')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureStagingMI",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DbName": "SurveyDesign_UAT"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMITable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "ErrorLog"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlTable2')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureSqlDatabaseDestination",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DestinationDBName": "SurveyDesign"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlTable",
+                "schema": [
+                    {
+                        "name": "ErrorLogId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "UserName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "UserIP",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "RequestUrl",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ServerName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "StackTrace",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "TargetSite",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "QueryString",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Message",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ExceptionType",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "LogDateTime",
+                        "type": "datetime",
+                        "precision": 23,
+                        "scale": 3
+                    },
+                    {
+                        "name": "Source",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "FormContent",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "SurveyTakerId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "Browser",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Platform",
+                        "type": "ntext"
+                    }
+                ],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "ErrorLog"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMITable2FormCulture')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureStagingMI",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DbName": "SurveyDesign_UAT"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMITable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormCulture"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlTableResource')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureSqlDatabaseDestination",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DestinationDBName": "SurveyDesign"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlTable",
+                "schema": [
+                    {
+                        "name": "ErrorLogId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "UserName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "UserIP",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "RequestUrl",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ServerName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "StackTrace",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "TargetSite",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "QueryString",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Message",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ExceptionType",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "LogDateTime",
+                        "type": "datetime",
+                        "precision": 23,
+                        "scale": 3
+                    },
+                    {
+                        "name": "Source",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "FormContent",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "SurveyTakerId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "Browser",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Platform",
+                        "type": "ntext"
+                    }
+                ],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "Resource"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlTableFormSectionListQuestion')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureSqlDatabaseDestination",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DestinationDBName": "SurveyDesign"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlTable",
+                "schema": [
+                    {
+                        "name": "ErrorLogId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "UserName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "UserIP",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "RequestUrl",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ServerName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "StackTrace",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "TargetSite",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "QueryString",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Message",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ExceptionType",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "LogDateTime",
+                        "type": "datetime",
+                        "precision": 23,
+                        "scale": 3
+                    },
+                    {
+                        "name": "Source",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "FormContent",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "SurveyTakerId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "Browser",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Platform",
+                        "type": "ntext"
+                    }
+                ],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormSectionListQuestion"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMITableResource')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureStagingMI",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DbName": "SurveyDesign_UAT"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMITable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "Resource"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMITableFormListItem')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureStagingMI",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DbName": "SurveyDesign_UAT"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMITable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormListItem"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMITableFormSectionListQuestion')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureStagingMI",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DbName": "SurveyDesign_UAT"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMITable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormSectionListQuestion"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMITable2FormSection')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureStagingMI",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DbName": "SurveyDesign_UAT"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMITable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormSection"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlTableFormListItem')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureSqlDatabaseDestination",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DestinationDBName": "SurveyDesign"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlTable",
+                "schema": [
+                    {
+                        "name": "ErrorLogId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "UserName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "UserIP",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "RequestUrl",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ServerName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "StackTrace",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "TargetSite",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "QueryString",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Message",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ExceptionType",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "LogDateTime",
+                        "type": "datetime",
+                        "precision": 23,
+                        "scale": 3
+                    },
+                    {
+                        "name": "Source",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "FormContent",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "SurveyTakerId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "Browser",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Platform",
+                        "type": "ntext"
+                    }
+                ],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormListItem"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMITableFormSectionQuestion')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureStagingMI",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DbName": "SurveyDesign_UAT"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMITable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormSectionQuestion"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlTableFormCulture')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureSqlDatabaseDestination",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DestinationDBName": "SurveyDesign"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlTable",
+                "schema": [
+                    {
+                        "name": "ErrorLogId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "UserName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "UserIP",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "RequestUrl",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ServerName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "StackTrace",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "TargetSite",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "QueryString",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Message",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ExceptionType",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "LogDateTime",
+                        "type": "datetime",
+                        "precision": 23,
+                        "scale": 3
+                    },
+                    {
+                        "name": "Source",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "FormContent",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "SurveyTakerId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "Browser",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Platform",
+                        "type": "ntext"
+                    }
+                ],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormCulture"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlTableFormSectionQuestion')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureSqlDatabaseDestination",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DestinationDBName": "SurveyDesign"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlTable",
+                "schema": [
+                    {
+                        "name": "ErrorLogId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "UserName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "UserIP",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "RequestUrl",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ServerName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "StackTrace",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "TargetSite",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "QueryString",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Message",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ExceptionType",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "LogDateTime",
+                        "type": "datetime",
+                        "precision": 23,
+                        "scale": 3
+                    },
+                    {
+                        "name": "Source",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "FormContent",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "SurveyTakerId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "Browser",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Platform",
+                        "type": "ntext"
+                    }
+                ],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormSectionQuestion"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlTableFormSection')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "AzureSqlDatabaseDestination",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DestinationDBName": "SurveyDesign"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlTable",
+                "schema": [
+                    {
+                        "name": "ErrorLogId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "UserName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "UserIP",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "RequestUrl",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ServerName",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "StackTrace",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "TargetSite",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "QueryString",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Message",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "ExceptionType",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "LogDateTime",
+                        "type": "datetime",
+                        "precision": 23,
+                        "scale": 3
+                    },
+                    {
+                        "name": "Source",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "FormContent",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "SurveyTakerId",
+                        "type": "bigint",
+                        "precision": 19
+                    },
+                    {
+                        "name": "Browser",
+                        "type": "ntext"
+                    },
+                    {
+                        "name": "Platform",
+                        "type": "ntext"
+                    }
+                ],
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": "FormSection"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/SQLDB_DSNINJA_DataSet21')]",
+            "type": "Microsoft.DataFactory/factories/datasets",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "linkedServiceName": {
+                    "referenceName": "DestinationSqlLinkedService",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "DestServer": {
+                            "value": "@dataset().TargetDbServerName",
+                            "type": "Expression"
+                        },
+                        "DestDatabase": {
+                            "value": "@dataset().TargetDatabaseName",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "parameters": {
+                    "TargetSchemaName": {
+                        "type": "string"
+                    },
+                    "TargetTableName": {
+                        "type": "string"
+                    },
+                    "TargetDbServerName": {
+                        "type": "String"
+                    },
+                    "TargetDatabaseName": {
+                        "type": "String"
+                    }
+                },
+                "folder": {
+                    "name": "Demo"
+                },
+                "annotations": [],
+                "type": "AzureSqlTable",
+                "schema": [],
+                "typeProperties": {
+                    "schema": {
+                        "value": "@dataset().TargetSchemaName",
+                        "type": "Expression"
+                    },
+                    "table": {
+                        "value": "@dataset().TargetTableName",
+                        "type": "Expression"
+                    }
+                }
+            },
+            "dependsOn": []
+        }
+    ]
+}

@@ -1,0 +1,664 @@
+{
+    "$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "factoryName": {
+            "type": "string",
+            "metadata": "Data Factory name",
+            "defaultValue": "pgs-mi-to-sql-sbx-eus2-adf"
+        },
+        "Db21_connectionString": {
+            "type": "secureString",
+            "metadata": "Secure string for 'connectionString' of 'Db21'"
+        },
+        "stage_storage_ls_connectionString": {
+            "type": "secureString",
+            "metadata": "Secure string for 'connectionString' of 'stage_storage_ls'"
+        },
+        "ADF_Staging_ls_connectionString": {
+            "type": "secureString",
+            "metadata": "Secure string for 'connectionString' of 'ADF_Staging_ls'"
+        },
+        "AzureStagingMI_password": {
+            "type": "secureString",
+            "metadata": "Secure string for 'password' of 'AzureStagingMI'"
+        },
+        "AzureSqlMI1_password": {
+            "type": "secureString",
+            "metadata": "Secure string for 'password' of 'AzureSqlMI1'"
+        },
+        "AzureSqlDatabaseDestination_password": {
+            "type": "secureString",
+            "metadata": "Secure string for 'password' of 'AzureSqlDatabaseDestination'"
+        },
+        "SQLMigrationConfigDatabase_password": {
+            "type": "secureString",
+            "metadata": "Secure string for 'password' of 'SQLMigrationConfigDatabase'"
+        },
+        "SQLDatabaseConfig_password": {
+            "type": "secureString",
+            "metadata": "Secure string for 'password' of 'SQLDatabaseConfig'"
+        },
+        "AzureDBSourceDatabase_connectionString": {
+            "type": "secureString",
+            "metadata": "Secure string for 'connectionString' of 'AzureDBSourceDatabase'"
+        },
+        "AzureSqlMI2_password": {
+            "type": "secureString",
+            "metadata": "Secure string for 'password' of 'AzureSqlMI2'"
+        },
+        "DestinationSqlLinkedService_connectionString": {
+            "type": "secureString",
+            "metadata": "Secure string for 'connectionString' of 'DestinationSqlLinkedService'"
+        },
+        "SourceSqlLinkedService_connectionString": {
+            "type": "secureString",
+            "metadata": "Secure string for 'connectionString' of 'SourceSqlLinkedService'"
+        },
+        "Master_SQLMigrationConfigDatabase_password": {
+            "type": "secureString",
+            "metadata": "Secure string for 'password' of 'Master_SQLMigrationConfigDatabase'"
+        },
+        "AzureKeyVaultUserName_properties_typeProperties_baseUrl": {
+            "type": "string",
+            "defaultValue": "https://pgsurveys-sbx-eus2-kv.vault.azure.net/"
+        },
+        "AzureStagingMI_properties_typeProperties_server": {
+            "type": "string",
+            "defaultValue": "route66-uat-eus2-mi.c6cdc75167f1.database.windows.net"
+        },
+        "AzureStagingMI_properties_typeProperties_database": {
+            "type": "string",
+            "defaultValue": "@{linkedService().DbName}"
+        },
+        "AzureStagingMI_properties_typeProperties_userName": {
+            "type": "string",
+            "defaultValue": "svc_azdm_q"
+        },
+        "AzureSqlMI1_properties_typeProperties_server": {
+            "type": "string",
+            "defaultValue": "route66-uat-eus2-mi.c6cdc75167f1.database.windows.net"
+        },
+        "AzureSqlMI1_properties_typeProperties_database": {
+            "type": "string",
+            "defaultValue": "@{linkedService().SourceDBName}"
+        },
+        "AzureSqlMI1_properties_typeProperties_userName": {
+            "type": "string",
+            "defaultValue": "svc_azdm_q"
+        },
+        "AzureSqlDatabaseDestination_properties_typeProperties_server": {
+            "type": "string",
+            "defaultValue": "pgs-surveysetup-uat-sql.database.windows.net,1433"
+        },
+        "AzureSqlDatabaseDestination_properties_typeProperties_database": {
+            "type": "string",
+            "defaultValue": "@{linkedService().DestinationDBName}"
+        },
+        "AzureSqlDatabaseDestination_properties_typeProperties_userName": {
+            "type": "string",
+            "defaultValue": "svc_azdm_q"
+        },
+        "SQLMigrationConfigDatabase_properties_typeProperties_server": {
+            "type": "string",
+            "defaultValue": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net"
+        },
+        "SQLMigrationConfigDatabase_properties_typeProperties_database": {
+            "type": "string",
+            "defaultValue": "SQLMigrationGenericDB"
+        },
+        "SQLMigrationConfigDatabase_properties_typeProperties_userName": {
+            "type": "string",
+            "defaultValue": "svc_azdm_q"
+        },
+        "SQLDatabaseConfig_properties_typeProperties_server": {
+            "type": "string",
+            "defaultValue": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net"
+        },
+        "SQLDatabaseConfig_properties_typeProperties_database": {
+            "type": "string",
+            "defaultValue": "SQLMigrationGenericDB"
+        },
+        "SQLDatabaseConfig_properties_typeProperties_userName": {
+            "type": "string",
+            "defaultValue": "svc_azdm_q"
+        },
+        "AzureSqlMI2_properties_typeProperties_server": {
+            "type": "string",
+            "defaultValue": "@{linkedService().SourceServerName}"
+        },
+        "AzureSqlMI2_properties_typeProperties_database": {
+            "type": "string",
+            "defaultValue": "@{linkedService().SourceDbName}"
+        },
+        "AzureSqlMI2_properties_typeProperties_userName": {
+            "type": "string",
+            "defaultValue": "svc_azdm_q"
+        },
+        "SourceAzureMI_properties_typeProperties_server": {
+            "type": "string",
+            "defaultValue": "@{linkedService().DatabaseSourceServer}"
+        },
+        "SourceAzureMI_properties_typeProperties_database": {
+            "type": "string",
+            "defaultValue": "@{linkedService().SourceMIDatabaseName}"
+        },
+        "SourceAzureMI_properties_typeProperties_userName": {
+            "type": "string",
+            "defaultValue": "svc_azdm_q"
+        },
+        "Master_SQLMigrationConfigDatabase_properties_typeProperties_server": {
+            "type": "string",
+            "defaultValue": "@{linkedService().master_SQLConfigDBServerName}"
+        },
+        "Master_SQLMigrationConfigDatabase_properties_typeProperties_database": {
+            "type": "string",
+            "defaultValue": "@{linkedService().master_SQLConfigDatabaseName}"
+        },
+        "Master_SQLMigrationConfigDatabase_properties_typeProperties_userName": {
+            "type": "string",
+            "defaultValue": "svc_azdm_q"
+        }
+    },
+    "variables": {
+        "factoryId": "[concat('Microsoft.DataFactory/factories/', parameters('factoryName'))]"
+    },
+    "resources": [
+        {
+            "name": "[concat(parameters('factoryName'), '/default')]",
+            "type": "Microsoft.DataFactory/factories/managedVirtualNetworks",
+            "apiVersion": "2018-06-01",
+            "properties": {},
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/mi-to-sql-shir-ir')]",
+            "type": "Microsoft.DataFactory/factories/integrationRuntimes",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "type": "SelfHosted",
+                "typeProperties": {
+                    "selfContainedInteractiveAuthoringEnabled": false
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/integrationRuntime1')]",
+            "type": "Microsoft.DataFactory/factories/integrationRuntimes",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "type": "Managed",
+                "typeProperties": {
+                    "computeProperties": {
+                        "location": "East US 2",
+                        "dataFlowProperties": {
+                            "computeType": "MemoryOptimized",
+                            "coreCount": 32,
+                            "timeToLive": 10,
+                            "cleanup": false,
+                            "customProperties": []
+                        }
+                    }
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/satish-mi-sql-temp-ir')]",
+            "type": "Microsoft.DataFactory/factories/integrationRuntimes",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "type": "SelfHosted",
+                "description": "this temp IR dont use this. Created only for POC.",
+                "typeProperties": {}
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/Db21')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "annotations": [],
+                "type": "Db2",
+                "typeProperties": {
+                    "connectionString": "[parameters('Db21_connectionString')]"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/stage_storage_ls')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "annotations": [],
+                "type": "AzureBlobStorage",
+                "typeProperties": {
+                    "connectionString": "[parameters('stage_storage_ls_connectionString')]"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/ADF_Staging_ls')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "annotations": [],
+                "type": "AzureBlobStorage",
+                "typeProperties": {
+                    "connectionString": "[parameters('ADF_Staging_ls_connectionString')]"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureKeyVaultUserName')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "annotations": [],
+                "type": "AzureKeyVault",
+                "typeProperties": {
+                    "baseUrl": "[parameters('AzureKeyVaultUserName_properties_typeProperties_baseUrl')]"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/sample_trigger')]",
+            "type": "Microsoft.DataFactory/factories/pipelines",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "activities": [
+                    {
+                        "name": "Append variable1",
+                        "type": "AppendVariable",
+                        "dependsOn": [],
+                        "userProperties": [],
+                        "typeProperties": {
+                            "variableName": "sample",
+                            "value": "test"
+                        }
+                    }
+                ],
+                "policy": {
+                    "elapsedTimeMetric": {}
+                },
+                "variables": {
+                    "sample": {
+                        "type": "Array"
+                    }
+                },
+                "annotations": [],
+                "lastPublishTime": "2026-03-10T08:09:11Z"
+            },
+            "dependsOn": []
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureStagingMI')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "parameters": {
+                    "DbName": {
+                        "type": "String",
+                        "defaultValue": "SurveyDesign_UAT"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMI",
+                "typeProperties": {
+                    "server": "[parameters('AzureStagingMI_properties_typeProperties_server')]",
+                    "database": "[parameters('AzureStagingMI_properties_typeProperties_database')]",
+                    "encrypt": "optional",
+                    "trustServerCertificate": false,
+                    "authenticationType": "SQL",
+                    "userName": "[parameters('AzureStagingMI_properties_typeProperties_userName')]",
+                    "password": {
+                        "type": "SecureString",
+                        "value": "[parameters('AzureStagingMI_password')]"
+                    }
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMI1')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "parameters": {
+                    "SourceDBName": {
+                        "type": "String",
+                        "defaultValue": "SurveyDesign_UAT"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMI",
+                "typeProperties": {
+                    "server": "[parameters('AzureSqlMI1_properties_typeProperties_server')]",
+                    "database": "[parameters('AzureSqlMI1_properties_typeProperties_database')]",
+                    "encrypt": "mandatory",
+                    "trustServerCertificate": false,
+                    "authenticationType": "SQL",
+                    "userName": "[parameters('AzureSqlMI1_properties_typeProperties_userName')]",
+                    "password": {
+                        "type": "SecureString",
+                        "value": "[parameters('AzureSqlMI1_password')]"
+                    }
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlDatabaseDestination')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "parameters": {
+                    "DestinationDBName": {
+                        "type": "String",
+                        "defaultValue": "SurveyDesign"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlDatabase",
+                "typeProperties": {
+                    "server": "[parameters('AzureSqlDatabaseDestination_properties_typeProperties_server')]",
+                    "database": "[parameters('AzureSqlDatabaseDestination_properties_typeProperties_database')]",
+                    "encrypt": "optional",
+                    "trustServerCertificate": false,
+                    "authenticationType": "SQL",
+                    "userName": "[parameters('AzureSqlDatabaseDestination_properties_typeProperties_userName')]",
+                    "password": {
+                        "type": "SecureString",
+                        "value": "[parameters('AzureSqlDatabaseDestination_password')]"
+                    }
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/SQLMigrationConfigDatabase')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "annotations": [],
+                "type": "AzureSqlMI",
+                "typeProperties": {
+                    "server": "[parameters('SQLMigrationConfigDatabase_properties_typeProperties_server')]",
+                    "database": "[parameters('SQLMigrationConfigDatabase_properties_typeProperties_database')]",
+                    "encrypt": "optional",
+                    "trustServerCertificate": false,
+                    "authenticationType": "SQL",
+                    "userName": "[parameters('SQLMigrationConfigDatabase_properties_typeProperties_userName')]",
+                    "password": {
+                        "type": "SecureString",
+                        "value": "[parameters('SQLMigrationConfigDatabase_password')]"
+                    }
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/SQLDatabaseConfig')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "annotations": [],
+                "type": "AzureSqlDatabase",
+                "typeProperties": {
+                    "server": "[parameters('SQLDatabaseConfig_properties_typeProperties_server')]",
+                    "database": "[parameters('SQLDatabaseConfig_properties_typeProperties_database')]",
+                    "encrypt": "mandatory",
+                    "trustServerCertificate": false,
+                    "authenticationType": "SQL",
+                    "userName": "[parameters('SQLDatabaseConfig_properties_typeProperties_userName')]",
+                    "password": {
+                        "type": "SecureString",
+                        "value": "[parameters('SQLDatabaseConfig_password')]"
+                    }
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureDBSourceDatabase')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "parameters": {
+                    "AzureSourceDBName": {
+                        "type": "String",
+                        "defaultValue": "XboundSupportQA"
+                    }
+                },
+                "annotations": [],
+                "type": "Db2",
+                "typeProperties": {
+                    "connectionString": "[parameters('AzureDBSourceDatabase_connectionString')]"
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/AzureSqlMI2')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "parameters": {
+                    "SourceServerName": {
+                        "type": "String"
+                    },
+                    "SourceDbName": {
+                        "type": "String"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMI",
+                "typeProperties": {
+                    "server": "[parameters('AzureSqlMI2_properties_typeProperties_server')]",
+                    "database": "[parameters('AzureSqlMI2_properties_typeProperties_database')]",
+                    "encrypt": "optional",
+                    "trustServerCertificate": false,
+                    "authenticationType": "SQL",
+                    "userName": "[parameters('AzureSqlMI2_properties_typeProperties_userName')]",
+                    "password": {
+                        "type": "SecureString",
+                        "value": "[parameters('AzureSqlMI2_password')]"
+                    }
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/DestinationSqlLinkedService')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "description": "Parameterized destination Azure SQL Database linked service for data migration",
+                "parameters": {
+                    "DestServer": {
+                        "type": "String"
+                    },
+                    "DestDatabase": {
+                        "type": "String"
+                    }
+                },
+                "annotations": [
+                    "sql-migration-tool",
+                    "destination"
+                ],
+                "type": "AzureSqlDatabase",
+                "typeProperties": {
+                    "connectionString": "[parameters('DestinationSqlLinkedService_connectionString')]"
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/SourceSqlLinkedService')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "description": "Parameterized source SQL Database linked service for data migration",
+                "parameters": {
+                    "SourceServer": {
+                        "type": "String"
+                    },
+                    "SourceDatabase": {
+                        "type": "String"
+                    }
+                },
+                "annotations": [
+                    "sql-migration-tool",
+                    "source"
+                ],
+                "type": "AzureSqlDatabase",
+                "typeProperties": {
+                    "connectionString": "[parameters('SourceSqlLinkedService_connectionString')]"
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/SourceAzureMI')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "parameters": {
+                    "DatabaseSourceServer": {
+                        "type": "String"
+                    },
+                    "databaseSourceServerPort": {
+                        "type": "String"
+                    },
+                    "SourceMIDatabaseName": {
+                        "type": "String"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMI",
+                "typeProperties": {
+                    "server": "[parameters('SourceAzureMI_properties_typeProperties_server')]",
+                    "database": "[parameters('SourceAzureMI_properties_typeProperties_database')]",
+                    "encrypt": "mandatory",
+                    "trustServerCertificate": false,
+                    "authenticationType": "SQL",
+                    "userName": "[parameters('SourceAzureMI_properties_typeProperties_userName')]",
+                    "password": {
+                        "type": "AzureKeyVaultSecret",
+                        "store": {
+                            "referenceName": "AzureKeyVaultUserName",
+                            "type": "LinkedServiceReference"
+                        },
+                        "secretName": "SQLDevMIPassword"
+                    }
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]",
+                "[concat(variables('factoryId'), '/linkedServices/AzureKeyVaultUserName')]"
+            ]
+        },
+        {
+            "name": "[concat(parameters('factoryName'), '/Master_SQLMigrationConfigDatabase')]",
+            "type": "Microsoft.DataFactory/factories/linkedServices",
+            "apiVersion": "2018-06-01",
+            "properties": {
+                "parameters": {
+                    "master_SQLConfigDBServerName": {
+                        "type": "String",
+                        "defaultValue": "route66-sbx-eus2-mi.7f323956f98d.database.windows.net"
+                    },
+                    "master_SQLConfigDatabaseName": {
+                        "type": "String",
+                        "defaultValue": "SQLMigrationGenericDB"
+                    }
+                },
+                "annotations": [],
+                "type": "AzureSqlMI",
+                "typeProperties": {
+                    "server": "[parameters('Master_SQLMigrationConfigDatabase_properties_typeProperties_server')]",
+                    "database": "[parameters('Master_SQLMigrationConfigDatabase_properties_typeProperties_database')]",
+                    "encrypt": "mandatory",
+                    "trustServerCertificate": false,
+                    "authenticationType": "SQL",
+                    "userName": "[parameters('Master_SQLMigrationConfigDatabase_properties_typeProperties_userName')]",
+                    "password": {
+                        "type": "SecureString",
+                        "value": "[parameters('Master_SQLMigrationConfigDatabase_password')]"
+                    }
+                },
+                "connectVia": {
+                    "referenceName": "mi-to-sql-shir-ir",
+                    "type": "IntegrationRuntimeReference"
+                }
+            },
+            "dependsOn": [
+                "[concat(variables('factoryId'), '/integrationRuntimes/mi-to-sql-shir-ir')]"
+            ]
+        }
+    ]
+}

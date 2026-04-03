@@ -11,6 +11,67 @@ from typing import Optional, Tuple, Dict, Any
 import pyodbc
 
 
+def register_pyodbc_backup_converters(conn: pyodbc.Connection) -> None:
+    """
+    Register pyodbc output converters for rare ODBC SQL type codes some drivers return
+    for SQL Server metadata (e.g. HY106 / 'type -16 / -25 is not yet supported' on fetch).
+
+    **Only call this on connections used for schema backup.** Converters apply only when
+    the driver actually returns those type codes; they do not change behavior for
+    columns the driver already maps to standard Python types (backward compatible).
+
+    See: https://github.com/mkleehammer/pyodbc/wiki/Using-an-Output-Converter-function
+    """
+    if conn is None or not hasattr(conn, "add_output_converter"):
+        return
+
+    def _coerce_unknown_sql_type(val):
+        if val is None:
+            return None
+        if isinstance(val, str):
+            return val
+        if isinstance(val, (bytes, bytearray)):
+            b = bytes(val)
+            if len(b) == 0:
+                return ""
+            # Wide-character payloads (common for SQL Server string-like types)
+            try:
+                s = b.decode("utf-16-le").split("\x00", 1)[0]
+                if s:
+                    return s
+            except Exception:
+                pass
+            try:
+                return b.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            # Single-byte bit / tinyint-style payloads
+            if len(b) == 1:
+                return int(b[0])
+            # 4-byte little-endian int
+            if len(b) == 4:
+                try:
+                    return struct.unpack("<i", b)[0]
+                except Exception:
+                    pass
+            # ODBC TIMESTAMP_STRUCT-style (16 bytes) — best-effort string for logging/DDL only
+            if len(b) >= 8:
+                try:
+                    y, mo, d, h, mi, s, f100ns = struct.unpack("<6H I", b[:16])
+                    if 1 <= mo <= 12 and 1 <= d <= 31 and y >= 1900:
+                        return f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{mi:02d}:{s:02d}"
+                except Exception:
+                    pass
+        return val
+
+    # Negative codes: driver-specific types not mapped by some pyodbc builds (Azure MI + ODBC 18 common).
+    for code in (-16, -25):
+        try:
+            conn.add_output_converter(code, _coerce_unknown_sql_type)
+        except Exception:
+            pass
+
+
 def resolve_password(cli_value: Optional[str], default_value: Optional[str], env_key: str) -> Optional[str]:
     """Resolve password from CLI, default, or environment variable (in that order)"""
     if cli_value:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pyodbc
 
-from ..utils.database import build_conn_str, pick_sql_driver, connect_to_database
+from ..utils.database import connect_to_database, pick_sql_driver, register_pyodbc_backup_converters
 from ..utils.logging import setup_logger
 from ..utils.paths import safe_name, safe_table_filename, short_slug, utc_iso, utc_ts_compact, win_safe_path
 from ..utils.sql import sql_header
@@ -158,9 +158,21 @@ def run_backup(cfg: dict):
             logger=logger,
         ) as conn:
             conn.timeout = 0
+            # Backup-only: tolerate ODBC type codes pyodbc cannot map (does not affect other app connections).
+            try:
+                register_pyodbc_backup_converters(conn)
+            except Exception:
+                pass
             cur = conn.cursor()
 
-            cur.execute("SELECT DB_NAME(), SUSER_SNAME(), GETDATE();")
+            # Cast to NVARCHAR so ODBC/pyodbc never sees driver-specific datetime (-16 etc.) on column 3
+            cur.execute(
+                """
+                SELECT CAST(DB_NAME() AS NVARCHAR(128)),
+                       CAST(SUSER_SNAME() AS NVARCHAR(256)),
+                       CONVERT(NVARCHAR(33), SYSUTCDATETIME(), 126);
+                """
+            )
             db_name, login_name, server_time = cur.fetchone()
             logger.info("Connected. DB=%s Login=%s ServerTime=%s", db_name, login_name, server_time)
 
