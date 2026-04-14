@@ -133,6 +133,25 @@ try:
 except ImportError:
     DRIVER_UTILS_AVAILABLE = False
 
+# First segment of "Type.Schema.Name" programmable objects (not "Schema.Table.Column")
+_SCHEMA_VALIDATION_OBJECT_TYPE_PREFIXES = frozenset(
+    {
+        "VIEW",
+        "SQL_STORED_PROCEDURE",
+        "SQL_STOR",
+        "SQL_SCALAR_FUNCTION",
+        "SQL_TABLE_VALUED_FUNCTION",
+        "SQL_INLINE_TABLE_VALUED_FUNCTION",
+        "SQL_FUNCTION",
+        "CLR_STORED_PROCEDURE",
+        "CLR_SCALAR_FUNCTION",
+        "CLR_TABLE_VALUED_FUNCTION",
+        "CLR_AGGREGATE_FUNCTION",
+        "SYNONYM",
+        "SEQUENCE",
+    }
+)
+
 
 def is_driver_missing_error(error_msg: str) -> bool:
     """Check if an error is related to missing ODBC driver."""
@@ -3967,6 +3986,71 @@ After installation, restart this application.
         except Exception:
             return None
 
+    def _build_column_mismatch_script_from_cursors(self, src_cur, dest_cur, obj_name: str):
+        """
+        For Schema.Table.Column mismatches, build a Red Gate–style script (drop deps on dest,
+        ALTER COLUMN to match source including COLLATE, recreate dropped indexes/PK/FKs from source).
+        Returns None if not applicable (programmable object path, missing table, or column missing on dest).
+        """
+        parts = obj_name.split(".")
+        if len(parts) != 3:
+            return None
+        schema, table, column = parts
+        if schema in _SCHEMA_VALIDATION_OBJECT_TYPE_PREFIXES:
+            return None
+        try:
+            src_cur.execute(
+                """
+                SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+                """,
+                (schema, table),
+            )
+            if src_cur.fetchone()[0] == 0:
+                return None
+        except Exception:
+            return None
+        try:
+            from gui.utils.schema_column_align import build_column_mismatch_fix_script
+        except ImportError:
+            try:
+                from azure_migration_tool.gui.utils.schema_column_align import (
+                    build_column_mismatch_fix_script,
+                )
+            except ImportError:
+                return None
+        try:
+            from src.backup.exporters import qident, type_sql
+        except ImportError:
+            try:
+                from sechma_backup.exporters import qident, type_sql
+            except ImportError:
+                from backup.exporters import qident, type_sql
+
+        def _get_code(cur, oname):
+            c, _ = self._get_object_code(cur, oname)
+            return c if c else None
+
+        try:
+            script, err = build_column_mismatch_fix_script(
+                src_cur,
+                dest_cur,
+                schema,
+                table,
+                column,
+                _get_code,
+                qident,
+                type_sql,
+            )
+        except Exception as ex:
+            return f"-- Error building column align script: {ex}"
+
+        if err:
+            return f"-- {err}"
+        if not script:
+            return None
+        return script
+
     def _get_table_index_replication_script(self, connection_map, db_name, schema, table):
         """
         Build a single script to replicate source table's index/PK layout on destination:
@@ -4320,9 +4404,54 @@ After installation, restart this application.
             for obj_info in objects_to_fix:
                 if obj_info[0] == obj_name:
                     db_name = obj_info[1]
+                    fix_status = obj_info[2] if len(obj_info) > 2 else ""
                     if db_name in connection_map:
                         _, _, src_info, dest_info = connection_map[db_name]
                         try:
+                            if (
+                                is_source
+                                and fix_status == "Mismatch"
+                                and len(obj_name.split(".")) == 3
+                                and obj_name.split(".")[0]
+                                not in _SCHEMA_VALIDATION_OBJECT_TYPE_PREFIXES
+                            ):
+                                src_conn = connect_to_any_database(
+                                    server=src_info[0],
+                                    database=src_info[1],
+                                    auth=src_info[2],
+                                    user=src_info[3],
+                                    password=src_info[4] or None,
+                                    db_type=self.src_db_type_var.get(),
+                                    port=int(self.src_port_var.get() or 50000),
+                                    timeout=30,
+                                )
+                                dest_conn = connect_to_any_database(
+                                    server=dest_info[0],
+                                    database=dest_info[1],
+                                    auth=dest_info[2],
+                                    user=dest_info[3],
+                                    password=dest_info[4] or None,
+                                    db_type=self.dest_db_type_var.get(),
+                                    port=int(self.dest_port_var.get() or 50000),
+                                    timeout=30,
+                                )
+                                try:
+                                    sc = src_conn.cursor()
+                                    dc = dest_conn.cursor()
+                                    alt = self._build_column_mismatch_script_from_cursors(
+                                        sc, dc, obj_name
+                                    )
+                                    if alt:
+                                        return alt
+                                finally:
+                                    try:
+                                        src_conn.close()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        dest_conn.close()
+                                    except Exception:
+                                        pass
                             # Use connection info to connect
                             conn_info = src_info if is_source else dest_info
                             db_type_var = self.src_db_type_var if is_source else self.dest_db_type_var
@@ -4364,6 +4493,13 @@ After installation, restart this application.
 
         # Callback to get DROP statement for destination object (for Mismatch: DROP then recreate from source)
         def get_drop_for_object(obj_name, db_name):
+            parts = obj_name.split(".")
+            if (
+                len(parts) == 3
+                and parts[0] not in _SCHEMA_VALIDATION_OBJECT_TYPE_PREFIXES
+            ):
+                # Column mismatch: full script (drops + ALTER + recreate) is returned from fetch_code; do not prepend DROP COLUMN.
+                return ""
             if db_name not in connection_map:
                 return ""
             _, _, src_info, dest_info = connection_map[db_name]
@@ -4441,6 +4577,7 @@ After installation, restart this application.
         
         def fetch_codes():
             try:
+                _oname, source_status, _dbn = obj_info
                 src_conn = connect_to_any_database(
                     server=src_server,
                     database=src_db,
@@ -4467,6 +4604,12 @@ After installation, restart this application.
                 
                 source_code, _ = self._get_object_code(src_cur, obj_name)
                 dest_code, _ = self._get_object_code(dest_cur, obj_name)
+                if source_status == "Mismatch":
+                    alt_script = self._build_column_mismatch_script_from_cursors(
+                        src_cur, dest_cur, obj_name
+                    )
+                    if alt_script:
+                        source_code = alt_script
                 
                 src_conn.close()
                 dest_conn.close()
@@ -5490,20 +5633,131 @@ After installation, restart this application.
                                             break
                                     
                                     if col_def:
-                                        type_str = type_sql(col_def.type_name, col_def.max_length, col_def.precision, col_def.scale)
+                                        dest_cur.execute(
+                                            """
+                                            SELECT 1 FROM sys.columns c
+                                            JOIN sys.tables t ON t.object_id = c.object_id
+                                            JOIN sys.schemas s ON s.schema_id = t.schema_id
+                                            WHERE s.name = ? AND t.name = ? AND c.name = ?
+                                            """,
+                                            (schema, table, column),
+                                        )
+                                        column_already_on_dest = dest_cur.fetchone() is not None
+
+                                        if column_already_on_dest and source_status == "Mismatch":
+                                            try:
+                                                from gui.utils.schema_column_align import (
+                                                    build_column_mismatch_fix_script,
+                                                )
+                                            except ImportError:
+                                                try:
+                                                    from azure_migration_tool.gui.utils.schema_column_align import (
+                                                        build_column_mismatch_fix_script,
+                                                    )
+                                                except ImportError:
+                                                    build_column_mismatch_fix_script = None
+                                            if build_column_mismatch_fix_script is None:
+                                                self.validation_log.insert(
+                                                    tk.END,
+                                                    "[X] Column align module not available.\n",
+                                                )
+                                                error_count += 1
+                                                continue
+
+                                            def _gc(cur, oname):
+                                                c, _ = self._get_object_code(cur, oname)
+                                                return c if c else None
+
+                                            script, cerr = build_column_mismatch_fix_script(
+                                                src_cur,
+                                                dest_cur,
+                                                schema,
+                                                table,
+                                                column,
+                                                _gc,
+                                                qident,
+                                                type_sql,
+                                            )
+                                            if cerr:
+                                                self.validation_log.insert(
+                                                    tk.END,
+                                                    f"[X] Column align: {cerr}\n",
+                                                )
+                                                error_count += 1
+                                                continue
+                                            if not script:
+                                                self.validation_log.insert(
+                                                    tk.END,
+                                                    f"[WARN] No auto-align script for {obj_name}; skipping.\n",
+                                                )
+                                                error_count += 1
+                                                continue
+                                            self.validation_log.insert(
+                                                tk.END,
+                                                f"  Executing column align script (batched)...\n",
+                                            )
+                                            self.validation_log.see(tk.END)
+                                            try:
+                                                try:
+                                                    from src.utils.sql import split_sql_on_go
+                                                except ImportError:
+                                                    split_sql_on_go = None
+                                                batches = (
+                                                    split_sql_on_go(script)
+                                                    if split_sql_on_go
+                                                    else [b.strip() for b in script.split("GO") if b.strip()]
+                                                )
+                                                for batch in batches:
+                                                    batch = batch.strip()
+                                                    if batch:
+                                                        dest_cur.execute(batch)
+                                                dest_conn.commit()
+                                                self.validation_log.insert(
+                                                    tk.END,
+                                                    f"[OK] Aligned column: {schema}.{table}.{column}\n",
+                                                )
+                                                success_count += 1
+                                            except Exception as al_err:
+                                                self.validation_log.insert(
+                                                    tk.END,
+                                                    f"[X] Column align failed: {al_err}\n",
+                                                )
+                                                error_count += 1
+                                                dest_conn.rollback()
+                                            continue
+
+                                        if column_already_on_dest:
+                                            self.validation_log.insert(
+                                                tk.END,
+                                                f"[SKIP] Column already on destination: {schema}.{table}.{column}\n",
+                                            )
+                                            continue
+
+                                        type_str = type_sql(
+                                            col_def.type_name,
+                                            col_def.max_length,
+                                            col_def.precision,
+                                            col_def.scale,
+                                        )
                                         nullable = "NULL" if col_def.is_nullable else "NOT NULL"
-                                        
+
                                         alter_sql = f"ALTER TABLE {qident(schema)}.{qident(table)} ADD {qident(column)} {type_str} {nullable}"
-                                        
+
                                         if col_def.is_identity:
                                             seed = parse_int_or_default(col_def.seed_value_str, 1)
                                             inc = parse_int_or_default(col_def.increment_value_str, 1)
-                                            alter_sql = f"ALTER TABLE {qident(schema)}.{qident(table)} ADD {qident(column)} {type_str} IDENTITY({seed},{inc}) {nullable}"
-                                        
+                                            alter_sql = (
+                                                f"ALTER TABLE {qident(schema)}.{qident(table)} ADD {qident(column)} "
+                                                f"{type_str} IDENTITY({seed},{inc}) {nullable}"
+                                            )
+
                                         dest_cur.execute(alter_sql)
                                         dest_conn.commit()
-                                        
-                                        self.validation_log.insert(tk.END, f"[OK] Added column: {schema}.{table}.{column}\n")
+
+                                        self.validation_log.insert(
+                                            tk.END,
+                                            f"[OK] Added column: {schema}.{table}.{column}\n",
+                                        )
                                         success_count += 1
                                     else:
                                         self.validation_log.insert(tk.END, f"[X] Column definition not found: {obj_name}\n")
