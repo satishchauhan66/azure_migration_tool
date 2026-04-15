@@ -177,11 +177,12 @@ class _ArmPicker(ttk.Frame):
         self._popup.withdraw()
 
     def refresh_suggestions(self) -> None:
-        self._apply_filter_and_popup()
+        """Sync listbox from ARM data after async load; do not pop the list (avoids reopening after a pick)."""
+        self._apply_filter_and_popup(show_popup=False)
 
     def restore_full_suggestions(self) -> None:
-        """Expand choice source to full ARM list for current typed text (same idea as ttk combobox restore)."""
-        self._apply_filter_and_popup()
+        """Re-sync filtered list for current entry text without opening the popup (used after <<ComboboxSelected>>)."""
+        self._apply_filter_and_popup(show_popup=False)
 
     def _on_destroy(self, event: tk.Event) -> None:
         self.hide_popup()
@@ -223,7 +224,7 @@ class _ArmPicker(ttk.Frame):
             full = ()
         return _filter_combo_values(full, self.entry.get())
 
-    def _apply_filter_and_popup(self) -> None:
+    def _apply_filter_and_popup(self, *, show_popup: bool = True) -> None:
         if str(self.entry.cget("state")) == "disabled":
             self.hide_popup()
             return
@@ -231,7 +232,7 @@ class _ArmPicker(ttk.Frame):
         self._lb.delete(0, tk.END)
         for v in filt:
             self._lb.insert(tk.END, v)
-        if filt:
+        if filt and show_popup:
             self._show_popup()
         else:
             self.hide_popup()
@@ -246,7 +247,7 @@ class _ArmPicker(ttk.Frame):
                 return
         except tk.TclError:
             pass
-        self._apply_filter_and_popup()
+        self._apply_filter_and_popup(show_popup=True)
         try:
             self.entry.focus_set()
         except tk.TclError:
@@ -267,7 +268,7 @@ class _ArmPicker(ttk.Frame):
     def _on_entry_keyrelease(self, event: tk.Event) -> None:
         if event.keysym in _TYPEAHEAD_SKIP_KEYSYMS:
             return
-        self._apply_filter_and_popup()
+        self._apply_filter_and_popup(show_popup=True)
 
     def _on_entry_return(self, event: tk.Event) -> Optional[str]:
         had = bool(self._lb.curselection())
@@ -276,7 +277,8 @@ class _ArmPicker(ttk.Frame):
             had = True
         if had:
             self._commit_list_selection()
-            self.event_generate("<<ComboboxSelected>>")
+            self.update_idletasks()
+            self.event_generate("<<ComboboxSelected>>", when="tail")
         return "break"
 
     def _on_lb_button1(self, event: tk.Event) -> None:
@@ -310,7 +312,9 @@ class _ArmPicker(ttk.Frame):
         except tk.TclError:
             pass
         if fire_event:
-            self.event_generate("<<ComboboxSelected>>")
+            # Defer so FocusOut / listbox default bindings finish before handlers run (Windows one-click select).
+            self.update_idletasks()
+            self.event_generate("<<ComboboxSelected>>", when="tail")
 
 
 class MiPitrRestoreTab:

@@ -233,9 +233,12 @@ def _arm_get_all_pages(credential: Any, first_url: str) -> Tuple[List[dict], Opt
     rows: List[dict] = []
     url: Optional[str] = first_url
     try:
+        token = get_access_token(credential)
         while url:
-            token = get_access_token(credential)
             r = requests.get(url, headers=_headers(token), timeout=180)
+            if r.status_code == 401:
+                token = get_access_token(credential)
+                r = requests.get(url, headers=_headers(token), timeout=180)
             if r.status_code != 200:
                 return rows, _format_http_error("ARM list GET", r)
             body = r.json() or {}
