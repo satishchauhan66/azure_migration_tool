@@ -2,7 +2,7 @@
 
 """Azure Migration Tool - GUI Application for SQL Server/Azure SQL Migrations."""
 
-__version__ = "1.2.8"
+__version__ = "1.3.0"
 __author__ = "66Degrees"
 
 
