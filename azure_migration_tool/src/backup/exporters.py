@@ -64,7 +64,15 @@ _FETCH_COLUMNS_SQL_PRIMARY = """
             CAST(ic.seed_value AS NVARCHAR(100)) AS seed_value_str,
             CAST(ic.increment_value AS NVARCHAR(100)) AS increment_value_str,
             CAST(dc.definition AS NVARCHAR(MAX)) AS default_definition_str,
-            CAST(dc.name AS NVARCHAR(256)) AS default_constraint_name
+            CAST(dc.name AS NVARCHAR(256)) AS default_constraint_name,
+            CAST(COALESCE(
+                CAST(c.collation_name AS NVARCHAR(256)),
+                CASE WHEN ty.name IN (
+                    N'varchar', N'nvarchar', N'char', N'nchar', N'text', N'ntext'
+                )
+                THEN CONVERT(NVARCHAR(256), DATABASEPROPERTYEX(DB_NAME(), N'Collation'))
+                ELSE NULL END
+            ) AS NVARCHAR(256)) AS collation_name
         FROM sys.columns c
         JOIN sys.types ty ON c.user_type_id = ty.user_type_id
         LEFT JOIN sys.identity_columns ic
@@ -89,7 +97,15 @@ _FETCH_COLUMNS_SQL_FALLBACK = """
             CONVERT(VARCHAR(100), ic.seed_value) AS seed_value_str,
             CONVERT(VARCHAR(100), ic.increment_value) AS increment_value_str,
             CONVERT(VARCHAR(MAX), dc.definition) AS default_definition_str,
-            CAST(dc.name AS VARCHAR(256)) AS default_constraint_name
+            CAST(dc.name AS VARCHAR(256)) AS default_constraint_name,
+            CAST(COALESCE(
+                CAST(c.collation_name AS VARCHAR(256)),
+                CASE WHEN ty.name IN (
+                    'varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext'
+                )
+                THEN CONVERT(VARCHAR(256), DATABASEPROPERTYEX(DB_NAME(), 'Collation'))
+                ELSE NULL END
+            ) AS VARCHAR(256)) AS collation_name
         FROM sys.columns c
         JOIN sys.types ty ON c.user_type_id = ty.user_type_id
         LEFT JOIN sys.identity_columns ic
@@ -214,7 +230,21 @@ def build_create_table_sql(
             type_str = "NVARCHAR(MAX)"
         else:
             type_str = type_sql(r.type_name, r.max_length, r.precision, r.scale)
-        
+
+        coll = getattr(r, "collation_name", None)
+        if coll is not None and hasattr(coll, "strip"):
+            coll = coll.strip() or None
+        tlower = (r.type_name or "").lower()
+        if coll and tlower in (
+            "varchar",
+            "nvarchar",
+            "char",
+            "nchar",
+            "text",
+            "ntext",
+        ):
+            type_str = f"{type_str} COLLATE {coll}"
+
         col_def = f"        {qident(r.column_name)} {type_str}"
 
         if r.is_identity:

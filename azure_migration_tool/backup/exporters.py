@@ -53,10 +53,20 @@ def parse_int_or_default(s, default: int) -> int:
 # --- Named tuples for return types ---
 
 TableRef = namedtuple("TableRef", ["schema_name", "table_name"])
-ColumnInfo = namedtuple("ColumnInfo", [
-    "column_name", "data_type", "character_maximum_length", "numeric_precision",
-    "numeric_scale", "is_nullable", "column_id"
-])
+ColumnInfo = namedtuple(
+    "ColumnInfo",
+    [
+        "column_name",
+        "data_type",
+        "character_maximum_length",
+        "numeric_precision",
+        "numeric_scale",
+        "is_nullable",
+        "column_id",
+        "collation_name",
+    ],
+    defaults=(None,),
+)
 TriggerInfo = namedtuple("TriggerInfo", ["schema_name", "trigger_name", "table_name", "object_id"])
 SequenceInfo = namedtuple("SequenceInfo", [
     "schema_name", "sequence_name", "start_value", "increment", "minimum_value",
@@ -81,7 +91,15 @@ def fetch_columns(cur, schema_name: str, table_name: str) -> List[ColumnInfo]:
     """Return column list for a table. Used by build_create_table_sql."""
     cur.execute("""
         SELECT c.name, t.name AS type_name,
-               c.max_length, c.precision, c.scale, c.is_nullable, c.column_id
+               c.max_length, c.precision, c.scale, c.is_nullable, c.column_id,
+               CAST(COALESCE(
+                   CAST(c.collation_name AS NVARCHAR(256)),
+                   CASE WHEN t.name IN (
+                       N'varchar', N'nvarchar', N'char', N'nchar', N'text', N'ntext'
+                   )
+                   THEN CONVERT(NVARCHAR(256), DATABASEPROPERTYEX(DB_NAME(), N'Collation'))
+                   ELSE NULL END
+               ) AS NVARCHAR(256)) AS collation_name
         FROM sys.columns c
         INNER JOIN sys.types t ON t.user_type_id = c.user_type_id
         INNER JOIN sys.tables tab ON tab.object_id = c.object_id
@@ -96,15 +114,21 @@ def fetch_columns(cur, schema_name: str, table_name: str) -> List[ColumnInfo]:
         char_max = None
         if r[1] in ("varchar", "nvarchar", "char", "nchar", "binary", "varbinary"):
             char_max = r[2] if r[1].startswith("n") else r[2]  # n* is length in chars for nvarchar
-        out.append(ColumnInfo(
-            column_name=r[0],
-            data_type=r[1],
-            character_maximum_length=char_max if char_max is not None else r[2],
-            numeric_precision=r[3],
-            numeric_scale=r[4],
-            is_nullable=bool(r[5]),
-            column_id=r[6]
-        ))
+        raw_coll = r[7] if len(r) > 7 else None
+        if raw_coll is not None and hasattr(raw_coll, "strip"):
+            raw_coll = raw_coll.strip() or None
+        out.append(
+            ColumnInfo(
+                column_name=r[0],
+                data_type=r[1],
+                character_maximum_length=char_max if char_max is not None else r[2],
+                numeric_precision=r[3],
+                numeric_scale=r[4],
+                is_nullable=bool(r[5]),
+                column_id=r[6],
+                collation_name=raw_coll,
+            )
+        )
     return out
 
 
@@ -323,6 +347,12 @@ def _column_sql(col: ColumnInfo) -> str:
     elif typ in ("datetime2", "time"):
         s = col.numeric_scale or 7
         typ = f"{typ}({s})"
+    dt = (col.data_type or "").lower()
+    coll = getattr(col, "collation_name", None)
+    if coll is not None and hasattr(coll, "strip"):
+        coll = coll.strip() or None
+    if coll and dt in ("varchar", "nvarchar", "char", "nchar", "text", "ntext"):
+        typ = f"{typ} COLLATE {coll}"
     null = " NULL" if col.is_nullable else " NOT NULL"
     return f"{qident(col.column_name)} {typ}{null}"
 
