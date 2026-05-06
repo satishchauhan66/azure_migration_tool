@@ -30,6 +30,9 @@ class BackupRestoreTab:
         self.blob_conn_var = self.main_window.shared_blob_connection_string
         self.blob_container_var = self.main_window.shared_blob_container
 
+        # listbox-label -> real blob path (set in _list_restore_backups)
+        self._restore_label_to_path: dict = {}
+
         self._create_widgets()
 
     def set_project_path(self, project_path):
@@ -130,6 +133,33 @@ class BackupRestoreTab:
             side=tk.LEFT, padx=5
         )
 
+        # Step 3: backup options (stripes)
+        step3 = ttk.LabelFrame(parent, text="Step 3: Backup options", padding=10)
+        step3.pack(fill=tk.X, padx=5, pady=5)
+        stripes_row = ttk.Frame(step3)
+        stripes_row.pack(fill=tk.X)
+        tk.Label(stripes_row, text="Stripes (parallel .bak files in blob):").pack(side=tk.LEFT)
+        self.bak_stripes_var = tk.StringVar(value="Auto")
+        self.bak_stripes_combo = ttk.Combobox(
+            stripes_row,
+            textvariable=self.bak_stripes_var,
+            values=["Auto", "1", "2", "4", "8", "16", "32"],
+            width=8,
+            state="readonly",
+        )
+        self.bak_stripes_combo.pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(
+            step3,
+            text=(
+                "Auto picks 1 stripe for DBs < 50 GB, more for larger ones (~150 GB / stripe). "
+                "Striping avoids the per-blob 50,000-block limit (error 3203 / 1117) and "
+                "speeds up large backups via parallel streams."
+            ),
+            fg="gray",
+            wraplength=700,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(6, 0))
+
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(pady=10)
         self.bak_to_blob_btn = ttk.Button(
@@ -184,6 +214,15 @@ class BackupRestoreTab:
             return
         container = (self.bak_container_var.get() or "db2-stage").strip()
 
+        stripes_raw = (self.bak_stripes_var.get() or "Auto").strip()
+        if stripes_raw.lower() == "auto":
+            stripes_arg = None
+        else:
+            try:
+                stripes_arg = max(1, min(64, int(stripes_raw)))
+            except ValueError:
+                stripes_arg = None
+
         self.bak_to_blob_btn.config(state=tk.DISABLED)
         self.bak_to_blob_log.delete("1.0", tk.END)
 
@@ -202,13 +241,21 @@ class BackupRestoreTab:
                     blob_connection_string=conn_str,
                     container=container,
                     log_callback=log,
+                    stripes=stripes_arg,
                 )
                 if summary.get("status") == "success":
-                    log(f"Blob path: {summary.get('container')}/{summary.get('blob_path')}")
+                    paths = summary.get("blob_paths") or [summary.get("blob_path")]
+                    for p in paths:
+                        if p:
+                            log(f"Blob path: {summary.get('container')}/{p}")
                     size_mb = summary.get("blob_size")
                     size_msg = f" ({size_mb / (1024*1024):.1f} MB)" if size_mb is not None else ""
+                    stripe_msg = f" {summary.get('stripes', 1)} stripe(s)." if summary.get("stripes") else ""
                     self.frame.after(
-                        0, lambda m=size_msg: messagebox.showinfo("Success", f"Backup to blob completed successfully.{m}")
+                        0,
+                        lambda m=size_msg, s=stripe_msg: messagebox.showinfo(
+                            "Success", f"Backup to blob completed successfully.{s}{m}"
+                        ),
                     )
                 else:
                     err = summary.get("error") or "Unknown error"
@@ -270,6 +317,16 @@ class BackupRestoreTab:
         ).pack(anchor=tk.W, pady=(0, 4))
 
         tk.Label(step1, text="Backups for this database (pick one):").pack(anchor=tk.W, pady=(8, 0))
+        tk.Label(
+            step1,
+            text=(
+                "Striped backups appear as ONE row tagged [N/M stripe(s), total ...]. "
+                "Pick that single row and the tool restores from all stripes automatically."
+            ),
+            fg="gray",
+            wraplength=700,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 4))
         list_frame = ttk.Frame(step1)
         list_frame.pack(fill=tk.X, pady=2)
         self.restore_backups_listbox = tk.Listbox(list_frame, height=6, width=70, selectmode=tk.SINGLE)
@@ -351,11 +408,15 @@ class BackupRestoreTab:
             return
         idx = sel[0]
         items = self.restore_backups_listbox.get(0, tk.END)
-        if idx < len(items):
-            path = items[idx]
-            self.restore_blob_path_var.set(path)
-            if "/" in path:
-                self.restore_blob_db_var.set(path.split("/", 1)[0])
+        if idx >= len(items):
+            return
+        label = items[idx]
+        # Prefer the lookup map populated during listing; fall back to splitting the label.
+        path_map = getattr(self, "_restore_label_to_path", {}) or {}
+        path = path_map.get(label) or label.split("    [", 1)[0].strip()
+        self.restore_blob_path_var.set(path)
+        if "/" in path:
+            self.restore_blob_db_var.set(path.split("/", 1)[0])
 
     def _list_restore_databases(self):
         """Discover top-level folder names in container and populate combobox."""
@@ -400,7 +461,11 @@ class BackupRestoreTab:
             self.restore_db_filter_var.set("(no folders found)")
 
     def _list_restore_backups(self):
-        """List .bak blobs under the chosen database folder only."""
+        """List .bak blobs under the chosen database folder only.
+
+        Striped sets (`<db>_partNNofMM.bak`) are collapsed to a single entry
+        showing any one stripe (the restore module discovers siblings).
+        """
         conn_str = (self.restore_blob_conn_var.get() or "").strip()
         container = (self.restore_container_var.get() or "db2-stage").strip()
         db_name = (self.restore_db_filter_var.get() or "").strip()
@@ -419,16 +484,62 @@ class BackupRestoreTab:
 
         def run():
             try:
+                import re as _re
                 from azure.storage.blob import BlobServiceClient
 
                 client = BlobServiceClient.from_connection_string(conn_str)
                 container_client = client.get_container_client(container)
-                names = [
-                    b.name for b in container_client.list_blobs(name_starts_with=prefix) if b.name.endswith(".bak")
-                ]
-                names.sort(reverse=True)
-                self.frame.after(0, lambda: self._populate_restore_backups_list(names))
+                # Pull each blob's size so we can show MB/GB next to the run.
+                blob_iter = list(container_client.list_blobs(name_starts_with=prefix))
+                all_baks = [b for b in blob_iter if b.name.endswith(".bak")]
+
+                # Group striped sets: key = (folder, filename_prefix_before_part, total).
+                # The regex MUST be matched against the file name (not the full path),
+                # otherwise m.start() is an offset into the path and `fname[: m.start()]`
+                # silently returns the entire filename.
+                stripe_re = _re.compile(r"_part(\d+)of(\d+)\.bak$", _re.IGNORECASE)
+                groups: dict = {}
+                singles: list = []
+                for b in all_baks:
+                    name = b.name
+                    folder, fname = name.rsplit("/", 1) if "/" in name else ("", name)
+                    m = stripe_re.search(fname)
+                    if not m:
+                        singles.append((name, b.size or 0))
+                        continue
+                    pref = fname[: m.start()]
+                    key = (folder, pref, int(m.group(2)))
+                    groups.setdefault(key, []).append((int(m.group(1)), name, b.size or 0))
+
+                def _fmt_size(n: int) -> str:
+                    gb = n / (1024 ** 3)
+                    if gb >= 1.0:
+                        return f"{gb:,.1f} GB"
+                    mb = n / (1024 ** 2)
+                    return f"{mb:,.1f} MB"
+
+                # `display` items are (sort_key, label, payload_path)
+                display: list = []
+                for name, size in singles:
+                    label = f"{name}    [single, {_fmt_size(size)}]"
+                    display.append((name, label, name))
+
+                for (folder, pref, total), parts in groups.items():
+                    parts.sort()
+                    first_name = parts[0][1]
+                    total_size = sum(p[2] for p in parts)
+                    have = len(parts)
+                    status = f"{have}/{total} stripe(s)" + ("" if have == total else "  MISSING!")
+                    label = f"{first_name}    [{status}, total {_fmt_size(total_size)}]"
+                    # Sort by folder so newest run_id (highest timestamp) sorts last
+                    display.append((first_name, label, first_name))
+
+                display.sort(key=lambda t: t[0], reverse=True)
+                labels = [t[1] for t in display]
+                self._restore_label_to_path = {t[1]: t[2] for t in display}
+                self.frame.after(0, lambda: self._populate_restore_backups_list(labels))
             except Exception as e:
+                self._restore_label_to_path = {}
                 self.frame.after(0, lambda: self._populate_restore_backups_list([], str(e)))
 
         threading.Thread(target=run, daemon=True).start()
