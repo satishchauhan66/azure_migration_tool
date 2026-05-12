@@ -228,3 +228,4 @@ identity_cdc_runs/
 
 projects/
 docs/ado/
+azure_migration_tool/test_blob_auth_methods.py

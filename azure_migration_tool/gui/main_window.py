@@ -77,9 +77,11 @@ class MainWindow:
         except ImportError:
             from azure_migration_tool.gui.utils.blob_config import load_blob_settings
 
-        _blob_conn, _blob_cont = load_blob_settings()
+        _blob_conn, _blob_cont, _blob_auth_mode, _blob_acct_url = load_blob_settings()
         self.shared_blob_connection_string = tk.StringVar(value=_blob_conn)
         self.shared_blob_container = tk.StringVar(value=_blob_cont)
+        self.shared_blob_auth_mode = tk.StringVar(value=_blob_auth_mode or "connection_string")
+        self.shared_blob_account_url = tk.StringVar(value=_blob_acct_url)
         
         # Create menu bar
         self._create_menu()

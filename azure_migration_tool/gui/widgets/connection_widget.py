@@ -134,12 +134,12 @@ class ConnectionWidget:
         # Save/Delete buttons for server
         btn_frame = ttk.Frame(server_frame)
         btn_frame.pack(side=tk.LEFT, padx=(5, 0))
-        save_btn = ttk.Button(btn_frame, text="Save", width=5, command=self._save_server)
-        save_btn.pack(side=tk.LEFT, padx=1)
-        add_tooltip(save_btn, "Save this connection for later")
-        del_btn = ttk.Button(btn_frame, text="Del", width=4, command=self._delete_server)
-        del_btn.pack(side=tk.LEFT, padx=1)
-        add_tooltip(del_btn, "Remove saved connection")
+        self._save_server_btn = ttk.Button(btn_frame, text="Save", width=5, command=self._save_server)
+        self._save_server_btn.pack(side=tk.LEFT, padx=1)
+        add_tooltip(self._save_server_btn, "Save this connection for later")
+        self._del_server_btn = ttk.Button(btn_frame, text="Del", width=4, command=self._delete_server)
+        self._del_server_btn.pack(side=tk.LEFT, padx=1)
+        add_tooltip(self._del_server_btn, "Remove saved connection")
         
         # Port row (for DB2)
         self.port_label = tk.Label(self.frame, text="Port:")
@@ -166,9 +166,9 @@ class ConnectionWidget:
         # Remove aggressive validation on click/focus
         
         # Refresh button for database - only way to trigger database listing
-        ref_db_btn = ttk.Button(db_frame, text="Refresh", width=8, command=self._refresh_databases)
-        ref_db_btn.pack(side=tk.LEFT, padx=(5, 0))
-        add_tooltip(ref_db_btn, "Refresh list of databases from server")
+        self._ref_db_btn = ttk.Button(db_frame, text="Refresh", width=8, command=self._refresh_databases)
+        self._ref_db_btn.pack(side=tk.LEFT, padx=(5, 0))
+        add_tooltip(self._ref_db_btn, "Refresh list of databases from server")
         
         # Schema row (for DB2 - to select source schema like USERID)
         self.schema_label = tk.Label(self.frame, text="Schema (e.g. user ID):")
@@ -184,9 +184,9 @@ class ConnectionWidget:
             postcommand=self._on_schema_dropdown_open
         )
         self.schema_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ref_schema_btn = ttk.Button(schema_frame, text="Refresh", width=8, command=self._refresh_schemas)
-        ref_schema_btn.pack(side=tk.LEFT, padx=(5, 0))
-        add_tooltip(ref_schema_btn, "Refresh list of schemas")
+        self._ref_schema_btn = ttk.Button(schema_frame, text="Refresh", width=8, command=self._refresh_schemas)
+        self._ref_schema_btn.pack(side=tk.LEFT, padx=(5, 0))
+        add_tooltip(self._ref_schema_btn, "Refresh list of schemas")
         self._update_schema_visibility()
         
         # Auth row (only for SQL Server)
@@ -227,7 +227,9 @@ class ConnectionWidget:
         
         # Configure column weights
         self.frame.columnconfigure(1, weight=1)
-        
+        # Last row index used on ``self.frame`` (for siblings that grid below this widget).
+        self.grid_last_row = row_start + 7
+
         # Load saved servers + recent hosts / users
         self._refresh_server_list()
         self._on_user_combo_postcommand()
@@ -947,3 +949,37 @@ class ConnectionWidget:
                 self._refresh_server_list()
             else:
                 messagebox.showerror("Error", "Failed to delete server configuration.")
+
+    def set_connection_fields_locked(self, locked: bool) -> None:
+        """
+        Lock or unlock connection inputs (used after Step 1 validation in Backup tab).
+        """
+        if locked:
+            self.db_type_combo.configure(state="disabled")
+            self.server_combo.configure(state="disabled")
+            self.db_combo.configure(state="disabled")
+            self.auth_combo.configure(state="disabled")
+            self.port_entry.configure(state="disabled")
+            self.schema_combo.configure(state="disabled")
+            self.user_combo.configure(state="disabled")
+            self.password_entry.configure(state="disabled")
+            self._save_server_btn.configure(state="disabled")
+            self._del_server_btn.configure(state="disabled")
+            self._ref_db_btn.configure(state="disabled")
+            self._ref_schema_btn.configure(state="disabled")
+        else:
+            self.db_type_combo.configure(state="readonly")
+            self.server_combo.configure(state="normal")
+            self.db_combo.configure(state="normal")
+            self.auth_combo.configure(state="readonly")
+            self.port_entry.configure(state="normal")
+            self.schema_combo.configure(state="normal")
+            self.user_combo.configure(state="normal")
+            self.password_entry.configure(state="normal")
+            self._save_server_btn.configure(state="normal")
+            self._del_server_btn.configure(state="normal")
+            self._ref_db_btn.configure(state="normal")
+            self._ref_schema_btn.configure(state="normal")
+            self._update_port_visibility()
+            self._update_schema_visibility()
+            self._update_auth_visibility()
