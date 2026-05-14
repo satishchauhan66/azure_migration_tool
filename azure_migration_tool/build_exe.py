@@ -130,18 +130,31 @@ def build_pyinstaller(app_dir: Path, console: bool = False) -> bool:
 
     # Create spec file
     spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
 
 # Small exe - PySpark NOT bundled (users install it via: pip install pyspark)
 # DB2 JDBC driver IS bundled in drivers folder
 
 app_datas = {datas_str}
 
+# Collect ALL submodules from packages that use dynamic/lazy imports
+_azure_hidden = (
+    collect_submodules("azure.storage.blob")
+    + collect_submodules("azure.identity")
+    + collect_submodules("azure.core")
+    + collect_submodules("azure.mgmt.storage")
+    + collect_submodules("azure.mgmt.subscription")
+    + collect_submodules("azure.mgmt.datafactory")
+    + collect_submodules("azure.keyvault.secrets")
+    + collect_submodules("msal")
+)
+
 a = Analysis(
     [r"{app_dir / 'main.py'}"],
     pathex=[r"{project_root}", r"{app_dir}"],
     binaries=[],
     datas=app_datas,
-    hiddenimports=[
+    hiddenimports=_azure_hidden + [
         # App modules - gui
         "gui", "gui.main_window",
         "gui.tabs", "gui.tabs.schema_tab", "gui.tabs.data_migration_tab",
@@ -188,10 +201,29 @@ a = Analysis(
         "jaydebeapi", "jpype1", "jpype", "jpype.imports", "pyodbc", "pandas",
         "openpyxl", "requests", "msal",
         # Azure SDK (blob backup/restore, identity, management)
-        "azure", "azure.identity", "azure.core", "azure.core.credentials",
-        "azure.core.pipeline", "azure.core.exceptions",
+        "azure", "azure.identity", "azure.identity._credentials",
+        "azure.identity._credentials.azure_cli",
+        "azure.identity._credentials.azure_powershell",
+        "azure.identity._credentials.browser",
+        "azure.identity._credentials.chained",
+        "azure.identity._credentials.default",
+        "azure.identity._credentials.managed_identity",
+        "azure.identity._internal",
+        "azure.core", "azure.core.credentials",
+        "azure.core.pipeline", "azure.core.pipeline.policies",
+        "azure.core.pipeline.transport",
+        "azure.core.exceptions", "azure.core.rest",
         "azure.storage", "azure.storage.blob",
         "azure.storage.blob._shared",
+        "azure.storage.blob._shared.authentication",
+        "azure.storage.blob._shared.policies",
+        "azure.storage.blob._blob_client",
+        "azure.storage.blob._blob_service_client",
+        "azure.storage.blob._container_client",
+        "azure.storage.blob._serialize", "azure.storage.blob._deserialize",
+        "azure.storage.blob._generated",
+        "azure.storage.blob._generated.operations",
+        "azure.storage.blob._generated.models",
         "azure.mgmt.storage", "azure.mgmt.subscription",
         "azure.mgmt.datafactory", "azure.keyvault.secrets",
         "tkinter", "tkinter.ttk", "tkinter.messagebox", "tkinter.filedialog",
@@ -273,7 +305,8 @@ exe = EXE(
 
 def main():
     parser = argparse.ArgumentParser(description='Build Azure Migration Tool')
-    parser.add_argument('--clean', action='store_true', help='Clean before building')
+    parser.add_argument('--clean', action='store_true', help='(Legacy flag, clean is now the default)')
+    parser.add_argument('--no-clean', action='store_true', help='Skip cleaning build/dist (reuse cache)')
     parser.add_argument('--debug', action='store_true', help='Build with console window')
     args = parser.parse_args()
     
@@ -286,13 +319,17 @@ def main():
     print_header("Azure Migration Tool - Build System")
     print(f"App Directory: {app_dir}")
     
-    # Clean
-    if args.clean:
-        print("\nCleaning...")
+    # Always clean unless --no-clean is passed (ensures new packages are picked up)
+    if not args.no_clean:
+        print("\nCleaning previous build...")
         for d in [dist_dir, build_dir]:
             if d.exists():
                 shutil.rmtree(d)
                 print(f"  Removed {d.name}")
+        spec_file = app_dir / 'AzureMigrationTool.spec'
+        if spec_file.exists():
+            spec_file.unlink()
+            print("  Removed AzureMigrationTool.spec")
     
     # Check drivers
     print("\nChecking bundled drivers...")

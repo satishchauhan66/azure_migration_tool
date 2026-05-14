@@ -81,11 +81,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r azure_migration_tool/requirements.txt
-          pip install pyinstaller
+          pip install -r azure_migration_tool/requirements-build.txt
 
       - name: Build exe
         run: |
-          python azure_migration_tool/build_exe.py
+          python azure_migration_tool/build_exe.py --clean
         env:
           PYTHONIOENCODING: utf-8
 

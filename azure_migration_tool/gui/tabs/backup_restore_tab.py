@@ -1063,15 +1063,18 @@ class BackupRestoreTab:
 
     def _start_bak_to_blob(self):
         """Run .bak backup to Azure Blob (BACKUP TO URL)."""
+        run_bak_backup_to_blob = None
+        _import_err = ""
         try:
             from src.backup.bak_to_blob import run_bak_backup_to_blob
-        except ImportError:
+        except ImportError as e1:
+            _import_err = str(e1)
             try:
                 from azure_migration_tool.src.backup.bak_to_blob import run_bak_backup_to_blob
-            except ImportError:
-                run_bak_backup_to_blob = None
+            except ImportError as e2:
+                _import_err = f"{e1} | {e2}"
         if not run_bak_backup_to_blob:
-            messagebox.showerror("Error", "Backup to blob module not available. Install: pip install azure-storage-blob")
+            messagebox.showerror("Error", f"Backup to blob module not available.\n\n{_import_err}\n\nInstall: pip install azure-storage-blob")
             return
         if not self._bak_step1_validated:
             messagebox.showerror(
