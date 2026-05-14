@@ -8,7 +8,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from pathlib import Path
 import threading
-import subprocess
 import sys
 import os
 import logging
@@ -1185,8 +1184,6 @@ class BackupRestoreTab:
 
     def _open_local_backup_folder(self):
         """Open the backup folder in Windows Explorer."""
-        import subprocess
-        
         folder_path = (self.local_backup_path_var.get() or "").strip()
         if not folder_path:
             messagebox.showwarning(
@@ -1218,7 +1215,7 @@ class BackupRestoreTab:
                 return
         
         try:
-            subprocess.Popen(['explorer', folder_path])
+            os.startfile(folder_path)
         except Exception as e:
             messagebox.showerror("Error", f"Could not open folder:\n{_compact_dialog_error(str(e))}")
 

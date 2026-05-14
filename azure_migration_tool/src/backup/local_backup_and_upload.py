@@ -98,9 +98,9 @@ def ensure_dir_and_probe_write(
 
     if apply_icacls_everyone:
         try:
-            import subprocess
+            from ..utils.subprocess_utils import run_silent
 
-            icacls_result = subprocess.run(
+            icacls_result = run_silent(
                 ["icacls", target_dir, "/grant", "Everyone:(OI)(CI)F", "/T"],
                 capture_output=True,
                 text=True,
@@ -236,8 +236,8 @@ def run_local_backup_and_upload(
         # Grant Everyone full control (for SQL Server service account access); only if folder is visible here
         if local_backup_dir.exists() and local_backup_dir.is_dir():
             try:
-                import subprocess
-                icacls_result = subprocess.run(
+                from ..utils.subprocess_utils import run_silent
+                icacls_result = run_silent(
                     ['icacls', str(local_backup_dir), '/grant', 'Everyone:(OI)(CI)F', '/T'],
                     capture_output=True,
                     text=True,

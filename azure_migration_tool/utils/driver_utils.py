@@ -9,6 +9,14 @@ import os
 import sys
 import subprocess
 import tempfile
+
+try:
+    from src.utils.subprocess_utils import run_silent as _run_silent
+except ImportError:
+    try:
+        from azure_migration_tool.src.utils.subprocess_utils import run_silent as _run_silent
+    except ImportError:
+        _run_silent = subprocess.run
 import urllib.request
 import platform
 import ctypes
@@ -149,7 +157,7 @@ def install_odbc_driver_silent(msi_path: str, log_callback=None) -> Tuple[bool, 
         if log_callback:
             log_callback(f"Running: {' '.join(cmd)}")
         
-        result = subprocess.run(
+        result = _run_silent(
             cmd,
             capture_output=True,
             text=True,
@@ -267,7 +275,7 @@ if (Test-Path $installerPath) {{
 '''
     
     try:
-        result = subprocess.run(
+        result = _run_silent(
             ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
             capture_output=True,
             text=True,

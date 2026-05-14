@@ -9,6 +9,14 @@ Runs on first startup or when dependencies are missing.
 import os
 import sys
 import subprocess
+
+try:
+    from src.utils.subprocess_utils import run_silent as _run_silent
+except ImportError:
+    try:
+        from azure_migration_tool.src.utils.subprocess_utils import run_silent as _run_silent
+    except ImportError:
+        _run_silent = subprocess.run
 import platform
 import tempfile
 import shutil
@@ -122,7 +130,7 @@ class DependencyChecker:
         
         # Check system PATH
         try:
-            result = subprocess.run(['java', '-version'], capture_output=True, text=True)
+            result = _run_silent(['java', '-version'], capture_output=True, text=True)
             output = result.stderr or result.stdout
             if 'version' in output.lower():
                 # Parse version
@@ -140,7 +148,7 @@ class DependencyChecker:
     def _get_java_version(self, java_exe: str) -> Optional[int]:
         """Get Java version number."""
         try:
-            result = subprocess.run([java_exe, '-version'], capture_output=True, text=True)
+            result = _run_silent([java_exe, '-version'], capture_output=True, text=True)
             output = result.stderr or result.stdout
             import re
             match = re.search(r'version "(\d+)', output)
@@ -280,7 +288,7 @@ class DependencyChecker:
             self._report("Installing ODBC Driver (requires admin)...", 70)
             
             # Silent install
-            result = subprocess.run(
+            result = _run_silent(
                 ['msiexec', '/i', str(msi_path), '/quiet', '/norestart', 'IACCEPTMSODBCSQLLICENSETERMS=YES'],
                 capture_output=True,
                 text=True
@@ -320,7 +328,7 @@ class DependencyChecker:
         
         for py in candidates:
             try:
-                result = subprocess.run([py, '--version'], capture_output=True, text=True, timeout=5)
+                result = _run_silent([py, '--version'], capture_output=True, text=True, timeout=5)
                 if result.returncode == 0:
                     version = result.stdout.strip() or result.stderr.strip()
                     # Set environment for PySpark
@@ -347,7 +355,7 @@ class DependencyChecker:
             if python_ok:
                 py = os.environ.get('PYSPARK_PYTHON', 'python')
                 try:
-                    result = subprocess.run(
+                    result = _run_silent(
                         [py, '-c', 'import pyspark; print(pyspark.__version__)'],
                         capture_output=True, text=True, timeout=10
                     )
@@ -382,7 +390,7 @@ class DependencyChecker:
         report("Installing PySpark (this may take a few minutes)...")
         
         try:
-            result = subprocess.run(
+            result = _run_silent(
                 [py, '-m', 'pip', 'install', 'pyspark', '--upgrade'],
                 capture_output=True, text=True, timeout=300
             )

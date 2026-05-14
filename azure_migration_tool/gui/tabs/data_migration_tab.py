@@ -11,6 +11,14 @@ import threading
 import sys
 import subprocess
 import tempfile
+
+try:
+    from src.utils.subprocess_utils import run_silent as _run_silent
+except ImportError:
+    try:
+        from azure_migration_tool.src.utils.subprocess_utils import run_silent as _run_silent
+    except ImportError:
+        _run_silent = subprocess.run
 import os
 import secrets
 import string
@@ -634,7 +642,7 @@ exit 0
             self.migration_log.insert(tk.END, "Running PowerShell installation script...\n")
             self.migration_log.see(tk.END)
             
-            result = subprocess.run(
+            result = _run_silent(
                 ps_cmd,
                 capture_output=True,
                 text=True,
@@ -729,7 +737,7 @@ exit 0
                 "/norestart"  # Don't restart
             ]
             
-            result = subprocess.run(
+            result = _run_silent(
                 install_cmd,
                 capture_output=True,
                 text=True,
@@ -1585,7 +1593,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     safe_cmd = [x if x not in [bcp_password, src_access_token] and not (src_access_token and x == src_access_token) else "***" for x in export_cmd]
                     logger_callback(f"  Command: {' '.join(safe_cmd[:8])}...")
                     
-                    result = subprocess.run(export_cmd, capture_output=True, text=True, timeout=3600)
+                    result = _run_silent(export_cmd, capture_output=True, text=True, timeout=3600)
                     if result.returncode != 0:
                         error_msg = result.stderr or result.stdout
                         
@@ -1658,7 +1666,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     safe_cmd = [x if x not in [bcp_password, dest_access_token] and not (dest_access_token and x == dest_access_token) else "***" for x in import_cmd]
                     logger_callback(f"  Command: {' '.join(safe_cmd[:8])}...")
                     
-                    result = subprocess.run(import_cmd, capture_output=True, text=True, timeout=3600)
+                    result = _run_silent(import_cmd, capture_output=True, text=True, timeout=3600)
                     if result.returncode != 0:
                         error_msg = result.stderr or result.stdout
                         
