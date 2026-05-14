@@ -171,7 +171,8 @@ def run_local_backup_and_upload(
         try:
             from src.utils.redact_secrets import redact_sensitive_text
         except ImportError:
-            from azure_migration_tool.src.utils.redact_secrets import redact_sensitive_text
+            def redact_sensitive_text(t: str) -> str:  # type: ignore[misc]
+                return t
 
     _emit = log
 

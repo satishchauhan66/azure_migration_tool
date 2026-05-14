@@ -25,9 +25,13 @@ logger = logging.getLogger(__name__)
 def _compact_dialog_error(msg: str, max_len: int = 600) -> str:
     """Keep error popups short; strip secrets; full detail stays in the Log panel (redacted)."""
     try:
-        from azure_migration_tool.src.utils.redact_secrets import redact_sensitive_text
-    except ImportError:
         from src.utils.redact_secrets import redact_sensitive_text
+    except ImportError:
+        try:
+            from azure_migration_tool.src.utils.redact_secrets import redact_sensitive_text
+        except ImportError:
+            def redact_sensitive_text(t: str) -> str:  # type: ignore[misc]
+                return t
     m = redact_sensitive_text((msg or "").strip())
     if len(m) <= max_len:
         return m

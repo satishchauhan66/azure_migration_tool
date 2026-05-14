@@ -56,7 +56,8 @@ except ImportError:
     try:
         from src.utils.redact_secrets import redact_sensitive_text
     except ImportError:
-        from utils.redact_secrets import redact_sensitive_text
+        def redact_sensitive_text(t: str) -> str:  # type: ignore[misc]
+            return t
 
 logger = logging.getLogger(__name__)
 

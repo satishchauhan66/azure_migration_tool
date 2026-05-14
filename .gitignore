@@ -131,6 +131,8 @@ credentials.json
 secrets.json
 *credentials*
 *secrets*
+# Exception: redact_secrets.py is source code, not a secret
+!**/redact_secrets.py
 *password*
 *.pem
 *.key
