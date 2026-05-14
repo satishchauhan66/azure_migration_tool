@@ -16,6 +16,37 @@ import sys
 import os
 from pathlib import Path
 
+
+def _suppress_subprocess_console_windows() -> None:
+    """Globally prevent every subprocess.Popen from flashing a console window.
+
+    When a PyInstaller-built *windowed* app spawns any subprocess (icacls,
+    powershell, az.cmd, java, bcp, ...), Windows creates a visible cmd.exe
+    console because there is no parent console to inherit.  This monkey-patch
+    injects CREATE_NO_WINDOW + SW_HIDE into every Popen call process-wide,
+    covering our own code *and* third-party libs (azure-identity, msal, etc.).
+    """
+    if not sys.platform.startswith("win"):
+        return
+    import subprocess
+    _CREATE_NO_WINDOW = 0x08000000
+    _real_init = subprocess.Popen.__init__
+
+    def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs.setdefault("creationflags", 0)
+        kwargs["creationflags"] |= _CREATE_NO_WINDOW
+        if kwargs.get("startupinfo") is None:
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0  # SW_HIDE
+            kwargs["startupinfo"] = si
+        _real_init(self, *args, **kwargs)
+
+    subprocess.Popen.__init__ = _patched_init  # type: ignore[method-assign]
+
+
+_suppress_subprocess_console_windows()
+
 # Handle frozen exe (PyInstaller) vs normal execution
 if getattr(sys, 'frozen', False):
     # Running as compiled exe
