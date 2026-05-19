@@ -111,6 +111,12 @@ def build_pyinstaller(app_dir: Path, console: bool = False) -> bool:
     # Add drivers folder (includes db2jcc4.jar for DB2 connections)
     if drivers_dir.exists():
         datas_list.append((str(drivers_dir), 'drivers'))
+
+    # BCP / SQL Command Line Utilities MSI (run installer/build_installer.ps1 to download)
+    for tools_candidate in (app_dir / 'tools', app_dir / 'installer' / 'tools'):
+        if tools_candidate.is_dir() and any(tools_candidate.glob('*.msi')):
+            datas_list.append((str(tools_candidate), 'tools'))
+            break
     
     # Add gui, setup, backup, and src folders
     for subdir in ['gui', 'setup', 'backup', 'src']:
@@ -188,7 +194,8 @@ a = Analysis(
         "src.backup.db2_schema_backup", "src.backup.db2_backup_exporters",
         "src.restore", "src.restore.schema_restore", "src.restore.nullability_fix",
         "src.restore.restore_from_blob", "src.restore.restore_from_disk",
-        "src.migration", "src.migration.data_migration",
+        "src.migration", "src.migration.data_migration", "src.migration.bcp_preflight",
+        "src.utils.bcp_tools",
         "src.orchestration", "src.orchestration.full_migration",
         "src.utils", "src.utils.database", "src.utils.sql", "src.utils.paths",
         "src.utils.redact_secrets", "src.utils.subprocess_utils",

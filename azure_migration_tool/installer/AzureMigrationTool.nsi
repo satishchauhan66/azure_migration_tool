@@ -43,6 +43,8 @@
 !define ODBC_MSI           "odbc\msodbcsql18_x64.msi"
 ; Bundled Java (Eclipse Temurin 17) for DB2/JDBC - run installer\download_java.ps1 to populate
 !define JAVA_DIR           "java"
+; SQL Server Command Line Utilities (bcp.exe) - run installer\build_installer.ps1 to download MSI
+!define BCP_MSI            "tools\SqlCmdLnUtils.msi"
 
 ; ---------------------------------------------------------------------------
 ; Installer attributes
@@ -68,7 +70,7 @@ Unicode True
 !define MUI_ABORTWARNING
 !define MUI_BRANDINGTEXT "Developed by 66Degrees"
 !define MUI_WELCOMEPAGE_TITLE "Welcome to ${PRODUCT_NAME} Setup"
-!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and optional components.$\r$\n$\r$\nYou can install for the current user only, or for all users (requires administrator).$\r$\n$\r$\nIncluded: application; ODBC Driver 18 (all-users installs only); Java 17 for DB2/JDBC if bundled.$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar).$\r$\n$\r$\nClick Next to continue."
+!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and optional components.$\r$\n$\r$\nYou can install for the current user only, or for all users (requires administrator).$\r$\n$\r$\nIncluded: application; BCP/SQL Command Line tools (if bundled); ODBC Driver 18 (all-users); Java 17 for DB2/JDBC if bundled.$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar).$\r$\n$\r$\nClick Next to continue."
 !define MUI_FINISHPAGE_TITLE "Completing ${PRODUCT_NAME} Setup"
 !define MUI_FINISHPAGE_TEXT "${PRODUCT_NAME} has been installed.$\r$\n$\r$\nPer-user installs do not run the ODBC MSI automatically; install Microsoft ODBC Driver 18 for SQL Server separately if needed.$\r$\n$\r$\nDeveloped by 66Degrees."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXE}"
@@ -121,6 +123,14 @@ Section "MainSection" SEC01
   File /r "${JAVA_DIR}"
   !endif
 
+  !ifdef HAVE_BCP
+  SetOutPath "$INSTDIR\tools"
+  File "${BCP_MSI}"
+  DetailPrint "Installing SQL Server Command Line Utilities (bcp.exe)..."
+  ExecWait '"$SYSDIR\msiexec.exe" /i "$INSTDIR\tools\SqlCmdLnUtils.msi" /quiet /norestart'
+  SetOutPath "$INSTDIR"
+  !endif
+
   ; Registry + uninstall (hive follows install mode)
   ${if} $MultiUser.InstallMode == "AllUsers"
     WriteRegStr HKLM "Software\${PRODUCT_NAME}" "InstallPath" "$INSTDIR"
@@ -150,6 +160,8 @@ Section "Uninstall"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$INSTDIR\odbc\msodbcsql18_x64.msi"
   RMDir "$INSTDIR\odbc"
+  Delete "$INSTDIR\tools\SqlCmdLnUtils.msi"
+  RMDir "$INSTDIR\tools"
   RMDir /r "$INSTDIR\java"
   RMDir "$INSTDIR"
 

@@ -30,8 +30,12 @@ wheels/
 # Installer: keep scripts and NSIS; ignore bundled downloads (large)
 azure_migration_tool/installer/java/
 azure_migration_tool/installer/odbc/*.msi
+azure_migration_tool/installer/tools/*.msi
+azure_migration_tool/tools/*.msi
 installer/java/
 installer/odbc/*.msi
+installer/tools/*.msi
+tools/*.msi
 
 # Installer logs
 pip-log.txt

@@ -585,6 +585,19 @@ class DependencyChecker:
         if not odbc_ok:
             issues.append(f"ODBC: {odbc_msg}")
 
+        try:
+            from src.utils.bcp_tools import find_bcp_exe
+        except ImportError:
+            try:
+                from azure_migration_tool.src.utils.bcp_tools import find_bcp_exe
+            except ImportError:
+                find_bcp_exe = lambda: None  # type: ignore[assignment]
+        if not find_bcp_exe():
+            optional_notes.append(
+                "BCP: not installed (Data Migration > BCP will install from bundled MSI, "
+                "or use the full Setup installer with BCP tools)"
+            )
+
         # Java & JDBC are only needed for DB2 source connections.
         # Report them as optional notes so the startup dialog can mention
         # them without blocking the user.

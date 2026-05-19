@@ -36,6 +36,11 @@ if (Test-Path $initPath) {
 $DistExe = if ($version) { Join-Path $AppDir "dist\AzureMigrationTool_$version.exe" } else { Join-Path $AppDir "dist\AzureMigrationTool.exe" }
 $OdbcMsi = Join-Path $ScriptDir "odbc\msodbcsql18_x64.msi"
 $OdbcUrl = "https://go.microsoft.com/fwlink/?linkid=2249006"
+$BcpMsi = Join-Path $ScriptDir "tools\SqlCmdLnUtils.msi"
+$BcpUrls = @(
+    "https://go.microsoft.com/fwlink/?linkid=2230791",
+    "https://go.microsoft.com/fwlink/?linkid=2142258"
+)
 
 # 1. Ensure ODBC MSI is present
 if (-not (Test-Path $OdbcMsi)) {
@@ -46,6 +51,33 @@ if (-not (Test-Path $OdbcMsi)) {
     Write-Host "  Saved: $OdbcMsi"
 } else {
     Write-Host "ODBC MSI already present: $OdbcMsi"
+}
+
+# 1b. Ensure SQL Command Line Utilities MSI (bcp.exe) is present for bundling
+if (-not (Test-Path $BcpMsi)) {
+    Write-Host "Downloading SQL Server Command Line Utilities MSI (BCP)..."
+    $toolsDir = Join-Path $ScriptDir "tools"
+    New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+    $downloaded = $false
+    foreach ($url in $BcpUrls) {
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $BcpMsi -UseBasicParsing -TimeoutSec 300
+            if ((Get-Item $BcpMsi).Length -gt 500000) { $downloaded = $true; break }
+        } catch {
+            Write-Host "  Failed: $url"
+        }
+    }
+    if ($downloaded) {
+        Write-Host "  Saved: $BcpMsi"
+        # Also copy for PyInstaller bundle when building exe
+        $appTools = Join-Path $AppDir "tools"
+        New-Item -ItemType Directory -Force -Path $appTools | Out-Null
+        Copy-Item -LiteralPath $BcpMsi -Destination (Join-Path $appTools "SqlCmdLnUtils.msi") -Force
+    } else {
+        Write-Host "Warning: BCP MSI download failed; installer will skip BCP install." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "BCP MSI already present: $BcpMsi"
 }
 
 # 2. Optional: ensure Java is bundled for DB2/JDBC
@@ -121,6 +153,7 @@ $makensisArgs = @("installer\AzureMigrationTool.nsi")
 if ($version) { $makensisArgs = @("/DVERSION=$version") + $makensisArgs }
 if (Test-Path (Join-Path $ScriptDir "odbc\msodbcsql18_x64.msi")) { $makensisArgs = @("/DHAVE_ODBC") + $makensisArgs }
 if (Test-Path (Join-Path $ScriptDir "java\bin\java.exe")) { $makensisArgs = @("/DHAVE_JAVA") + $makensisArgs }
+if (Test-Path $BcpMsi) { $makensisArgs = @("/DHAVE_BCP") + $makensisArgs }
 Write-Host "Building installer with NSIS..."
 Push-Location $AppDir
 try {

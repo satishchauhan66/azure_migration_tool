@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, filedialog
 from pathlib import Path
 import threading
+import time
 import sys
 import subprocess
 import tempfile
@@ -243,10 +244,15 @@ class DataMigrationTab:
         self.bcp_options_frame = ttk.LabelFrame(options_frame, text="BCP Options", padding=5)
         self.bcp_options_frame.grid(row=7, column=0, columnspan=2, sticky=tk.W+tk.E, pady=5)
         
-        info_label = tk.Label(self.bcp_options_frame, 
-                             text="[OK] BCP uses Azure AD token caching - MFA prompts only ONCE at start.\n" +
-                                  "   For SQL auth, credentials are used directly.",
-                             font=("Arial", 9), fg="green", justify=tk.LEFT)
+        info_label = tk.Label(
+            self.bcp_options_frame,
+            text="[OK] MFA prompts once for pyodbc checks. On Windows, BCP import to Entra/Azure "
+                 "uses a temporary SQL login on the destination (created automatically).\n"
+                 "   Or enable 'Use SQL Login' to control the login name yourself.",
+            font=("Arial", 9),
+            fg="green",
+            justify=tk.LEFT,
+        )
         info_label.pack(anchor=tk.W, pady=2)
         
         # Single table option
@@ -263,6 +269,20 @@ class DataMigrationTab:
         # Clear button for single table
         ttk.Button(single_table_frame, text="Clear", width=6,
                   command=lambda: self.bcp_single_table_var.set("")).pack(side=tk.LEFT, padx=2)
+
+        work_dir_frame = ttk.Frame(self.bcp_options_frame)
+        work_dir_frame.pack(anchor=tk.W, fill=tk.X, pady=2)
+        tk.Label(work_dir_frame, text="BCP work folder (optional):").pack(side=tk.LEFT, padx=5)
+        self.bcp_work_dir_var = tk.StringVar(value="")
+        ttk.Entry(work_dir_frame, textvariable=self.bcp_work_dir_var, width=48).pack(
+            side=tk.LEFT, padx=5, fill=tk.X, expand=True
+        )
+        tk.Label(
+            self.bcp_options_frame,
+            text="Blank = auto. Use a drive with plenty of space (e.g. D:\\BCPWork) for large DBs.",
+            fg="gray",
+            font=("Arial", 8),
+        ).pack(anchor=tk.W, padx=5)
         
         # SQL login creation to avoid MFA prompts (optional, since we have token caching)
         self.bcp_use_sql_login_var = tk.BooleanVar(value=False)  # Default OFF - token caching handles MFA
@@ -292,6 +312,82 @@ class DataMigrationTab:
         ttk.Checkbutton(self.bcp_options_frame, 
                        text="Skip tables that don't exist in destination", 
                        variable=self.bcp_check_table_exists_var).pack(anchor=tk.W, pady=2)
+
+        # Pre-flight checklist (BCP)
+        pf_frame = ttk.LabelFrame(self.bcp_options_frame, text="Pre-flight checklist", padding=5)
+        pf_frame.pack(fill=tk.BOTH, expand=True, pady=8)
+
+        pf_hint = tk.Label(
+            pf_frame,
+            text="Validates ODBC, BCP, connections, schema, and estimates disk space "
+                 "(largest table + recommended free GB) before migration.",
+            font=("Arial", 8),
+            fg="gray",
+            justify=tk.LEFT,
+            wraplength=560,
+        )
+        pf_hint.pack(anchor=tk.W, pady=(0, 4))
+
+        pf_table_frame = ttk.Frame(pf_frame)
+        pf_table_frame.pack(fill=tk.BOTH, expand=True)
+
+        pf_cols = ("status", "category", "check", "detail")
+        self.bcp_preflight_tree = ttk.Treeview(
+            pf_table_frame, columns=pf_cols, show="headings", height=7
+        )
+        self.bcp_preflight_tree.heading("status", text="")
+        self.bcp_preflight_tree.heading("category", text="Area")
+        self.bcp_preflight_tree.heading("check", text="Check")
+        self.bcp_preflight_tree.heading("detail", text="Result")
+        self.bcp_preflight_tree.column("status", width=28, anchor=tk.CENTER, stretch=False)
+        self.bcp_preflight_tree.column("category", width=72, stretch=False)
+        self.bcp_preflight_tree.column("check", width=130, stretch=False)
+        self.bcp_preflight_tree.column("detail", width=720, minwidth=320, stretch=True)
+
+        pf_v_scroll = ttk.Scrollbar(
+            pf_table_frame, orient=tk.VERTICAL, command=self.bcp_preflight_tree.yview
+        )
+        pf_h_scroll = ttk.Scrollbar(
+            pf_table_frame, orient=tk.HORIZONTAL, command=self.bcp_preflight_tree.xview
+        )
+        self.bcp_preflight_tree.configure(
+            yscrollcommand=pf_v_scroll.set, xscrollcommand=pf_h_scroll.set
+        )
+        self.bcp_preflight_tree.grid(row=0, column=0, sticky="nsew")
+        pf_v_scroll.grid(row=0, column=1, sticky="ns")
+        pf_h_scroll.grid(row=1, column=0, sticky="ew")
+        pf_table_frame.grid_rowconfigure(0, weight=1)
+        pf_table_frame.grid_columnconfigure(0, weight=1)
+
+        self._bcp_preflight_messages: dict[str, str] = {}
+        self.bcp_preflight_tree.bind("<<TreeviewSelect>>", self._on_bcp_preflight_select)
+
+        tk.Label(
+            pf_frame,
+            text="Full result (selected row) — scroll to read:",
+            font=("Arial", 8),
+            fg="gray",
+        ).pack(anchor=tk.W, pady=(4, 0))
+        self.bcp_preflight_detail = scrolledtext.ScrolledText(
+            pf_frame, height=4, wrap=tk.WORD, font=("Consolas", 9), state=tk.DISABLED
+        )
+        self.bcp_preflight_detail.pack(fill=tk.BOTH, expand=False, pady=(2, 0))
+
+        self._bcp_preflight_passed = False
+        self._bcp_preflight_then_migrate = False
+        pf_btn_row = ttk.Frame(pf_frame)
+        pf_btn_row.pack(fill=tk.X, pady=(6, 0))
+        self.bcp_preflight_btn = ttk.Button(
+            pf_btn_row,
+            text="Run pre-flight validation",
+            command=self._run_bcp_preflight_validation,
+            width=28,
+        )
+        self.bcp_preflight_btn.pack(side=tk.LEFT)
+        self.bcp_preflight_status_var = tk.StringVar(value="Not validated yet")
+        tk.Label(pf_btn_row, textvariable=self.bcp_preflight_status_var, fg="gray").pack(
+            side=tk.LEFT, padx=10
+        )
         
         # Hide BCP options initially
         self.bcp_options_frame.grid_remove()
@@ -478,6 +574,14 @@ class DataMigrationTab:
         
         self.migrate_btn = ttk.Button(btn_frame, text="Start Migration", command=self._start_migration, width=20)
         self.migrate_btn.pack(side=tk.LEFT, padx=5)
+
+        self.bcp_validate_btn = ttk.Button(
+            btn_frame,
+            text="Validate (BCP)",
+            command=self._run_bcp_preflight_validation,
+            width=16,
+        )
+        self.bcp_validate_btn.pack(side=tk.LEFT, padx=5)
         
         self.bulk_migrate_btn = ttk.Button(btn_frame, text="Start Bulk Migration", command=self._start_bulk_migration, 
                                            width=20, state=tk.DISABLED)
@@ -489,6 +593,8 @@ class DataMigrationTab:
         
         self.migration_log = scrolledtext.ScrolledText(log_frame, height=15, wrap=tk.WORD)
         self.migration_log.pack(fill=tk.BOTH, expand=True)
+
+        self._on_migration_method_change()
         
     def _on_migration_method_change(self):
         """Show/hide options based on selected migration method."""
@@ -498,36 +604,224 @@ class DataMigrationTab:
             self.batch_size_entry.grid_remove()
             self.bcp_options_frame.grid()
             self.adf_options_frame.grid_remove()
+            if hasattr(self, "bcp_validate_btn"):
+                self.bcp_validate_btn.pack(side=tk.LEFT, padx=5, before=self.bulk_migrate_btn)
         elif method == "adf":
             self.batch_size_label.grid_remove()
             self.batch_size_entry.grid_remove()
             self.bcp_options_frame.grid_remove()
             self.adf_options_frame.grid()
+            if hasattr(self, "bcp_validate_btn"):
+                self.bcp_validate_btn.pack_forget()
         else:  # standard
             self.batch_size_label.grid()
             self.batch_size_entry.grid()
             self.bcp_options_frame.grid_remove()
             self.adf_options_frame.grid_remove()
+            if hasattr(self, "bcp_validate_btn"):
+                self.bcp_validate_btn.pack_forget()
     
-    def _find_bcp_exe(self):
-        """Find bcp.exe in common installation paths."""
-        common_paths = [
-            r"C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\bcp.exe",
-            r"C:\Program Files (x86)\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\bcp.exe",
-            r"C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\180\Tools\Binn\bcp.exe",
-            r"C:\Program Files (x86)\Microsoft SQL Server\Client SDK\ODBC\180\Tools\Binn\bcp.exe",
-            r"C:\Program Files\Microsoft SQL Server\150\Tools\Binn\bcp.exe",
-            r"C:\Program Files (x86)\Microsoft SQL Server\150\Tools\Binn\bcp.exe",
-        ]
-        for path in common_paths:
-            if os.path.exists(path):
-                return path
-        # Try PATH
-        return shutil.which("bcp.exe")
+    def _find_bcp_exe(self, *, prefer_odbc_18: bool = False):
+        """Find bcp.exe (bundled tools folder, install dir, or system paths)."""
+        try:
+            from src.utils.bcp_tools import find_bcp_exe
+            return find_bcp_exe(prefer_odbc_18=prefer_odbc_18)
+        except ImportError:
+            try:
+                from azure_migration_tool.src.utils.bcp_tools import find_bcp_exe
+                return find_bcp_exe(prefer_odbc_18=prefer_odbc_18)
+            except ImportError:
+                return shutil.which("bcp.exe")
+
+    def _resolve_auth_var(self, auth_var) -> str:
+        """Return internal auth key (entra_mfa, windows, sql, ...); sync from combo display if needed."""
+        raw = (auth_var.get() or "").strip()
+        auth = raw.lower()
+        if auth in ("entra_mfa", "entra_password", "sql", "windows"):
+            return auth
+        try:
+            from gui.widgets.connection_widget import AUTH_TO_INTERNAL
+        except ImportError:
+            from azure_migration_tool.gui.widgets.connection_widget import AUTH_TO_INTERNAL
+        internal = AUTH_TO_INTERNAL.get(raw)
+        if internal:
+            auth_var.set(internal)
+            return internal
+        return auth
+
+    def _build_migration_cfg(self) -> dict:
+        """Collect migration settings from the form."""
+        bcp_single_table = ""
+        if hasattr(self, "bcp_single_table_var"):
+            bcp_single_table = (self.bcp_single_table_var.get() or "").strip()
+        bcp_work_dir = ""
+        if hasattr(self, "bcp_work_dir_var"):
+            bcp_work_dir = (self.bcp_work_dir_var.get() or "").strip()
+        return {
+            "src_server": self.src_server_var.get(),
+            "src_db": self.src_db_var.get(),
+            "src_auth": self._resolve_auth_var(self.src_auth_var),
+            "src_user": self.src_user_var.get(),
+            "src_password": self.src_password_var.get() or None,
+            "dest_server": self.dest_server_var.get(),
+            "dest_db": self.dest_db_var.get(),
+            "dest_auth": self._resolve_auth_var(self.dest_auth_var),
+            "dest_user": self.dest_user_var.get(),
+            "dest_password": self.dest_password_var.get() or None,
+            "batch_size": int(self.batch_size_var.get()) if self.batch_size_var.get() else 20000,
+            "truncate_dest": self.truncate_dest_var.get(),
+            "delete_dest": False,
+            "continue_on_error": self.continue_on_error_var.get(),
+            "dry_run": False,
+            "tables": bcp_single_table,
+            "bcp_work_dir": bcp_work_dir,
+            "exclude": "",
+            "disable_fk": self.disable_fk_var.get(),
+            "disable_indexes": self.disable_indexes_var.get(),
+            "disable_triggers": self.disable_triggers_var.get(),
+            "parallel_tables": self.parallel_tables_var.get(),
+            "skip_completed": self.skip_completed_var.get(),
+            "resume_enabled": self.resume_enabled_var.get(),
+            "max_retries": self.max_retries_var.get(),
+            "verify_after_copy": self.verify_after_copy_var.get(),
+            "enable_chunking": self.enable_chunking_var.get(),
+            "chunk_threshold": self.chunk_threshold_var.get(),
+            "num_chunks": self.num_chunks_var.get(),
+            "chunk_workers": self.chunk_workers_var.get(),
+        }
+
+    def _run_bcp_preflight_validation(self):
+        """Run BCP pre-flight checks and populate the checklist UI."""
+        if not self.src_server_var.get() or not self.src_db_var.get():
+            messagebox.showerror("Pre-flight", "Source server and database are required.")
+            return
+        if not self.dest_server_var.get() or not self.dest_db_var.get():
+            messagebox.showerror("Pre-flight", "Destination server and database are required.")
+            return
+
+        self.bcp_preflight_btn.config(state=tk.DISABLED)
+        self.bcp_validate_btn.config(state=tk.DISABLED)
+        self.bcp_preflight_status_var.set("Validating...")
+        self.migration_log.insert(tk.END, "\n--- BCP pre-flight validation ---\n")
+        self.migration_log.see(tk.END)
+
+        cfg = self._build_migration_cfg()
+
+        def worker():
+            try:
+                try:
+                    from src.migration.bcp_preflight import preflight_passed, run_bcp_preflight
+                except ImportError:
+                    from azure_migration_tool.src.migration.bcp_preflight import (
+                        preflight_passed,
+                        run_bcp_preflight,
+                    )
+
+                def log_cb(msg):
+                    self.frame.after(0, lambda m=msg: self._append_preflight_log(m))
+
+                items = run_bcp_preflight(cfg, log_cb, install_bcp_if_missing=True)
+                passed = preflight_passed(items)
+                self.frame.after(0, lambda: self._show_preflight_results(items, passed))
+            except Exception as e:
+                self.frame.after(
+                    0,
+                    lambda: messagebox.showerror("Pre-flight", str(e)),
+                )
+            finally:
+                self.frame.after(0, self._preflight_buttons_idle)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _append_preflight_log(self, msg: str):
+        self.migration_log.insert(tk.END, msg + "\n")
+        self.migration_log.see(tk.END)
+
+    def _preflight_buttons_idle(self):
+        self.bcp_preflight_btn.config(state=tk.NORMAL)
+        self.bcp_validate_btn.config(state=tk.NORMAL)
+
+    def _on_bcp_preflight_select(self, _event=None) -> None:
+        sel = self.bcp_preflight_tree.selection()
+        if not sel:
+            return
+        self._set_bcp_preflight_detail(self._bcp_preflight_messages.get(sel[0], ""))
+
+    def _set_bcp_preflight_detail(self, text: str) -> None:
+        self.bcp_preflight_detail.config(state=tk.NORMAL)
+        self.bcp_preflight_detail.delete("1.0", tk.END)
+        self.bcp_preflight_detail.insert(tk.END, text or "")
+        self.bcp_preflight_detail.config(state=tk.DISABLED)
+        self.bcp_preflight_detail.see("1.0")
+
+    def _show_preflight_results(self, items, passed: bool):
+        for row in self.bcp_preflight_tree.get_children():
+            self.bcp_preflight_tree.delete(row)
+        self._bcp_preflight_messages.clear()
+        first_iid = None
+        for item in items:
+            icon = "OK" if item.passed else ("!" if not item.blocking else "X")
+            # Short preview in grid; full text in detail panel below
+            preview = item.message.replace("\n", " | ")
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
+            iid = self.bcp_preflight_tree.insert(
+                "",
+                tk.END,
+                values=(icon, item.category, item.name, preview),
+            )
+            self._bcp_preflight_messages[iid] = item.message
+            if first_iid is None:
+                first_iid = iid
+        if first_iid:
+            self.bcp_preflight_tree.selection_set(first_iid)
+            self.bcp_preflight_tree.focus(first_iid)
+            self._set_bcp_preflight_detail(self._bcp_preflight_messages[first_iid])
+        else:
+            self._set_bcp_preflight_detail("")
+        self._bcp_preflight_passed = passed
+        if passed:
+            self.bcp_preflight_status_var.set("Passed — ready to migrate")
+        else:
+            blocking = sum(1 for i in items if not i.passed and i.blocking)
+            self.bcp_preflight_status_var.set(f"Failed — {blocking} blocking issue(s)")
+        self.migration_log.insert(
+            tk.END,
+            f"Pre-flight: {'PASSED' if passed else 'FAILED'}\n",
+        )
+        self.migration_log.see(tk.END)
+        if not passed:
+            self._bcp_preflight_then_migrate = False
+            messagebox.showwarning(
+                "Pre-flight failed",
+                "Fix blocking items in the checklist (marked X), then run validation again.",
+            )
+        elif getattr(self, "_bcp_preflight_then_migrate", False):
+            self._bcp_preflight_then_migrate = False
+            self.migration_log.insert(tk.END, "Pre-flight passed — starting migration...\n")
+            self.migration_log.see(tk.END)
+            self._start_migration()
     
     def _install_bcp_via_powershell(self):
         """Attempt to install BCP using PowerShell."""
         try:
+            try:
+                from src.utils.bcp_tools import ensure_bcp_installed, find_bundled_sqlcmd_msi
+            except ImportError:
+                from azure_migration_tool.src.utils.bcp_tools import ensure_bcp_installed, find_bundled_sqlcmd_msi
+
+            if find_bundled_sqlcmd_msi():
+                self.migration_log.insert(tk.END, "Installing BCP from bundled MSI...\n")
+                self.migration_log.see(tk.END)
+                ok, msg = ensure_bcp_installed(
+                    lambda m: self.migration_log.insert(tk.END, m + "\n"),
+                    allow_download=False,
+                )
+                if ok and self._find_bcp_exe():
+                    return True, None
+                if not ok:
+                    self.migration_log.insert(tk.END, f"Bundled install: {msg}\n")
+
             self.migration_log.insert(tk.END, "Installing BCP using PowerShell...\n")
             self.migration_log.insert(tk.END, "Note: This may require administrator privileges.\n")
             self.migration_log.see(tk.END)
@@ -973,7 +1267,8 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
         Acquire Azure AD access token for SQL Database using MSAL.
         This prompts for MFA once and caches the token for reuse.
         
-        The token can be used with BCP's -P flag along with -G for Entra auth.
+        Used by pyodbc (SQL_COPT_SS_ACCESS_TOKEN). On Windows, bcp.exe cannot use this
+        token (-P with -G is Linux/macOS only); use SQL login or Entra interactive for BCP.
         """
         if msal is None:
             if logger:
@@ -1086,12 +1381,17 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
         auth_lower = (auth or "").strip().lower()
         
         if auth_lower == "entra_mfa":
-            # Use Entra authentication with -G flag
             args.extend(["-G", "-U", user])
-            # If we have an access token, use it instead of prompting for MFA
             if access_token:
-                args.extend(["-P", access_token])
-            # Otherwise BCP will prompt interactively (but we should have a token)
+                try:
+                    from src.utils.bcp_tools import bcp_entra_token_via_cli_supported
+                except ImportError:
+                    from azure_migration_tool.src.utils.bcp_tools import (
+                        bcp_entra_token_via_cli_supported,
+                    )
+                if bcp_entra_token_via_cli_supported():
+                    args.extend(["-P", access_token])
+                # Windows: omit -P; bcp uses Entra interactive (ODBC 18) or caller uses SQL login
         elif auth_lower == "entra_password":
             # Entra with password (no MFA)
             args.extend(["-G", "-U", user])
@@ -1114,20 +1414,161 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 args.append("-T")  # Fallback to Windows auth
         
         return args
+
+    def _connect_migration_db(self, md, cfg, side: str, *, logger=None):
+        """
+        Open pyodbc connection for source or dest using correct build_conn_str argument order.
+
+        build_conn_str(server, db, user, driver, auth, password) — not (server, db, driver, auth, user).
+        Entra MFA uses connect_to_database (token / interactive) instead of a plain connection string.
+        """
+        import logging
+
+        temp_logger = logger or logging.getLogger("bcp_migration_connect")
+        driver = md.pick_sql_driver(temp_logger)
+        prefix = "src" if side == "src" else "dest"
+        server = (cfg.get(f"{prefix}_server") or "").strip()
+        db = (cfg.get(f"{prefix}_db") or "").strip()
+        auth = (cfg.get(f"{prefix}_auth") or "").strip().lower()
+        user = (cfg.get(f"{prefix}_user") or "").strip()
+        password = cfg.get(f"{prefix}_password")
+
+        if not auth:
+            raise ValueError(
+                f"{prefix.capitalize()} authentication is not set. "
+                "Select an auth type on the connection panel (e.g. Windows login or Microsoft account)."
+            )
+
+        if auth == "entra_mfa":
+            return md.connect_to_database(
+                server,
+                db,
+                user,
+                driver,
+                auth,
+                password,
+                timeout=60,
+                logger=temp_logger,
+            )
+        conn_str = md.build_conn_str(server, db, user, driver, auth, password)
+        return pyodbc.connect(conn_str, timeout=60)
+
+    def _thread_safe_log(self, msg: str) -> None:
+        """Append to migration log from a worker thread without freezing the UI."""
+        text = (msg or "").rstrip()
+        if not text:
+            return
+
+        def _append() -> None:
+            self.migration_log.insert(tk.END, text + "\n")
+            self.migration_log.see(tk.END)
+            try:
+                self.migration_log.update_idletasks()
+            except tk.TclError:
+                pass
+
+        try:
+            self.frame.after(0, _append)
+        except tk.TclError:
+            pass
+
+    def _set_bcp_progress_ui(self, current: int, total: int, message: str) -> None:
+        """Update progress label and bar (call from worker via after)."""
+
+        def _ui() -> None:
+            try:
+                self.progress_var.set(message)
+                if total > 0:
+                    try:
+                        self.progress_bar.stop()
+                    except tk.TclError:
+                        pass
+                    self.progress_bar.config(mode="determinate", maximum=total, value=min(current, total))
+                self.frame.update_idletasks()
+            except tk.TclError:
+                pass
+
+        try:
+            self.frame.after(0, _ui)
+        except tk.TclError:
+            pass
+
+    def _run_bcp_subprocess(
+        self,
+        cmd: list,
+        logger_callback,
+        phase_label: str,
+        *,
+        watch_path: str | None = None,
+        work_dir: str | None = None,
+        timeout: int = 7200,
+    ) -> subprocess.CompletedProcess:
+        """
+        Run bcp.exe with periodic heartbeat logs so the UI does not look frozen.
+        BCP only prints when finished unless we poll output file size.
+        """
+        stop = threading.Event()
+        t0 = time.perf_counter()
+
+        def heartbeat() -> None:
+            while not stop.wait(12):
+                elapsed = int(time.perf_counter() - t0)
+                extra = ""
+                if watch_path and os.path.isfile(watch_path):
+                    mb = os.path.getsize(watch_path) / (1024 * 1024)
+                    extra = f", data file {mb:.1f} MB"
+                logger_callback(f"  ... {phase_label} still running ({elapsed}s{extra})")
+
+        logger_callback(f"  {phase_label} started...")
+        hb = threading.Thread(target=heartbeat, daemon=True)
+        hb.start()
+        run_kwargs: dict = {"capture_output": True, "text": True, "timeout": timeout}
+        if work_dir:
+            run_kwargs["cwd"] = work_dir
+            env = os.environ.copy()
+            env["TEMP"] = work_dir
+            env["TMP"] = work_dir
+            run_kwargs["env"] = env
+        try:
+            result = _run_silent(cmd, **run_kwargs)
+        finally:
+            stop.set()
+            hb.join(timeout=1)
+
+        elapsed = time.perf_counter() - t0
+        if watch_path and os.path.isfile(watch_path):
+            mb = os.path.getsize(watch_path) / (1024 * 1024)
+            logger_callback(f"  {phase_label} finished in {elapsed:.0f}s ({mb:.1f} MB on disk)")
+        else:
+            logger_callback(f"  {phase_label} finished in {elapsed:.0f}s")
+        if result.stdout and result.stdout.strip():
+            for line in result.stdout.strip().splitlines()[-3:]:
+                if line.strip():
+                    logger_callback(f"  bcp: {line.strip()}")
+        return result
     
     def _migrate_with_bcp(self, cfg, logger_callback):
         """Migrate data using BCP with native MFA support."""
         md = _data_migration_module()
-        bcp_exe = self._find_bcp_exe()
+        dest_auth_early = (cfg.get("dest_auth") or "").strip().lower()
+        bcp_exe = self._find_bcp_exe(prefer_odbc_18=(dest_auth_early == "entra_mfa"))
         if not bcp_exe:
             raise RuntimeError("BCP utility not found. Please install SQL Server Command Line Utilities.")
         
         logger_callback(f"Using BCP: {bcp_exe}")
+        logger_callback("Preparing: connecting and building table list (large databases may take a few minutes)...")
         
         # Check if user wants to use SQL login instead
         use_sql_login = self.bcp_use_sql_login_var.get()
+        auto_dest_sql_login = (
+            sys.platform.startswith("win")
+            and dest_auth_early == "entra_mfa"
+            and not use_sql_login
+        )
         bcp_login_name = None
         bcp_password = None
+        bcp_dest_login_name = None
+        bcp_dest_password = None
         
         if use_sql_login:
             # Generate password and create SQL login
@@ -1143,21 +1584,10 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             temp_logger.addHandler(log_handler)
             temp_logger.setLevel(logging.INFO)
             
-            driver = md.pick_sql_driver(temp_logger)
-            
-            src_conn_str = md.build_conn_str(
-                cfg['src_server'], cfg['src_db'], driver,
-                cfg['src_auth'], cfg['src_user'], cfg.get('src_password')
-            )
-            dest_conn_str = md.build_conn_str(
-                cfg['dest_server'], cfg['dest_db'], driver,
-                cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
-            )
-            
             # Connect with MFA to create SQL logins
             logger_callback("Connecting to create SQL logins (if needed)...")
-            src_conn = pyodbc.connect(src_conn_str)
-            dest_conn = pyodbc.connect(dest_conn_str)
+            src_conn = self._connect_migration_db(md, cfg, "src", logger=temp_logger)
+            dest_conn = self._connect_migration_db(md, cfg, "dest", logger=temp_logger)
             
             try:
                 logger_callback(f"Creating SQL login '{bcp_login_name}' on source database...")
@@ -1235,15 +1665,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             temp_logger.addHandler(log_handler)
             temp_logger.setLevel(logging.INFO)
             
-            driver = md.pick_sql_driver(temp_logger)
-            
-            src_conn_str = md.build_conn_str(
-                cfg['src_server'], cfg['src_db'], driver,
-                cfg['src_auth'], cfg['src_user'], cfg.get('src_password')
-            )
-            
-            # Connect just to get table list
-            temp_src_conn = pyodbc.connect(src_conn_str)
+            temp_src_conn = self._connect_migration_db(md, cfg, "src", logger=temp_logger)
             try:
                 src_cur = temp_src_conn.cursor()
                 
@@ -1290,6 +1712,36 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                         logger_callback(f"  ... and {len(rows) - 5} more tables")
             finally:
                 temp_src_conn.close()
+
+        if auto_dest_sql_login:
+            bcp_dest_password = self._generate_bcp_password()
+            bcp_dest_login_name = self.bcp_login_name_var.get() or "svc_azdm_bcp"
+            import logging
+
+            log_handler = logging.StreamHandler()
+            log_handler.setFormatter(logging.Formatter("%(message)s"))
+            temp_logger = logging.getLogger("bcp_migration_dest_sql")
+            if not temp_logger.handlers:
+                temp_logger.addHandler(log_handler)
+            temp_logger.setLevel(logging.INFO)
+            logger_callback(
+                "Destination uses Entra MFA: Windows bcp.exe cannot use cached access tokens. "
+                f"Creating SQL login '{bcp_dest_login_name}' on destination for BCP import..."
+            )
+            dest_conn = self._connect_migration_db(md, cfg, "dest", logger=temp_logger)
+            try:
+                success, error = self._create_sql_login_for_bcp(
+                    dest_conn,
+                    cfg["dest_db"],
+                    bcp_dest_login_name,
+                    bcp_dest_password,
+                    lambda msg: logger_callback(f"  {msg}"),
+                )
+                if not success:
+                    raise RuntimeError(f"Failed to create SQL login on destination: {error}")
+                logger_callback("[OK] Destination SQL login ready for BCP import")
+            finally:
+                dest_conn.close()
         
         # Store source row counts for skip/resume logic
         source_row_counts = {}
@@ -1335,14 +1787,8 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 temp_logger.addHandler(log_handler)
             temp_logger.setLevel(logging.INFO)
             
-            driver = md.pick_sql_driver(temp_logger)
-            dest_conn_str = md.build_conn_str(
-                cfg['dest_server'], cfg['dest_db'], driver,
-                cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
-            )
-            
             try:
-                check_conn = pyodbc.connect(dest_conn_str)
+                check_conn = self._connect_migration_db(md, cfg, "dest", logger=temp_logger)
                 check_cur = check_conn.cursor()
                 
                 # Get all tables in destination
@@ -1375,7 +1821,13 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 logger_callback(f"[WARN] Could not check destination tables: {e}")
                 logger_callback("  Proceeding with all tables...")
         
-        logger_callback(f"Migrating {len(table_list)} table(s) using BCP...")
+        total_tables = len(table_list)
+        logger_callback(f"Migrating {total_tables} table(s) using BCP...")
+        if total_tables == 0:
+            logger_callback("[WARN] No tables to migrate after filters. Check schema on destination.")
+            return {"status": "success", "tables_ok": 0, "tables_failed": 0}
+
+        self._set_bcp_progress_ui(0, max(total_tables, 1), f"Starting BCP — {total_tables} table(s)")
         
         # Acquire Azure AD access tokens if using Entra MFA authentication
         # This allows us to authenticate once and reuse the token for all BCP calls
@@ -1395,23 +1847,76 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 if not src_access_token:
                     raise RuntimeError("Failed to acquire Azure AD token for source. Please check your credentials.")
             
-            if dest_auth == 'entra_mfa':
-                # Check if same user as source - can reuse token
-                if src_auth == 'entra_mfa' and cfg.get('src_user') == cfg.get('dest_user') and src_access_token:
+            if dest_auth == "entra_mfa" and not auto_dest_sql_login:
+                if src_auth == "entra_mfa" and cfg.get("src_user") == cfg.get("dest_user") and src_access_token:
                     logger_callback("Reusing Azure AD token for destination (same user)...")
                     dest_access_token = src_access_token
                 else:
                     logger_callback("Acquiring Azure AD token for destination (MFA prompt will appear once)...")
                     dest_access_token = self._acquire_azure_ad_token(
-                        cfg.get('dest_user'),
-                        logger=logger_callback
+                        cfg.get("dest_user"),
+                        logger=logger_callback,
                     )
                     if not dest_access_token:
-                        raise RuntimeError("Failed to acquire Azure AD token for destination. Please check your credentials.")
+                        raise RuntimeError(
+                            "Failed to acquire Azure AD token for destination. "
+                            "Check credentials or enable 'Use SQL Login' for BCP."
+                        )
         
-        # Create temp directory
-        temp_dir = tempfile.mkdtemp(prefix="bcp_migration_")
-        logger_callback(f"Using temporary directory: {temp_dir}")
+        try:
+            from src.utils.bcp_tools import (
+                bcp_host_data_file_error_hint,
+                bcp_query_for_export,
+                bcp_table_name_for_import,
+                create_bcp_migration_dir,
+                ensure_bcp_output_file,
+                format_bcp_data_path,
+            )
+        except ImportError:
+            from azure_migration_tool.src.utils.bcp_tools import (
+                bcp_host_data_file_error_hint,
+                bcp_query_for_export,
+                bcp_table_name_for_import,
+                create_bcp_migration_dir,
+                ensure_bcp_output_file,
+                format_bcp_data_path,
+            )
+
+        preferred_work = (cfg.get("bcp_work_dir") or "").strip() or None
+        try:
+            from src.migration.bcp_preflight import estimate_bcp_disk_space, log_bcp_disk_estimate
+            from src.utils.bcp_tools import resolve_bcp_work_root
+        except ImportError:
+            from azure_migration_tool.src.migration.bcp_preflight import (
+                estimate_bcp_disk_space,
+                log_bcp_disk_estimate,
+            )
+            from azure_migration_tool.src.utils.bcp_tools import resolve_bcp_work_root
+
+        work_root = resolve_bcp_work_root(preferred_work)
+        try:
+            disk_est = estimate_bcp_disk_space(
+                cfg,
+                table_list,
+                work_root=work_root,
+                bcp_exe=bcp_exe,
+                log=logger_callback,
+                calibrate_with_bcp=True,
+            )
+            log_bcp_disk_estimate(disk_est, logger_callback)
+            if not disk_est.sufficient:
+                logger_callback(
+                    "[WARN] Work disk may be too small for the largest table. "
+                    "Change BCP work folder or free space before continuing."
+                )
+        except Exception as est_exc:
+            logger_callback(f"[WARN] Could not estimate disk space: {est_exc}")
+
+        temp_dir = create_bcp_migration_dir(preferred_work)
+        logger_callback(f"Using BCP work directory: {temp_dir}")
+        logger_callback(
+            "One .dat per table; each file is removed after a successful import."
+        )
         
         success_count = 0
         error_count = 0
@@ -1436,12 +1941,9 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     temp_logger.addHandler(log_handler)
                 temp_logger.setLevel(logging.INFO)
                 
-                driver = md.pick_sql_driver(temp_logger)
-                dest_conn_str = md.build_conn_str(
-                    cfg['dest_server'], cfg['dest_db'], driver,
-                    cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
+                dest_conn_for_constraints = self._connect_migration_db(
+                    md, cfg, "dest", logger=temp_logger
                 )
-                dest_conn_for_constraints = pyodbc.connect(dest_conn_str)
                 dest_cur = dest_conn_for_constraints.cursor()
                 
                 if cfg.get('disable_fk'):
@@ -1477,16 +1979,21 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 if not temp_logger.handlers:
                     temp_logger.addHandler(log_handler)
                 temp_logger.setLevel(logging.INFO)
-                driver = md.pick_sql_driver(temp_logger)
-                dest_conn_str = md.build_conn_str(
-                    cfg['dest_server'], cfg['dest_db'], driver,
-                    cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
+                dest_conn_for_resume = self._connect_migration_db(
+                    md, cfg, "dest", logger=temp_logger
                 )
-                dest_conn_for_resume = pyodbc.connect(dest_conn_str)
             
-            for table_fqn in table_list:
+            for table_idx, table_fqn in enumerate(table_list, start=1):
                 schema, table_name = table_fqn.split('.')
-                data_file = os.path.join(temp_dir, f"{schema}_{table_name}.dat")
+                data_file = format_bcp_data_path(
+                    os.path.join(temp_dir, f"{schema}_{table_name}.dat")
+                )
+                self._set_bcp_progress_ui(
+                    table_idx - 1,
+                    total_tables,
+                    f"Table {table_idx}/{total_tables}: {table_fqn}",
+                )
+                logger_callback(f"\n--- Table {table_idx}/{total_tables}: {table_fqn} ---")
                 
                 try:
                     # Resume/Skip logic: Check if table is already migrated
@@ -1531,12 +2038,9 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                             temp_logger.addHandler(log_handler)
                             temp_logger.setLevel(logging.INFO)
                             
-                            driver = md.pick_sql_driver(temp_logger)
-                            dest_conn_str = md.build_conn_str(
-                                cfg['dest_server'], cfg['dest_db'], driver,
-                                cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
+                            temp_dest_conn = self._connect_migration_db(
+                                md, cfg, "dest", logger=temp_logger
                             )
-                            temp_dest_conn = pyodbc.connect(dest_conn_str)
                             try:
                                 dest_cur = temp_dest_conn.cursor()
                                 dest_cur.execute(f"TRUNCATE TABLE [{schema}].[{table_name}]")
@@ -1581,7 +2085,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     
                     export_cmd = [
                         bcp_exe,
-                        f"SELECT * FROM [{schema}].[{table_name}]",
+                        bcp_query_for_export(schema, table_name),
                         "queryout",
                         data_file
                     ] + src_auth_args + [
@@ -1592,8 +2096,26 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     # Log the command (without password/token for security)
                     safe_cmd = [x if x not in [bcp_password, src_access_token] and not (src_access_token and x == src_access_token) else "***" for x in export_cmd]
                     logger_callback(f"  Command: {' '.join(safe_cmd[:8])}...")
-                    
-                    result = _run_silent(export_cmd, capture_output=True, text=True, timeout=3600)
+                    logger_callback(f"  Data file: {data_file}")
+
+                    try:
+                        ensure_bcp_output_file(data_file)
+                    except OSError as file_exc:
+                        logger_callback(f"[X] BCP export failed for {table_fqn}:")
+                        logger_callback(f"  Cannot create data file: {file_exc}")
+                        logger_callback(f"  {bcp_host_data_file_error_hint()}")
+                        error_count += 1
+                        if not self.continue_on_error_var.get():
+                            raise RuntimeError(f"Cannot create BCP data file: {file_exc}")
+                        continue
+
+                    result = self._run_bcp_subprocess(
+                        export_cmd,
+                        logger_callback,
+                        f"Export {table_fqn}",
+                        watch_path=data_file,
+                        work_dir=temp_dir,
+                    )
                     if result.returncode != 0:
                         error_msg = result.stderr or result.stdout
                         
@@ -1602,6 +2124,10 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                             logger_callback(f"[X] BCP export failed for {table_fqn}:")
                             logger_callback(f"  Error: Access token not supported by ODBC driver")
                             logger_callback(f"  Solution: Use SQL authentication or upgrade to ODBC Driver 18")
+                        elif "Unable to open BCP host data-file" in (error_msg or ""):
+                            logger_callback(f"[X] BCP export failed for {table_fqn}:")
+                            logger_callback(f"  {error_msg.strip()}")
+                            logger_callback(f"  {bcp_host_data_file_error_hint()}")
                         else:
                             logger_callback(f"[X] BCP export failed for {table_fqn}:")
                             logger_callback(f"  {error_msg.strip()}")
@@ -1614,6 +2140,11 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     # Check if file was created and has data
                     if not os.path.exists(data_file) or os.path.getsize(data_file) == 0:
                         logger_callback(f"[WARN] No data to migrate for {table_fqn}")
+                        try:
+                            if os.path.isfile(data_file):
+                                os.remove(data_file)
+                        except OSError:
+                            pass
                         continue
                     
                     # Import to destination
@@ -1621,11 +2152,20 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     
                     # Build authentication arguments
                     dest_auth_type = cfg.get('dest_auth', '').lower()
-                    if use_sql_login and bcp_login_name and bcp_password:
-                        # Use SQL login
-                        logger_callback(f"  Auth: SQL login ({bcp_login_name})")
-                        dest_auth_args = ["-S", cfg['dest_server'], "-d", cfg['dest_db'],
-                                        "-U", bcp_login_name, "-P", bcp_password]
+                    dest_sql_user = bcp_dest_login_name if auto_dest_sql_login else bcp_login_name
+                    dest_sql_pass = bcp_dest_password if auto_dest_sql_login else bcp_password
+                    if (use_sql_login or auto_dest_sql_login) and dest_sql_user and dest_sql_pass:
+                        logger_callback(f"  Auth: SQL login ({dest_sql_user})")
+                        dest_auth_args = [
+                            "-S",
+                            cfg["dest_server"],
+                            "-d",
+                            cfg["dest_db"],
+                            "-U",
+                            dest_sql_user,
+                            "-P",
+                            dest_sql_pass,
+                        ]
                     elif dest_auth_type == 'sql':
                         # Direct SQL auth
                         logger_callback(f"  Auth: SQL ({cfg.get('dest_user', 'N/A')})")
@@ -1634,13 +2174,15 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                             cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password'),
                             access_token=None
                         )
-                    elif dest_auth_type == 'entra_mfa' and dest_access_token:
-                        # MFA with cached token - Note: This may not work with older ODBC drivers
-                        logger_callback(f"  Auth: Entra MFA with cached token")
+                    elif dest_auth_type == "entra_mfa" and dest_access_token:
+                        logger_callback("  Auth: Entra MFA (interactive via bcp -G)")
                         dest_auth_args = self._build_bcp_auth_args(
-                            cfg['dest_server'], cfg['dest_db'],
-                            cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password'),
-                            access_token=dest_access_token
+                            cfg["dest_server"],
+                            cfg["dest_db"],
+                            cfg["dest_auth"],
+                            cfg["dest_user"],
+                            cfg.get("dest_password"),
+                            access_token=dest_access_token,
                         )
                     else:
                         # Native auth (will prompt for MFA each time if needed)
@@ -1653,7 +2195,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     
                     import_cmd = [
                         bcp_exe,
-                        f"[{schema}].[{table_name}]",
+                        bcp_table_name_for_import(schema, table_name),
                         "in",
                         data_file
                     ] + dest_auth_args + [
@@ -1663,23 +2205,39 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     ]
                     
                     # Log the command (without password/token for security)
-                    safe_cmd = [x if x not in [bcp_password, dest_access_token] and not (dest_access_token and x == dest_access_token) else "***" for x in import_cmd]
+                    redact = {bcp_password, bcp_dest_password, dest_access_token} - {None}
+                    safe_cmd = [x if x not in redact else "***" for x in import_cmd]
                     logger_callback(f"  Command: {' '.join(safe_cmd[:8])}...")
                     
-                    result = _run_silent(import_cmd, capture_output=True, text=True, timeout=3600)
+                    result = self._run_bcp_subprocess(
+                        import_cmd,
+                        logger_callback,
+                        f"Import {table_fqn}",
+                        work_dir=temp_dir,
+                    )
                     if result.returncode != 0:
                         error_msg = result.stderr or result.stdout
                         
                         # Check for specific error types and provide helpful messages
                         if "Invalid value specified for connection string attribute 'PWD'" in error_msg:
                             logger_callback(f"[X] BCP import failed for {table_fqn}:")
-                            logger_callback(f"  Error: Access token not supported by ODBC driver")
-                            logger_callback(f"  Solution: Use SQL authentication or upgrade to ODBC Driver 18")
+                            logger_callback(
+                                "  Error: Entra access tokens cannot be passed to bcp.exe on Windows."
+                            )
+                            logger_callback(
+                                "  Solution: Enable 'Use SQL Login' in BCP Options, or restart migration "
+                                "(auto SQL login on destination is applied when Entra MFA is selected)."
+                            )
                         elif "Invalid object name" in error_msg or "S0002" in error_msg:
                             logger_callback(f"[X] BCP import failed for {table_fqn}:")
-                            logger_callback(f"  Error: Table does not exist in destination database!")
-                            logger_callback(f"  Solution: Run schema migration first, or exclude this table")
-                            logger_callback(f"  Tip: This might be a backup table (Bak_*) not needed in destination")
+                            logger_callback(
+                                f"  Error: Table {bcp_table_name_for_import(schema, table_name)!r} "
+                                f"not found in {cfg.get('dest_db', 'destination')}."
+                            )
+                            logger_callback(
+                                "  Solution: Run Schema migration on the destination first, "
+                                "or disable 'Skip tables not in destination' and verify the table exists."
+                            )
                         elif "permission" in error_msg.lower() or "denied" in error_msg.lower():
                             logger_callback(f"[X] BCP import failed for {table_fqn}:")
                             logger_callback(f"  Error: Permission denied on destination table")
@@ -1722,6 +2280,22 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     else:
                         logger_callback(f"[OK] Migrated {table_fqn}")
                     success_count += 1
+                    try:
+                        freed = os.path.getsize(data_file)
+                        os.remove(data_file)
+                        try:
+                            from src.utils.bcp_tools import disk_free_gb, format_size_mb
+                        except ImportError:
+                            from azure_migration_tool.src.utils.bcp_tools import (
+                                disk_free_gb,
+                                format_size_mb,
+                            )
+                        logger_callback(
+                            f"  Removed .dat ({format_size_mb(freed)}); "
+                            f"{disk_free_gb(temp_dir):.1f} GB free on work disk"
+                        )
+                    except OSError:
+                        pass
                 
                 except Exception as e:
                     logger_callback(f"[X] Error migrating {table_fqn}: {str(e)}")
@@ -1791,41 +2365,43 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
             except:
                 pass
             
-            # Clean up logins if requested and SQL login was used
-            if self.bcp_cleanup_var.get() and use_sql_login and bcp_login_name:
-                logger_callback(f"Cleaning up SQL login '{bcp_login_name}'...")
-                
-                # Reconnect to clean up
+            cleanup_dest_login = (
+                auto_dest_sql_login and bcp_dest_login_name
+            ) or (self.bcp_cleanup_var.get() and use_sql_login and bcp_login_name)
+            cleanup_src_login = self.bcp_cleanup_var.get() and use_sql_login and bcp_login_name
+            if cleanup_dest_login or cleanup_src_login:
+                dest_login = bcp_dest_login_name if auto_dest_sql_login else bcp_login_name
+                logger_callback(f"Cleaning up SQL login '{dest_login}'...")
                 import logging
-                
+
                 log_handler = logging.StreamHandler()
-                log_handler.setFormatter(logging.Formatter('%(message)s'))
-                temp_logger = logging.getLogger('bcp_migration')
-                temp_logger.addHandler(log_handler)
+                log_handler.setFormatter(logging.Formatter("%(message)s"))
+                temp_logger = logging.getLogger("bcp_migration")
+                if not temp_logger.handlers:
+                    temp_logger.addHandler(log_handler)
                 temp_logger.setLevel(logging.INFO)
-                
-                driver = md.pick_sql_driver(temp_logger)
-                
-                src_conn_str = md.build_conn_str(
-                    cfg['src_server'], cfg['src_db'], driver,
-                    cfg['src_auth'], cfg['src_user'], cfg.get('src_password')
-                )
-                dest_conn_str = md.build_conn_str(
-                    cfg['dest_server'], cfg['dest_db'], driver,
-                    cfg['dest_auth'], cfg['dest_user'], cfg.get('dest_password')
-                )
-                
-                src_conn = pyodbc.connect(src_conn_str)
-                dest_conn = pyodbc.connect(dest_conn_str)
-                
+
+                dest_conn = self._connect_migration_db(md, cfg, "dest", logger=temp_logger)
                 try:
-                    self._cleanup_sql_login(src_conn, cfg['src_db'], bcp_login_name, 
-                                           lambda msg: logger_callback(f"  {msg}"))
-                    self._cleanup_sql_login(dest_conn, cfg['dest_db'], bcp_login_name,
-                                           lambda msg: logger_callback(f"  {msg}"))
+                    self._cleanup_sql_login(
+                        dest_conn,
+                        cfg["dest_db"],
+                        dest_login,
+                        lambda msg: logger_callback(f"  {msg}"),
+                    )
                 finally:
-                    src_conn.close()
                     dest_conn.close()
+                if cleanup_src_login:
+                    src_conn = self._connect_migration_db(md, cfg, "src", logger=temp_logger)
+                    try:
+                        self._cleanup_sql_login(
+                            src_conn,
+                            cfg["src_db"],
+                            bcp_login_name,
+                            lambda msg: logger_callback(f"  {msg}"),
+                        )
+                    finally:
+                        src_conn.close()
             
             logger_callback(f"\n{'='*60}")
             logger_callback(f"BCP Migration Complete: {success_count} succeeded, {error_count} failed")
@@ -1902,12 +2478,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     temp_logger.addHandler(log_handler)
                     temp_logger.setLevel(logging.INFO)
                     
-                    driver = md_adf.pick_sql_driver(temp_logger)
-                    src_conn_str = md_adf.build_conn_str(
-                        cfg['src_server'], cfg['src_db'], driver,
-                        cfg['src_auth'], cfg['src_user'], cfg.get('src_password')
-                    )
-                    src_conn = pyodbc.connect(src_conn_str)
+                    src_conn = self._connect_migration_db(md_adf, cfg, "src", logger=temp_logger)
                     src_cur = src_conn.cursor()
                     
                     tables = md_adf.fetch_tables(src_cur)
@@ -2039,25 +2610,45 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 "error": error_msg
             }
         
+    def _ensure_bcp_ready_for_migration(self) -> bool:
+        """Ensure BCP module, pre-flight, and bcp.exe are ready. Returns False to abort."""
+        if not migrate_data:
+            messagebox.showerror("Error", "Data migration module not available!")
+            return False
+        if not getattr(self, "_bcp_preflight_passed", False):
+            self._bcp_preflight_then_migrate = True
+            self._run_bcp_preflight_validation()
+            return False
+        bcp_exe = self._find_bcp_exe()
+        if bcp_exe:
+            return True
+        try:
+            from src.utils.bcp_tools import ensure_bcp_installed
+        except ImportError:
+            from azure_migration_tool.src.utils.bcp_tools import ensure_bcp_installed
+
+        ok, msg = ensure_bcp_installed(
+            lambda m: self.migration_log.insert(tk.END, m + "\n"),
+            allow_download=True,
+        )
+        if ok:
+            return True
+        if self._handle_bcp_not_found():
+            return bool(self._find_bcp_exe())
+        messagebox.showerror(
+            "Error",
+            "BCP utility is still not found.\n\n"
+            f"{msg}\n\n"
+            "Use the installer with BCP tools or install SQL Command Line Utilities.",
+        )
+        return False
+
     def _start_migration(self):
         """Start data migration in a separate thread."""
         migration_method = self.migration_method_var.get()
         
         if migration_method == "bcp":
-            # Check if BCP is available
-            bcp_exe = self._find_bcp_exe()
-            if not bcp_exe:
-                if not self._handle_bcp_not_found():
-                    return  # User cancelled or installation failed
-                # Check again after installation attempt
-                bcp_exe = self._find_bcp_exe()
-                if not bcp_exe:
-                    messagebox.showerror("Error", 
-                        "BCP utility is still not found.\n\n"
-                        "Please install it manually and restart the application.")
-                    return
-            if not migrate_data:
-                messagebox.showerror("Error", "Data migration module not available!")
+            if not self._ensure_bcp_ready_for_migration():
                 return
         elif migration_method == "adf":
             # Check if ADF client is available
@@ -2103,42 +2694,8 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
         
         def run_migration():
             try:
-                # Get single table for BCP if specified
-                bcp_single_table = self.bcp_single_table_var.get().strip() if hasattr(self, 'bcp_single_table_var') else ""
-                
-                cfg = {
-                    "src_server": self.src_server_var.get(),
-                    "src_db": self.src_db_var.get(),
-                    "src_auth": self.src_auth_var.get(),
-                    "src_user": self.src_user_var.get(),
-                    "src_password": self.src_password_var.get() or None,
-                    "dest_server": self.dest_server_var.get(),
-                    "dest_db": self.dest_db_var.get(),
-                    "dest_auth": self.dest_auth_var.get(),
-                    "dest_user": self.dest_user_var.get(),
-                    "dest_password": self.dest_password_var.get() or None,
-                    "batch_size": int(self.batch_size_var.get()) if self.batch_size_var.get() else 20000,
-                    "truncate_dest": self.truncate_dest_var.get(),
-                    "delete_dest": False,
-                    "continue_on_error": self.continue_on_error_var.get(),
-                    "dry_run": False,
-                    "tables": bcp_single_table,  # Single table for BCP, or empty for all tables
-                    "exclude": "",  # No tables excluded
-                    "disable_fk": self.disable_fk_var.get(),
-                    "disable_indexes": self.disable_indexes_var.get(),
-                    "disable_triggers": self.disable_triggers_var.get(),
-                    # Performance & Resilience options
-                    "parallel_tables": self.parallel_tables_var.get(),
-                    "skip_completed": self.skip_completed_var.get(),
-                    "resume_enabled": self.resume_enabled_var.get(),
-                    "max_retries": self.max_retries_var.get(),
-                    "verify_after_copy": self.verify_after_copy_var.get(),
-                    # Chunking options (ADF-style)
-                    "enable_chunking": self.enable_chunking_var.get(),
-                    "chunk_threshold": self.chunk_threshold_var.get(),
-                    "num_chunks": self.num_chunks_var.get(),
-                    "chunk_workers": self.chunk_workers_var.get(),
-                }
+                cfg = self._build_migration_cfg()
+                bcp_single_table = (cfg.get("tables") or "").strip()
                 
                 # Check migration method
                 migration_method = self.migration_method_var.get()
@@ -2152,8 +2709,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                     self.migration_log.see(tk.END)
                     
                     def log_callback(msg):
-                        self.migration_log.insert(tk.END, f"{msg}\n")
-                        self.migration_log.see(tk.END)
+                        self._thread_safe_log(msg)
                     
                     report = self._migrate_with_bcp(cfg, log_callback)
                     
@@ -2212,9 +2768,16 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
                 self.migration_log.insert(tk.END, f"\n[X] Error: {str(e)}\n")
                 messagebox.showerror("Error", f"Migration failed: {str(e)}")
             finally:
-                self.progress_bar.stop()
-                self.progress_var.set("Ready")
-                self.migrate_btn.config(state=tk.NORMAL)
+                def _migration_finished_ui() -> None:
+                    try:
+                        self.progress_bar.stop()
+                        self.progress_bar.config(mode="indeterminate")
+                    except tk.TclError:
+                        pass
+                    self.progress_var.set("Ready")
+                    self.migrate_btn.config(state=tk.NORMAL)
+
+                self.frame.after(0, _migration_finished_ui)
                 
         threading.Thread(target=run_migration, daemon=True).start()
         
@@ -2259,20 +2822,7 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
         migration_method = self.migration_method_var.get()
         
         if migration_method == "bcp":
-            # Check if BCP is available
-            bcp_exe = self._find_bcp_exe()
-            if not bcp_exe:
-                if not self._handle_bcp_not_found():
-                    return  # User cancelled or installation failed
-                # Check again after installation attempt
-                bcp_exe = self._find_bcp_exe()
-                if not bcp_exe:
-                    messagebox.showerror("Error", 
-                        "BCP utility is still not found.\n\n"
-                        "Please install it manually and restart the application.")
-                    return
-            if not migrate_data:
-                messagebox.showerror("Error", "Data migration module not available!")
+            if not self._ensure_bcp_ready_for_migration():
                 return
         elif migration_method == "adf":
             # Check if ADF client is available
