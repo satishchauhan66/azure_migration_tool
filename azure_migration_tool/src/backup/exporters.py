@@ -8,16 +8,24 @@ from typing import List, Tuple, Dict, Optional
 import pyodbc
 
 from ..utils.paths import qident
-from ..utils.sql import type_sql
+from ..utils.sql import (
+    format_module_session_preamble,
+    normalize_double_quoted_string_literals,
+    strip_module_session_set_options,
+    strip_standalone_go_lines,
+    type_sql,
+)
 
 # Re-export for external consumers
 __all__ = [
     "qident", "type_sql", "parse_int_or_default",
     "fetch_tables", "fetch_columns", "fetch_primary_key", "build_create_table_sql",
-    "fetch_objects", "object_definition", "wrap_create_or_alter",
+    "fetch_objects", "object_definition", "object_module_session_options",
+    "wrap_create_or_alter", "format_module_sql_single",
     "fetch_triggers", "fetch_sequences", "fetch_synonyms",
     "export_indexes", "export_foreign_keys", "export_check_constraints",
-    "export_default_constraints", "export_primary_keys",
+    "export_default_constraints", "export_primary_keys", "export_unique_constraints",
+    "export_clr_modules",
 ]
 
 
@@ -64,13 +72,21 @@ _FETCH_COLUMNS_SQL_PRIMARY = """
             CAST(ic.seed_value AS NVARCHAR(100)) AS seed_value_str,
             CAST(ic.increment_value AS NVARCHAR(100)) AS increment_value_str,
             CAST(dc.definition AS NVARCHAR(MAX)) AS default_definition_str,
-            CAST(dc.name AS NVARCHAR(256)) AS default_constraint_name
+            CAST(dc.name AS NVARCHAR(256)) AS default_constraint_name,
+            CASE WHEN cc.object_id IS NOT NULL THEN 1 ELSE 0 END AS is_computed,
+            CAST(cc.definition AS NVARCHAR(MAX)) AS computed_definition,
+            CASE WHEN cc.is_persisted = 1 THEN 1 ELSE 0 END AS is_persisted_computed,
+            CASE WHEN c.is_sparse = 1 THEN 1 ELSE 0 END AS is_sparse,
+            CASE WHEN c.is_filestream = 1 THEN 1 ELSE 0 END AS is_filestream,
+            CASE WHEN c.is_rowguidcol = 1 THEN 1 ELSE 0 END AS is_rowguidcol
         FROM sys.columns c
         JOIN sys.types ty ON c.user_type_id = ty.user_type_id
         LEFT JOIN sys.identity_columns ic
             ON ic.object_id = c.object_id AND ic.column_id = c.column_id
         LEFT JOIN sys.default_constraints dc
             ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+        LEFT JOIN sys.computed_columns cc
+            ON cc.object_id = c.object_id AND cc.column_id = c.column_id
         WHERE c.object_id = OBJECT_ID(?, ?)
         ORDER BY c.column_id;
 """
@@ -89,13 +105,21 @@ _FETCH_COLUMNS_SQL_FALLBACK = """
             CONVERT(VARCHAR(100), ic.seed_value) AS seed_value_str,
             CONVERT(VARCHAR(100), ic.increment_value) AS increment_value_str,
             CONVERT(VARCHAR(MAX), dc.definition) AS default_definition_str,
-            CAST(dc.name AS VARCHAR(256)) AS default_constraint_name
+            CAST(dc.name AS VARCHAR(256)) AS default_constraint_name,
+            CASE WHEN cc.object_id IS NOT NULL THEN 1 ELSE 0 END AS is_computed,
+            CONVERT(VARCHAR(MAX), cc.definition) AS computed_definition,
+            CASE WHEN cc.is_persisted = 1 THEN 1 ELSE 0 END AS is_persisted_computed,
+            CASE WHEN c.is_sparse = 1 THEN 1 ELSE 0 END AS is_sparse,
+            CASE WHEN c.is_filestream = 1 THEN 1 ELSE 0 END AS is_filestream,
+            CASE WHEN c.is_rowguidcol = 1 THEN 1 ELSE 0 END AS is_rowguidcol
         FROM sys.columns c
         JOIN sys.types ty ON c.user_type_id = ty.user_type_id
         LEFT JOIN sys.identity_columns ic
             ON ic.object_id = c.object_id AND ic.column_id = c.column_id
         LEFT JOIN sys.default_constraints dc
             ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+        LEFT JOIN sys.computed_columns cc
+            ON cc.object_id = c.object_id AND cc.column_id = c.column_id
         WHERE c.object_id = OBJECT_ID(?, ?)
         ORDER BY c.column_id;
 """
@@ -207,25 +231,43 @@ def build_create_table_sql(
             warning = f"Table {schema_name}.{table_name}: Column with empty name found (skipped)"
             continue
             
-        # Validate type exists
-        if not r.type_name or not r.type_name.strip():
-            warning = f"Table {schema_name}.{table_name}.{r.column_name}: Missing type information"
-            # Use a default type if missing
-            type_str = "NVARCHAR(MAX)"
+        is_computed = bool(getattr(r, "is_computed", 0))
+        computed_def = getattr(r, "computed_definition", None)
+        if is_computed and computed_def and str(computed_def).strip():
+            persisted = "PERSISTED" if getattr(r, "is_persisted_computed", 0) else ""
+            col_def = f"        {qident(r.column_name)} AS {computed_def.strip()}"
+            if persisted:
+                col_def += f" {persisted}"
         else:
-            type_str = type_sql(r.type_name, r.max_length, r.precision, r.scale)
-        
-        col_def = f"        {qident(r.column_name)} {type_str}"
+            # Validate type exists
+            if not r.type_name or not r.type_name.strip():
+                warning = f"Table {schema_name}.{table_name}.{r.column_name}: Missing type information"
+                type_str = "NVARCHAR(MAX)"
+            else:
+                type_str = type_sql(r.type_name, r.max_length, r.precision, r.scale)
+            col_def = f"        {qident(r.column_name)} {type_str}"
+            if getattr(r, "is_sparse", 0):
+                col_def += " SPARSE"
+            if getattr(r, "is_filestream", 0):
+                col_def += " FILESTREAM"
+            if getattr(r, "is_rowguidcol", 0):
+                col_def += " ROWGUIDCOL"
 
-        if r.is_identity:
+        if not is_computed and r.is_identity:
             seed = parse_int_or_default(r.seed_value_str, 1)
             inc = parse_int_or_default(r.increment_value_str, 1)
             col_def += f" IDENTITY({seed},{inc})"
 
-        col_def += " NULL" if r.is_nullable else " NOT NULL"
+        if not is_computed:
+            col_def += " NULL" if r.is_nullable else " NOT NULL"
 
         # Defaults inline: use source constraint name so restore is a mirror (no "renamed" defaults)
-        if include_inline_defaults and r.default_definition_str and str(r.default_definition_str).strip():
+        if (
+            not is_computed
+            and include_inline_defaults
+            and r.default_definition_str
+            and str(r.default_definition_str).strip()
+        ):
             df_name = getattr(r, "default_constraint_name", None) or f"DF_{table_name}_{r.column_name}"
             if df_name and str(df_name).strip():
                 col_def += f" CONSTRAINT {qident(str(df_name).strip())} DEFAULT {r.default_definition_str}"
@@ -263,9 +305,96 @@ def build_create_table_sql(
 # ----------------------------
 # PROGRAMMABLES
 # ----------------------------
-def fetch_objects(cur, obj_types_csv: str):
-    """Fetch database objects (views, procedures, functions)"""
+# SSMS database-diagram helpers (optional on ASPstate; omit from live schema parity compare).
+ASPSTATE_DIAGRAM_PROCEDURE_NAMES = frozenset(
+    {
+        "sp_alterdiagram",
+        "sp_creatediagram",
+        "sp_dropdiagram",
+        "sp_helpdiagramdefinition",
+        "sp_helpdiagrams",
+        "sp_renamediagram",
+        "sp_upgraddiagrams",
+    }
+)
+
+# Diagram helpers and ASP.NET session-state procs are sometimes is_ms_shipped=1 but must be exported.
+SUPPLEMENTAL_PROCEDURE_NAMES = frozenset(
+    {
+        "AddWindowsUserAndLogin",
+        "CreateTempTables",
+        "DeleteExpiredSessions",
+        "GetHashCode",
+        "GetMajorVersion",
+        "TempGetAppID",
+        "TempGetStateItem",
+        "TempGetStateItem2",
+        "TempGetStateItem3",
+        "TempGetStateItemExclusive",
+        "TempGetVersion",
+        "TempInsertStateItem",
+        "TempInsertUninitializedItem",
+        "TempReleaseStateItem",
+        "TempRemoveStateItem",
+        "TempResetTimeout",
+        "TempUpdateStateItem",
+        "TempUpdateStateItemLong",
+        "sp_alterdiagram",
+        "sp_creatediagram",
+        "sp_dropdiagram",
+        "sp_helpdiagramdefinition",
+        "sp_helpdiagrams",
+        "sp_renamediagram",
+        "sp_upgraddiagrams",
+        "uspMSMQSend",
+    }
+)
+
+# Live compare: ASPstate parity without optional diagram helpers (Redgate drops these on target).
+CATALOG_COMPARE_PROCEDURE_NAMES = frozenset(
+    n for n in SUPPLEMENTAL_PROCEDURE_NAMES if n not in ASPSTATE_DIAGRAM_PROCEDURE_NAMES
+)
+
+# Catch any ASPState TempGet* procs not listed explicitly above.
+SUPPLEMENTAL_PROCEDURE_NAME_LIKE = ("TempGet%",)
+
+REQUIRED_PROCEDURE_MARKERS = tuple(
+    sorted(
+        {
+            "GetHashCode",
+            "TempGetVersion",
+            "sp_creatediagram",
+            "AddWindowsUserAndLogin",
+        }
+    )
+)
+
+
+def fetch_objects(
+    cur,
+    obj_types_csv: str,
+    include_object_names: Optional[frozenset] = None,
+    include_name_like: Optional[tuple] = None,
+):
+    """Fetch database objects (views, procedures, functions)."""
     types = [t.strip() for t in obj_types_csv.split(",") if t.strip()]
+    extra_names = tuple(include_object_names or ())
+    like_patterns = tuple(include_name_like or ())
+    extra_clauses: List[str] = []
+    params: tuple = ()
+    if extra_names:
+        name_placeholders = ",".join(["?"] * len(extra_names))
+        extra_clauses.append(f"o.name IN ({name_placeholders})")
+        params += extra_names
+    for pattern in like_patterns:
+        extra_clauses.append("o.name LIKE ?")
+        params += (pattern,)
+    if extra_clauses:
+        shipped_clause = f"(o.is_ms_shipped = 0 OR {' OR '.join(extra_clauses)})"
+        params = (*params, *types)
+    else:
+        shipped_clause = "o.is_ms_shipped = 0"
+        params = types
     cur.execute(
         f"""
         SELECT
@@ -275,11 +404,11 @@ def fetch_objects(cur, obj_types_csv: str):
             o.object_id
         FROM sys.objects o
         JOIN sys.schemas s ON s.schema_id = o.schema_id
-        WHERE o.is_ms_shipped = 0
+        WHERE {shipped_clause}
           AND o.type IN ({",".join(["?"] * len(types))})
         ORDER BY s.name, o.name;
         """,
-        *types,
+        *params,
     )
     return cur.fetchall()
 
@@ -308,34 +437,118 @@ def fetch_triggers(cur):
 
 
 def object_definition(cur, object_id: int):
-    """Get object definition (view/procedure/function body)"""
+    """Get object definition (view/procedure/function body)."""
     cur.execute("SELECT CAST(OBJECT_DEFINITION(?) AS NVARCHAR(MAX)) AS defn;", object_id)
     r = cur.fetchone()
-    return r[0] if r else None
+    if r and r[0]:
+        return r[0]
+    cur.execute(
+        "SELECT CAST(m.definition AS NVARCHAR(MAX)) FROM sys.sql_modules m WHERE m.object_id = ?;",
+        object_id,
+    )
+    r = cur.fetchone()
+    return r[0] if r and r[0] else None
 
 
-def wrap_create_or_alter(schema_name: str, object_name: str, definition: str, kind: str) -> str:
-    """Wrap object definition with CREATE OR ALTER statement"""
-    full_name = f"{qident(schema_name)}.{qident(object_name)}"
+def object_module_session_options(cur, object_id: int) -> Tuple[bool, bool]:
+    """Return (uses_ansi_nulls, uses_quoted_identifier) from sys.sql_modules."""
+    cur.execute(
+        """
+        SELECT m.uses_ansi_nulls, m.uses_quoted_identifier
+        FROM sys.sql_modules m
+        WHERE m.object_id = ?;
+        """,
+        object_id,
+    )
+    r = cur.fetchone()
+    if not r:
+        return True, True
+    return bool(r[0]), bool(r[1])
+
+
+SessionOptions = Optional[Tuple[bool, bool]]
+
+
+def _normalize_module_definition(
+    definition: str,
+    kind: str,
+    *,
+    session_options: SessionOptions = None,
+    normalize_literals: bool = True,
+) -> str:
+    """Normalize OBJECT_DEFINITION text to CREATE OR ALTER form without GO lines."""
     if not definition:
-        return f"-- {full_name} ({kind}) definition not available (maybe encrypted)\nGO\n\n"
+        return ""
 
-    text = definition.strip()
+    text = strip_module_session_set_options(definition.strip())
+    text = strip_standalone_go_lines(text)
+    text = re.sub(r"(?m)^\s*GO\s*;?\s*$", "", text, flags=re.IGNORECASE).strip()
 
     patterns = [
         (r"^\s*CREATE\s+VIEW\s+", "CREATE OR ALTER VIEW "),
+        (r"^\s*ALTER\s+PROCEDURE\s+", "CREATE OR ALTER PROCEDURE "),
+        (r"^\s*ALTER\s+PROC\s+", "CREATE OR ALTER PROCEDURE "),
         (r"^\s*CREATE\s+PROCEDURE\s+", "CREATE OR ALTER PROCEDURE "),
-        (r"^\s*CREATE\s+PROC\s+", "CREATE OR ALTER PROC "),
+        (r"^\s*CREATE\s+PROC\s+", "CREATE OR ALTER PROCEDURE "),
+        (r"^\s*ALTER\s+FUNCTION\s+", "CREATE OR ALTER FUNCTION "),
         (r"^\s*CREATE\s+FUNCTION\s+", "CREATE OR ALTER FUNCTION "),
+        (r"^\s*ALTER\s+TRIGGER\s+", "CREATE OR ALTER TRIGGER "),
         (r"^\s*CREATE\s+TRIGGER\s+", "CREATE OR ALTER TRIGGER "),
     ]
     for pat, rep in patterns:
         text = re.sub(pat, rep, text, flags=re.IGNORECASE)
 
+    if normalize_literals:
+        text = normalize_double_quoted_string_literals(text)
+
+    if session_options is not None:
+        ansi, qi = session_options
+        preamble = format_module_session_preamble(ansi, qi)
+        text = "\n".join([preamble, text])
+
+    return text
+
+
+def format_module_sql_single(
+    schema_name: str,
+    object_name: str,
+    definition: str,
+    kind: str,
+    *,
+    session_options: SessionOptions = None,
+) -> str:
+    """Single module script for per-object files: one CREATE OR ALTER, no GO, trailing newline."""
+    full_name = f"{qident(schema_name)}.{qident(object_name)}"
+    if not definition:
+        return f"-- {full_name} ({kind}) definition not available (maybe encrypted)\n"
+
+    text = _normalize_module_definition(
+        definition, kind, session_options=session_options
+    )
+    return "\n".join([f"-- {full_name} ({kind})", text, ""])
+
+
+def wrap_create_or_alter(
+    schema_name: str,
+    object_name: str,
+    definition: str,
+    kind: str,
+    *,
+    session_options: SessionOptions = None,
+) -> str:
+    """Wrap object definition with CREATE OR ALTER statement; one GO batch per object."""
+    full_name = f"{qident(schema_name)}.{qident(object_name)}"
+    if not definition:
+        return f"-- {full_name} ({kind}) definition not available (maybe encrypted)\nGO\n\n"
+
+    text = _normalize_module_definition(
+        definition, kind, session_options=session_options
+    )
     return "\n".join(
         [
             f"-- {full_name} ({kind})",
             text,
+            "",
             "GO",
             "",
         ]
@@ -492,7 +705,10 @@ def export_triggers(cur, logger=None) -> Tuple[str, List[str]]:
             continue
         
         # Wrap with CREATE OR ALTER
-        trigger_sql = wrap_create_or_alter(schema_name, trigger_name, definition, "TRIGGER")
+        session_opts = object_module_session_options(cur, trig.object_id)
+        trigger_sql = wrap_create_or_alter(
+            schema_name, trigger_name, definition, "TRIGGER", session_options=session_opts
+        )
         
         # If trigger is disabled, add DISABLE statement
         if trig.is_disabled:
@@ -862,6 +1078,107 @@ def export_indexes(cur, logger=None) -> Tuple[str, List[str]]:
     return "\n".join(out), warnings
 
 
+def _fetch_unique_constraint_columns(cur, parent_object_id: int, unique_index_id: int) -> List[str]:
+    """Column list for a UNIQUE constraint (sys.index_columns.object_id is the parent table)."""
+    cur.execute(
+        """
+        SELECT c.name AS col_name
+        FROM sys.index_columns ic
+        JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+        WHERE ic.object_id = ? AND ic.index_id = ?
+        ORDER BY ic.key_ordinal;
+        """,
+        parent_object_id,
+        unique_index_id,
+    )
+    return [qident(r.col_name) for r in cur.fetchall() if r.col_name]
+
+
+def export_unique_constraints(cur, logger=None) -> str:
+    """Export UNIQUE constraints (non-primary) as ALTER TABLE statements."""
+    cur.execute(
+        """
+        SELECT
+            s.name AS schema_name,
+            t.name AS table_name,
+            kc.name AS constraint_name,
+            kc.parent_object_id,
+            kc.unique_index_id
+        FROM sys.key_constraints kc
+        JOIN sys.tables t ON t.object_id = kc.parent_object_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        WHERE kc.type = 'UQ'
+          AND (t.is_ms_shipped = 0 OR (s.name = N'dbo' AND t.name = N'sysdiagrams'))
+        ORDER BY s.name, t.name, kc.name;
+        """
+    )
+    out = []
+    for row in cur.fetchall():
+        cols = _fetch_unique_constraint_columns(cur, row.parent_object_id, row.unique_index_id)
+        if not cols:
+            if logger:
+                logger.warning(
+                    "Unique constraint %s.%s.%s: no columns, skipped",
+                    row.schema_name,
+                    row.table_name,
+                    row.constraint_name,
+                )
+            continue
+        table = f"{qident(row.schema_name)}.{qident(row.table_name)}"
+        out.append(f"-- UNIQUE {table} ({row.constraint_name})")
+        out.append(
+            f"IF NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE name = N'{row.constraint_name}' "
+            f"AND parent_object_id = OBJECT_ID(N'{row.schema_name}.{row.table_name}'))"
+        )
+        out.append("BEGIN")
+        out.append(
+            f"    ALTER TABLE {table} ADD CONSTRAINT {qident(row.constraint_name)} "
+            f"UNIQUE ({', '.join(cols)});"
+        )
+        out.append("END")
+        out.append("GO")
+        out.append("")
+    return "\n".join(out)
+
+
+def export_clr_modules(cur, logger=None) -> str:
+    """Export CLR modules as commented inventory (not restorable on Azure SQL)."""
+    out: List[str] = []
+    for row in fetch_objects(cur, "PC,FS,FT,AF"):
+        schema_name, object_name, obj_type, oid = row
+        defn = object_definition(cur, oid)
+        full_name = f"{qident(schema_name)}.{qident(object_name)}"
+        out.append(
+            f"-- CLR module {full_name} (type {obj_type}) — requires assembly; "
+            f"not supported on Azure SQL Database / Managed Instance"
+        )
+        if defn:
+            preview = defn.strip().splitlines()[:30]
+            out.append("-- Source definition (reference only; do not run on Azure target):")
+            for line in preview:
+                out.append(f"-- {line}")
+            if len(defn.strip().splitlines()) > 30:
+                out.append("-- ... truncated ...")
+        else:
+            out.append("-- Definition not available (encrypted or assembly-only)")
+            if logger:
+                logger.warning("CLR module %s: definition not available", full_name)
+        out.append("GO")
+        out.append("")
+    return "\n".join(out)
+
+
+def procedures_sql_contains_required(sql_text: str) -> dict:
+    """Check that procedures.sql includes diagram and session-state procedure names."""
+    text = sql_text or ""
+    missing = [
+        name
+        for name in REQUIRED_PROCEDURE_MARKERS
+        if not re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE)
+    ]
+    return {"ok": not missing, "missing": missing, "checked": list(REQUIRED_PROCEDURE_MARKERS)}
+
+
 # ----------------------------
 # EXTENDED PROPERTIES (Comments/Metadata)
 # ----------------------------
@@ -916,6 +1233,17 @@ def fetch_extended_properties(cur, class_type: str = None):
             query += " AND ep.class = ?"
             params.append(class_map[class_type.upper()])
     
+    query += """
+          AND NOT EXISTS (
+              SELECT 1
+              FROM sys.objects o
+              JOIN sys.schemas s ON s.schema_id = o.schema_id
+              WHERE ep.class = 1 AND ep.minor_id = 0
+                AND o.object_id = ep.major_id
+                AND o.type = 'P'
+                AND o.name LIKE 'sp[_]%diagram%'
+          )
+    """
     query += " ORDER BY ep.major_id, ep.minor_id, ep.name;"
     
     cur.execute(query, *params)
@@ -1024,6 +1352,15 @@ def export_extended_properties(cur, logger=None) -> str:
             # Skip if we can't identify the object
             if logger:
                 logger.warning(f"Extended property {name} (major_id={major_id}, minor_id={minor_id}): Could not identify object, skipped")
+            continue
+
+        if (
+            class_type == 1
+            and minor_id == 0
+            and object_name
+            and object_name.lower().startswith("sp_")
+            and "diagram" in object_name.lower()
+        ):
             continue
         
         # Build sp_addextendedproperty statement

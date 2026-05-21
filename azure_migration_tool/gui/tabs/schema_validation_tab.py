@@ -134,6 +134,18 @@ except ImportError:
     DRIVER_UTILS_AVAILABLE = False
 
 # First segment of "Type.Schema.Name" programmable objects (not "Schema.Table.Column")
+try:
+    from src.utils.azure_compat import detect_azure_sql_target, expected_azure_gap_note
+except ImportError:
+    try:
+        from azure_migration_tool.src.utils.azure_compat import (
+            detect_azure_sql_target,
+            expected_azure_gap_note,
+        )
+    except ImportError:
+        detect_azure_sql_target = None
+        expected_azure_gap_note = None
+
 _SCHEMA_VALIDATION_OBJECT_TYPE_PREFIXES = frozenset(
     {
         "VIEW",
@@ -1102,6 +1114,124 @@ class SchemaValidationTab:
         self.fix_missing_btn = ttk.Button(btn_frame, text="Fix Missing Objects", command=self._fix_missing_objects, 
                                          width=20, state=tk.DISABLED)
         self.fix_missing_btn.pack(side=tk.LEFT, padx=5)
+
+        # Live schema compare (SQL Compare–style)
+        mirror_frame = ttk.LabelFrame(scrollable_frame, text="Schema Compare & Repair", padding=10)
+        mirror_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        mirror_btn = ttk.Frame(mirror_frame)
+        mirror_btn.pack(fill=tk.X, pady=6)
+        self.mirror_compare_btn = ttk.Button(
+            mirror_btn, text="Compare", command=self._mirror_schema_compare, width=18
+        )
+        self.mirror_compare_btn.pack(side=tk.LEFT, padx=4)
+        self.mirror_generate_btn = ttk.Button(
+            mirror_btn,
+            text="Generate Fix Script",
+            command=self._mirror_generate_fix,
+            width=20,
+            state=tk.DISABLED,
+        )
+        self.mirror_generate_btn.pack(side=tk.LEFT, padx=4)
+        self.mirror_apply_btn = ttk.Button(
+            mirror_btn,
+            text="Deploy All",
+            command=self._mirror_apply_fix,
+            width=18,
+            state=tk.DISABLED,
+        )
+        self.mirror_apply_btn.pack(side=tk.LEFT, padx=4)
+        self.mirror_busy_label = ttk.Label(mirror_btn, text="", foreground="gray")
+        self.mirror_busy_label.pack(side=tk.LEFT, padx=8)
+        self.mirror_progress = ttk.Progressbar(mirror_btn, mode="indeterminate", length=120)
+        self.mirror_drop_extra_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            mirror_frame,
+            text="Include DROP for objects only on target (e.g. diagram procs)",
+            variable=self.mirror_drop_extra_var,
+        ).pack(anchor=tk.W)
+        tk.Label(
+            mirror_frame,
+            text="Uses live source and destination connections above. Reports and repair scripts are written under "
+            "schema_compare_output/<source>_<db>_to_<target>_<db>/ in the project folder (or current directory).",
+            font=("Arial", 8),
+            fg="gray",
+            wraplength=720,
+        ).pack(anchor=tk.W, pady=(4, 0))
+
+        self.mirror_notebook = ttk.Notebook(mirror_frame)
+        self.mirror_notebook.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        mirror_summary_frame = ttk.Frame(self.mirror_notebook)
+        self.mirror_notebook.add(mirror_summary_frame, text="Summary")
+        self.mirror_summary_text = scrolledtext.ScrolledText(
+            mirror_summary_frame, height=8, state=tk.DISABLED, wrap=tk.WORD
+        )
+        self.mirror_summary_text.pack(fill=tk.BOTH, expand=True)
+
+        mirror_changes_frame = ttk.Frame(self.mirror_notebook)
+        self.mirror_notebook.add(mirror_changes_frame, text="Changes")
+        changes_toolbar = ttk.Frame(mirror_changes_frame)
+        changes_toolbar.pack(fill=tk.X, pady=(0, 4))
+        self.mirror_deploy_selected_btn = ttk.Button(
+            changes_toolbar,
+            text="Deploy Selected",
+            command=self._mirror_deploy_selected,
+            width=16,
+            state=tk.DISABLED,
+        )
+        self.mirror_deploy_selected_btn.pack(side=tk.LEFT, padx=2)
+        self.mirror_deploy_all_btn = ttk.Button(
+            changes_toolbar,
+            text="Deploy All Actionable",
+            command=self._mirror_deploy_all_actionable,
+            width=20,
+            state=tk.DISABLED,
+        )
+        self.mirror_deploy_all_btn.pack(side=tk.LEFT, padx=2)
+        changes_tree_frame = ttk.Frame(mirror_changes_frame)
+        changes_tree_frame.pack(fill=tk.BOTH, expand=True)
+        change_cols = ("Type", "Object", "Action", "ExpectedSkip", "Status")
+        self.mirror_changes_tree = ttk.Treeview(
+            changes_tree_frame, columns=change_cols, show="headings", height=8
+        )
+        for col, width in (
+            ("Type", 100),
+            ("Object", 220),
+            ("Action", 70),
+            ("ExpectedSkip", 80),
+            ("Status", 90),
+        ):
+            self.mirror_changes_tree.heading(col, text=col)
+            self.mirror_changes_tree.column(col, width=width, minwidth=50)
+        ch_vsb = ttk.Scrollbar(changes_tree_frame, orient="vertical", command=self.mirror_changes_tree.yview)
+        ch_hsb = ttk.Scrollbar(changes_tree_frame, orient="horizontal", command=self.mirror_changes_tree.xview)
+        self.mirror_changes_tree.configure(yscrollcommand=ch_vsb.set, xscrollcommand=ch_hsb.set)
+        self.mirror_changes_tree.grid(row=0, column=0, sticky="nsew")
+        ch_vsb.grid(row=0, column=1, sticky="ns")
+        ch_hsb.grid(row=1, column=0, sticky="ew")
+        changes_tree_frame.grid_rowconfigure(0, weight=1)
+        changes_tree_frame.grid_columnconfigure(0, weight=1)
+        self.mirror_changes_tree.tag_configure("expected_skip", foreground="gray")
+        self.mirror_changes_tree.bind("<<TreeviewSelect>>", self._mirror_on_change_select)
+
+        self.mirror_change_sql_preview = scrolledtext.ScrolledText(
+            mirror_changes_frame, height=6, state=tk.DISABLED, wrap=tk.NONE
+        )
+        self.mirror_change_sql_preview.pack(fill=tk.BOTH, expand=False, pady=(6, 0))
+
+        mirror_script_frame = ttk.Frame(self.mirror_notebook)
+        self.mirror_notebook.add(mirror_script_frame, text="Script")
+        self.mirror_script_text = scrolledtext.ScrolledText(
+            mirror_script_frame, height=10, state=tk.DISABLED, wrap=tk.NONE
+        )
+        self.mirror_script_text.pack(fill=tk.BOTH, expand=True)
+
+        self.last_compare_report = None
+        self.last_repair_path = None
+        self.last_source_catalog = None
+        self.last_repair_items = []
+        self._mirror_item_by_tree_iid = {}
+        self._mirror_deploy_status = {}
         
         # Results frame
         results_frame = ttk.LabelFrame(scrollable_frame, text="Validation Results", padding=10)
@@ -1295,6 +1425,21 @@ class SchemaValidationTab:
                     dest_db_type = self.dest_db_type_var.get()
                     src_schema_filter = self.src_schema_var.get().strip() if hasattr(self, 'src_schema_var') else None
                     dest_schema_filter = self.dest_schema_var.get().strip() if hasattr(self, 'dest_schema_var') else None
+
+                    dest_is_azure = False
+                    if dest_db_type == "sqlserver" and detect_azure_sql_target:
+                        try:
+                            dest_is_azure = detect_azure_sql_target(
+                                dest_cur, self.dest_server_var.get()
+                            )
+                            if dest_is_azure:
+                                self.validation_log.insert(
+                                    tk.END,
+                                    "  Destination is Azure SQL — CLR/schema gaps may be marked Expected (Azure)\n",
+                                )
+                                self.validation_log.see(tk.END)
+                        except Exception:
+                            pass
                     
                     # Initialize common_tables in case it's needed later
                     common_tables = set()
@@ -2333,8 +2478,31 @@ class SchemaValidationTab:
                         
                         for const in sorted(missing_other):
                             const_type = src_other_constraints[const]
-                            item = self.results_tree.insert("", tk.END, text=const,
-                                                   values=(db_name, "Exists", "Missing", "Missing", f"{const_type} constraint not in destination"))
+                            azure_note = (
+                                expected_azure_gap_note(const, "constraint", dest_is_azure)
+                                if expected_azure_gap_note
+                                else None
+                            )
+                            if azure_note:
+                                item = self.results_tree.insert(
+                                    "",
+                                    tk.END,
+                                    text=const,
+                                    values=(db_name, "Exists", "N/A", "Expected (Azure)", azure_note),
+                                )
+                            else:
+                                item = self.results_tree.insert(
+                                    "",
+                                    tk.END,
+                                    text=const,
+                                    values=(
+                                        db_name,
+                                        "Exists",
+                                        "Missing",
+                                        "Missing",
+                                        f"{const_type} constraint not in destination",
+                                    ),
+                                )
                             self.all_tree_items.append(item)
                         
                         for const in sorted(extra_other):
@@ -2532,8 +2700,31 @@ class SchemaValidationTab:
                                 self.all_tree_items.append(item)
                         
                         for obj in sorted(missing_in_dest):
-                            item = self.results_tree.insert("", tk.END, text=obj,
-                                                   values=(db_name, "Exists", "Missing", "Missing", f"{src_objects[obj]} not in destination"))
+                            azure_note = (
+                                expected_azure_gap_note(obj, "programmable", dest_is_azure)
+                                if expected_azure_gap_note
+                                else None
+                            )
+                            if azure_note:
+                                item = self.results_tree.insert(
+                                    "",
+                                    tk.END,
+                                    text=obj,
+                                    values=(db_name, "Exists", "N/A", "Expected (Azure)", azure_note),
+                                )
+                            else:
+                                item = self.results_tree.insert(
+                                    "",
+                                    tk.END,
+                                    text=obj,
+                                    values=(
+                                        db_name,
+                                        "Exists",
+                                        "Missing",
+                                        "Missing",
+                                        f"{src_objects[obj]} not in destination",
+                                    ),
+                                )
                             self.all_tree_items.append(item)
                         
                         for obj in sorted(extra_in_dest):
@@ -3107,6 +3298,16 @@ After installation, restart this application.
                         with src_conn, dest_conn:
                             src_cur = src_conn.cursor()
                             dest_cur = dest_conn.cursor()
+
+                            dest_db_type_bulk = cfg.get("dest_db_type", self.dest_db_type_var.get())
+                            dest_is_azure = False
+                            if dest_db_type_bulk == "sqlserver" and detect_azure_sql_target:
+                                try:
+                                    dest_is_azure = detect_azure_sql_target(
+                                        dest_cur, cfg.get("dest_server", "")
+                                    )
+                                except Exception:
+                                    pass
                         
                         # Validate tables
                         # Validate tables
@@ -3445,8 +3646,25 @@ After installation, restart this application.
                                     self.all_tree_items.append(item)
                             
                             for const in sorted(missing_in_dest):
-                                item = self.results_tree.insert("", tk.END, text=const,
-                                                       values=(db_name, "Exists", "Missing", "Missing", "Constraint not in destination"))
+                                azure_note = (
+                                    expected_azure_gap_note(const, "constraint", dest_is_azure)
+                                    if expected_azure_gap_note
+                                    else None
+                                )
+                                if azure_note:
+                                    item = self.results_tree.insert(
+                                        "",
+                                        tk.END,
+                                        text=const,
+                                        values=(db_name, "Exists", "N/A", "Expected (Azure)", azure_note),
+                                    )
+                                else:
+                                    item = self.results_tree.insert(
+                                        "",
+                                        tk.END,
+                                        text=const,
+                                        values=(db_name, "Exists", "Missing", "Missing", "Constraint not in destination"),
+                                    )
                                 self.all_tree_items.append(item)
                             
                             for const in sorted(extra_in_dest):
@@ -3505,8 +3723,31 @@ After installation, restart this application.
                                     self.all_tree_items.append(item)
                             
                             for obj in sorted(missing_in_dest):
-                                item = self.results_tree.insert("", tk.END, text=obj,
-                                                       values=(db_name, "Exists", "Missing", "Missing", f"{src_objects[obj]} not in destination"))
+                                azure_note = (
+                                    expected_azure_gap_note(obj, "programmable", dest_is_azure)
+                                    if expected_azure_gap_note
+                                    else None
+                                )
+                                if azure_note:
+                                    item = self.results_tree.insert(
+                                        "",
+                                        tk.END,
+                                        text=obj,
+                                        values=(db_name, "Exists", "N/A", "Expected (Azure)", azure_note),
+                                    )
+                                else:
+                                    item = self.results_tree.insert(
+                                        "",
+                                        tk.END,
+                                        text=obj,
+                                        values=(
+                                            db_name,
+                                            "Exists",
+                                            "Missing",
+                                            "Missing",
+                                            f"{src_objects[obj]} not in destination",
+                                        ),
+                                    )
                                 self.all_tree_items.append(item)
                             
                             for obj in sorted(extra_in_dest):
@@ -5946,6 +6187,496 @@ After installation, restart this application.
         
         # Return (0, 0) if we reach here without returning earlier
         return (0, 0)
+
+    def _schema_compare_output_dir(self) -> Path:
+        from src.utils.paths import schema_compare_output_dir
+
+        base = self.project_path or Path.cwd()
+        return schema_compare_output_dir(
+            base,
+            self.src_server_var.get(),
+            self.src_db_var.get(),
+            self.dest_server_var.get(),
+            self.dest_db_var.get(),
+        )
+
+    def _log_mirror(self, msg: str):
+        if hasattr(self, "validation_log"):
+            self.validation_log.insert(tk.END, msg + "\n")
+            self.validation_log.see(tk.END)
+
+    def _mirror_set_busy(self, busy: bool, label: str = ""):
+        def update():
+            if hasattr(self, "mirror_busy_label"):
+                self.mirror_busy_label.config(text=label)
+            if hasattr(self, "mirror_progress"):
+                if busy:
+                    self.mirror_progress.pack(side=tk.LEFT, padx=4)
+                    self.mirror_progress.start(10)
+                else:
+                    self.mirror_progress.stop()
+                    self.mirror_progress.pack_forget()
+            if busy:
+                for btn in (
+                    getattr(self, "mirror_compare_btn", None),
+                    getattr(self, "mirror_generate_btn", None),
+                    getattr(self, "mirror_apply_btn", None),
+                    getattr(self, "mirror_deploy_selected_btn", None),
+                    getattr(self, "mirror_deploy_all_btn", None),
+                ):
+                    if btn is not None:
+                        btn.config(state=tk.DISABLED)
+                return
+            if getattr(self, "mirror_compare_btn", None):
+                self.mirror_compare_btn.config(state=tk.NORMAL)
+            has_compare = bool(self.last_compare_report)
+            if getattr(self, "mirror_generate_btn", None):
+                self.mirror_generate_btn.config(
+                    state=tk.NORMAL if has_compare else tk.DISABLED
+                )
+            actionable = any(
+                not i.get("expected_skip") for i in (self.last_repair_items or [])
+            )
+            deploy_state = tk.NORMAL if actionable else tk.DISABLED
+            for btn in (
+                getattr(self, "mirror_apply_btn", None),
+                getattr(self, "mirror_deploy_selected_btn", None),
+                getattr(self, "mirror_deploy_all_btn", None),
+            ):
+                if btn is not None:
+                    btn.config(state=deploy_state)
+
+        self.frame.after(0, update)
+
+    def _mirror_set_summary_text(self, text: str):
+        self.mirror_summary_text.config(state=tk.NORMAL)
+        self.mirror_summary_text.delete("1.0", tk.END)
+        self.mirror_summary_text.insert(tk.END, text)
+        self.mirror_summary_text.config(state=tk.DISABLED)
+
+    def _mirror_set_script_text(self, text: str):
+        self.mirror_script_text.config(state=tk.NORMAL)
+        self.mirror_script_text.delete("1.0", tk.END)
+        self.mirror_script_text.insert(tk.END, text)
+        self.mirror_script_text.config(state=tk.DISABLED)
+
+    def _mirror_set_change_preview(self, text: str):
+        self.mirror_change_sql_preview.config(state=tk.NORMAL)
+        self.mirror_change_sql_preview.delete("1.0", tk.END)
+        self.mirror_change_sql_preview.insert(tk.END, text)
+        self.mirror_change_sql_preview.config(state=tk.DISABLED)
+
+    def _mirror_item_sql_preview(self, item: dict) -> str:
+        batches = item.get("sql_batches") or []
+        if batches:
+            return "\nGO\n".join(batches)
+        reason = item.get("reason") or ""
+        return f"-- {item.get('action')} {item.get('object_name')}\n-- {reason}\n"
+
+    def _mirror_populate_changes(self, items: list):
+        for row in self.mirror_changes_tree.get_children():
+            self.mirror_changes_tree.delete(row)
+        self._mirror_item_by_tree_iid.clear()
+        actionable = 0
+        for item in items:
+            item_id = item.get("id", "")
+            skip = bool(item.get("expected_skip"))
+            status = self._mirror_deploy_status.get(item_id, "pending")
+            if skip:
+                status = "skipped"
+            elif status == "pending":
+                actionable += 1
+            values = (
+                item.get("category", ""),
+                item.get("object_name", ""),
+                item.get("action", ""),
+                "yes" if skip else "no",
+                status,
+            )
+            tags = ("expected_skip",) if skip else ()
+            iid = self.mirror_changes_tree.insert("", tk.END, values=values, tags=tags)
+            self._mirror_item_by_tree_iid[iid] = item_id
+        deploy_state = tk.NORMAL if actionable else tk.DISABLED
+        self.mirror_deploy_selected_btn.config(state=deploy_state)
+        self.mirror_deploy_all_btn.config(state=deploy_state)
+        self.mirror_apply_btn.config(state=deploy_state if items else tk.DISABLED)
+
+    def _mirror_update_change_row_status(self, item_id: str, status: str):
+        for iid, rid in self._mirror_item_by_tree_iid.items():
+            if rid == item_id:
+                vals = list(self.mirror_changes_tree.item(iid, "values"))
+                if len(vals) >= 5:
+                    vals[4] = status
+                    self.mirror_changes_tree.item(iid, values=vals)
+                break
+
+    def _mirror_find_item(self, item_id: str):
+        for item in self.last_repair_items or []:
+            if item.get("id") == item_id:
+                return item
+        return None
+
+    def _mirror_on_change_select(self, _event=None):
+        sel = self.mirror_changes_tree.selection()
+        if not sel:
+            return
+        item_id = self._mirror_item_by_tree_iid.get(sel[0])
+        item = self._mirror_find_item(item_id) if item_id else None
+        if item:
+            self._mirror_set_change_preview(self._mirror_item_sql_preview(item))
+
+    def _mirror_finish_compare_ui(self, summary: dict, report: dict, report_path):
+        lines = [
+            "=== Schema compare (live source vs target) ===",
+            summary.get("text", ""),
+            "",
+            f"Totals: missing={summary.get('missing', 0)} "
+            f"extra={summary.get('extra', 0)} "
+            f"different={summary.get('different', 0)} "
+            f"expected_skip={summary.get('expected_skip', 0)}",
+            "",
+        ]
+        for line in summary.get("lines") or []:
+            lines.append(f"  {line}")
+        lines.append(f"\nReport file: {report_path}")
+        self._mirror_set_summary_text("\n".join(lines))
+        self.mirror_notebook.select(0)
+        self._mirror_set_script_text(
+            "(Run Generate Fix Script to preview repair SQL.)"
+        )
+        self._mirror_populate_changes([])
+        self._mirror_set_change_preview("")
+        self._mirror_deploy_status.clear()
+
+    def _mirror_finish_generate_ui(self, items: list, sql_text: str, path):
+        actionable = [i for i in items if not i.get("expected_skip")]
+        skipped = [i for i in items if i.get("expected_skip")]
+        lines = [
+            f"Repair script: {path}",
+            f"Actionable changes: {len(actionable)}",
+            f"Expected skip (comment-only): {len(skipped)}",
+            "",
+            "Use the Changes tab to preview each item and deploy individually.",
+        ]
+        if self.last_compare_report:
+            from src.compare.schema_compare import summarize_diff_report
+
+            prev = summarize_diff_report(self.last_compare_report)
+            lines.insert(0, prev.get("text", ""))
+            lines.insert(1, "")
+        self._mirror_set_summary_text("\n".join(lines))
+        self._mirror_set_script_text(sql_text)
+        self._mirror_populate_changes(items)
+        self.mirror_notebook.select(1)
+
+    def _connect_mirror_pair(self):
+        """Open source + destination connections for mirror compare/repair."""
+        src_conn = connect_to_any_database(
+            self.src_server_var.get(),
+            self.src_db_var.get(),
+            self.src_auth_var.get(),
+            self.src_user_var.get(),
+            self.src_password_var.get(),
+            db_type=self.src_db_type_var.get(),
+            port=self.src_port_var.get(),
+        )
+        dest_conn = connect_to_any_database(
+            self.dest_server_var.get(),
+            self.dest_db_var.get(),
+            self.dest_auth_var.get(),
+            self.dest_user_var.get(),
+            self.dest_password_var.get(),
+            db_type=self.dest_db_type_var.get(),
+            port=self.dest_port_var.get(),
+        )
+        return src_conn, dest_conn
+
+    def _mirror_schema_compare(self):
+        self.last_repair_items = []
+        self.last_repair_path = None
+        self._mirror_set_busy(True, "Comparing…")
+        self._log_mirror("=== Schema compare started ===")
+
+        def run():
+            src_conn = dest_conn = None
+            try:
+                from src.compare.schema_compare import (
+                    compare_live_databases,
+                    summarize_diff_report,
+                )
+                from src.utils.azure_compat import detect_azure_sql_target
+
+                src_conn, dest_conn = self._connect_mirror_pair()
+                dest_cur = dest_conn.cursor()
+                dest_is_azure = bool(
+                    detect_azure_sql_target(dest_cur, self.dest_server_var.get())
+                    if detect_azure_sql_target
+                    else False
+                )
+                report, self.last_source_catalog = compare_live_databases(
+                    src_conn.cursor(),
+                    dest_cur,
+                    source_label=f"{self.src_server_var.get()}/{self.src_db_var.get()}",
+                    target_label=f"{self.dest_server_var.get()}/{self.dest_db_var.get()}",
+                    dest_is_azure=dest_is_azure,
+                    return_source_catalog=True,
+                )
+                self.last_compare_report = report
+                summary = summarize_diff_report(report)
+                self._log_mirror("=== Schema compare (live source vs target) ===")
+                self._log_mirror(summary.get("text", ""))
+                for line in summary.get("lines") or []:
+                    self._log_mirror(f"  {line}")
+
+                out_dir = self._schema_compare_output_dir()
+                report_path = out_dir / f"compare_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+                self._log_mirror(f"Report: {report_path}")
+                self.frame.after(
+                    0,
+                    lambda: self._mirror_finish_compare_ui(summary, report, report_path),
+                )
+            except Exception as ex:
+                self._log_mirror(f"[X] Compare failed: {ex}")
+                self.frame.after(
+                    0,
+                    lambda: self._mirror_set_summary_text(f"Compare failed:\n{ex}"),
+                )
+                self.root_after_error("Compare failed", str(ex))
+            finally:
+                for c in (src_conn, dest_conn):
+                    try:
+                        if c:
+                            c.close()
+                    except Exception:
+                        pass
+                self._mirror_set_busy(False, "")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def root_after_info(self, title, msg):
+        self.frame.after(0, lambda: messagebox.showinfo(title, msg))
+
+    def root_after_error(self, title, msg):
+        self.frame.after(0, lambda: messagebox.showerror(title, msg))
+
+    def _mirror_generate_fix(self):
+        if not self.last_compare_report:
+            messagebox.showwarning("No compare", "Run Compare first.")
+            return
+
+        self._mirror_set_busy(True, "Generating…")
+        self._log_mirror("=== Generate fix script started ===")
+
+        def run():
+            try:
+                from src.compare.repair_generator import (
+                    generate_repair_items,
+                    repair_items_to_sql,
+                    write_repair_script,
+                )
+
+                dest_is_azure = bool(self.last_compare_report.get("dest_is_azure"))
+                items = generate_repair_items(
+                    self.last_compare_report,
+                    self.last_source_catalog or {},
+                    include_drop_extra=self.mirror_drop_extra_var.get(),
+                    dest_is_azure=dest_is_azure,
+                )
+                self.last_repair_items = items
+                sql_text = repair_items_to_sql(
+                    items,
+                    source_label=self.last_compare_report.get("source", "source"),
+                    target_label=self.last_compare_report.get("target", "target"),
+                )
+                self.last_repair_path = write_repair_script(
+                    sql_text, self._schema_compare_output_dir()
+                )
+                self._log_mirror(f"Fix script: {self.last_repair_path}")
+                self._log_mirror(
+                    f"Repair items: {len(items)} "
+                    f"({sum(1 for i in items if not i.get('expected_skip'))} actionable)"
+                )
+                path = self.last_repair_path
+
+                def finish():
+                    self._mirror_finish_generate_ui(items, sql_text, path)
+
+                self.frame.after(0, finish)
+            except Exception as ex:
+                self._log_mirror(f"[X] Generate fix failed: {ex}")
+                self.root_after_error("Generate fix failed", str(ex))
+            finally:
+                self._mirror_set_busy(False, "")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _mirror_deploy_items(self, items_to_run: list, log_prefix: str):
+        if not items_to_run:
+            messagebox.showinfo("Deploy", "No actionable items to deploy.")
+            return
+
+        self._mirror_set_busy(True, "Deploying…")
+
+        def run():
+            dest_conn = None
+            try:
+                import logging
+                from src.compare.apply_repair import apply_repair_item
+
+                logger = logging.getLogger("schema_repair")
+                dest_conn = connect_to_any_database(
+                    self.dest_server_var.get(),
+                    self.dest_db_var.get(),
+                    self.dest_auth_var.get(),
+                    self.dest_user_var.get(),
+                    self.dest_password_var.get(),
+                    db_type=self.dest_db_type_var.get(),
+                    port=self.dest_port_var.get(),
+                )
+                cur = dest_conn.cursor()
+                for item in items_to_run:
+                    item_id = item.get("id", "")
+                    self.frame.after(
+                        0,
+                        lambda iid=item_id: self._mirror_update_change_row_status(
+                            iid, "running"
+                        ),
+                    )
+                    result = apply_repair_item(
+                        logger,
+                        cur,
+                        dest_conn,
+                        item,
+                        server=self.dest_server_var.get(),
+                    )
+                    status = result.get("status", "failed")
+                    if status in (
+                        "success",
+                        "success_with_expected_skips",
+                        "dry_run",
+                    ):
+                        deploy_status = "success"
+                    elif status == "skipped":
+                        deploy_status = "skipped"
+                    else:
+                        deploy_status = "failed"
+                    self._mirror_deploy_status[item_id] = deploy_status
+                    self._log_mirror(
+                        f"{log_prefix} {item.get('object_name')}: {deploy_status} "
+                        f"({result.get('batches_executed', 0)} batches)"
+                    )
+                    self.frame.after(
+                        0,
+                        lambda iid=item_id, st=deploy_status: self._mirror_update_change_row_status(
+                            iid, st
+                        ),
+                    )
+            except Exception as ex:
+                self._log_mirror(f"[X] Deploy failed: {ex}")
+                self.root_after_error("Deploy failed", str(ex))
+            finally:
+                try:
+                    if dest_conn:
+                        dest_conn.close()
+                except Exception:
+                    pass
+                self._mirror_set_busy(False, "")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _mirror_actionable_items(self, only_pending: bool = False):
+        items = []
+        for item in self.last_repair_items or []:
+            if item.get("expected_skip"):
+                continue
+            item_id = item.get("id", "")
+            if only_pending and self._mirror_deploy_status.get(item_id) in (
+                "success",
+                "skipped",
+            ):
+                continue
+            items.append(item)
+        return items
+
+    def _mirror_deploy_selected(self):
+        sel = self.mirror_changes_tree.selection()
+        if not sel:
+            messagebox.showwarning("Deploy", "Select a row in the Changes tab.")
+            return
+        items = []
+        for iid in sel:
+            item_id = self._mirror_item_by_tree_iid.get(iid)
+            item = self._mirror_find_item(item_id)
+            if item and not item.get("expected_skip"):
+                items.append(item)
+        self._mirror_deploy_items(items, "Deploy")
+
+    def _mirror_deploy_all_actionable(self):
+        items = self._mirror_actionable_items(only_pending=True)
+        self._mirror_deploy_items(items, "Deploy all")
+
+    def _mirror_apply_fix(self):
+        items = self._mirror_actionable_items(only_pending=True)
+        if items:
+            if messagebox.askyesno(
+                "Deploy All",
+                f"Deploy {len(items)} actionable repair item(s) to the destination database?",
+            ):
+                self._mirror_deploy_items(items, "Deploy all")
+            return
+        path = self.last_repair_path
+        if not path or not Path(path).is_file():
+            messagebox.showwarning(
+                "No repair script",
+                "Run Compare, then Generate Fix Script first.",
+            )
+            return
+
+        self._mirror_set_busy(True, "Deploying script…")
+
+        def run():
+            dest_conn = None
+            try:
+                import logging
+                from src.compare.apply_repair import apply_schema_repair
+
+                logger = logging.getLogger("schema_repair")
+                dest_conn = connect_to_any_database(
+                    self.dest_server_var.get(),
+                    self.dest_db_var.get(),
+                    self.dest_auth_var.get(),
+                    self.dest_user_var.get(),
+                    self.dest_password_var.get(),
+                    db_type=self.dest_db_type_var.get(),
+                    port=self.dest_port_var.get(),
+                )
+                result = apply_schema_repair(
+                    logger,
+                    dest_conn.cursor(),
+                    dest_conn,
+                    Path(path),
+                    server=self.dest_server_var.get(),
+                )
+                self._log_mirror(
+                    f"Deploy script: status={result.get('status')} "
+                    f"executed={result.get('batches_executed')} "
+                    f"skipped={result.get('batches_skipped')} "
+                    f"failed={result.get('batches_failed')}"
+                )
+                self.root_after_info("Deploy complete", result.get("status", "done"))
+            except Exception as ex:
+                self._log_mirror(f"[X] Deploy failed: {ex}")
+                self.root_after_error("Deploy failed", str(ex))
+            finally:
+                try:
+                    if dest_conn:
+                        dest_conn.close()
+                except Exception:
+                    pass
+                self._mirror_set_busy(False, "")
+
+        threading.Thread(target=run, daemon=True).start()
     
     def _filter_results(self):
         """Filter treeview results by status and search term."""

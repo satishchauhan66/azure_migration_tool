@@ -235,3 +235,5 @@ identity_cdc_runs/
 projects/
 docs/ado/
 azure_migration_tool/test_blob_auth_methods.py
+/azure_migration_tool/schema_compare_output
+db-esurvey-uat.ASPstate_PreProd-20260521-1107route66-qa-eus2-mi-02.313a5ac3664e.database.windows.net.demo5.sql

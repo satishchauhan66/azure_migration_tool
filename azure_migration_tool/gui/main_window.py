@@ -150,9 +150,15 @@ class MainWindow:
             idx = self.notebook.index(self.notebook.select())
         except Exception:
             return
-        if idx is None or idx < 0 or idx >= self._num_main_tabs or self._tab_created.get(idx, False):
+        if idx is None or idx < 0 or idx >= self._num_main_tabs:
             return
-        self._ensure_tab_created(idx)
+        if not self._tab_created.get(idx, False):
+            self._ensure_tab_created(idx)
+        # Schema Validation (6): copy source/dest from Schema Backup/Migration (4) if filled in
+        if idx == 6:
+            schema_tab = self._tab_instances.get(4)
+            if schema_tab and hasattr(schema_tab, "sync_connections_to_validation"):
+                schema_tab.sync_connections_to_validation()
     
     def _ensure_tab_created(self, idx):
         """Create the tab at index idx if not yet created; put real content inside placeholder (no forget/insert)."""

@@ -91,3 +91,20 @@ def qident(name: str) -> str:
     """Quote SQL identifier: [name] (handles ] by doubling)"""
     return "[" + name.replace("]", "]]") + "]"
 
+
+def schema_compare_output_dir(
+    base: Path,
+    source_server: str,
+    source_db: str,
+    target_server: str,
+    target_db: str,
+) -> Path:
+    """Run folder for live schema compare reports and repair scripts."""
+    folder = (
+        f"{safe_name(source_server)}_{safe_name(source_db)}_to_"
+        f"{safe_name(target_server)}_{safe_name(target_db)}"
+    )
+    out = Path(base) / "schema_compare_output" / folder
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+

@@ -824,18 +824,24 @@ class SchemaTab:
             row_start=0
         )
         
-        # Step 2: What to backup
-        options_frame = ttk.LabelFrame(parent, text="Step 2: What to backup", padding=10)
+        # Step 2: Mirror backup scope (full SSMS-style schema hard copy)
+        options_frame = ttk.LabelFrame(parent, text="Step 2: Mirror backup (full schema hard copy)", padding=10)
         options_frame.pack(fill=tk.X, padx=5, pady=5)
-        
+        mirror_help = (
+            "Full mirror schema backup: exports user tables, programmables, constraints, indexes, "
+            "security, filegroups, credentials, partitioning, Service Broker, CDC, change tracking, "
+            "full-text, statistics, XML schemas, assemblies, external tables, diagrams, and more.\n\n"
+            "Secrets (login passwords, credential SECRETs, symmetric key passwords) use placeholders — "
+            "set on the target before restore. Encrypted modules are listed in meta/encrypted_modules.sql.\n"
+            "After backup, open meta/export_gap_report.json for anything still missing.\n"
+            "See meta/restore_order.json for restore sequence."
+        )
+        tk.Label(options_frame, text=mirror_help, justify=tk.LEFT, wraplength=720).pack(anchor=tk.W)
+        # Kept for backward compatibility with bulk Excel flows
         self.backup_tables_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="Tables", variable=self.backup_tables_var).pack(anchor=tk.W)
         self.backup_programmables_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="Programmables (Views, Procedures, Functions)", variable=self.backup_programmables_var).pack(anchor=tk.W)
         self.backup_constraints_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="Constraints (Foreign Keys, Check)", variable=self.backup_constraints_var).pack(anchor=tk.W)
         self.backup_indexes_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="Indexes", variable=self.backup_indexes_var).pack(anchor=tk.W)
         
         # Step 3: Where to save
         out_frame = ttk.LabelFrame(parent, text="Step 3: Where to save", padding=10)
@@ -901,23 +907,56 @@ class SchemaTab:
         # Step 3: What to restore + options
         restore_options_frame = ttk.LabelFrame(parent, text="Step 3: What to restore", padding=10)
         restore_options_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        self.restore_tables_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Tables", variable=self.restore_tables_var).pack(anchor=tk.W)
-        self.restore_programmables_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Programmables", variable=self.restore_programmables_var).pack(anchor=tk.W)
-        self.restore_constraints_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Constraints", variable=self.restore_constraints_var).pack(anchor=tk.W)
-        self.restore_indexes_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Indexes", variable=self.restore_indexes_var).pack(anchor=tk.W)
-        self.restore_continue_on_error_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(restore_options_frame, text="Continue on error (recommended)", variable=self.restore_continue_on_error_var).pack(anchor=tk.W)
-        self.restore_mirror_source_var = tk.BooleanVar(value=False)
+
+        self.restore_full_mirror_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             restore_options_frame,
-            text="Mirror source (attempt all batches; no Azure filter — use for on-prem or when target supports all objects)",
-            variable=self.restore_mirror_source_var,
+            text="Full mirror restore (all objects in sequence — recommended)",
+            variable=self.restore_full_mirror_var,
+            command=self._on_full_mirror_toggle,
         ).pack(anchor=tk.W)
+        mirror_skip_note = (
+            "Expected skips (not counted as failures): login/credential passwords, encrypted module "
+            "inventory, CLR assemblies, and server/master batches on Azure SQL."
+        )
+        tk.Label(restore_options_frame, text=mirror_skip_note, justify=tk.LEFT, wraplength=720, fg="gray").pack(
+            anchor=tk.W, pady=(0, 6)
+        )
+        
+        self.restore_tables_var = tk.BooleanVar(value=True)
+        self.restore_tables_cb = ttk.Checkbutton(restore_options_frame, text="Tables", variable=self.restore_tables_var)
+        self.restore_tables_cb.pack(anchor=tk.W)
+        self.restore_programmables_var = tk.BooleanVar(value=True)
+        self.restore_programmables_cb = ttk.Checkbutton(
+            restore_options_frame, text="Programmables", variable=self.restore_programmables_var
+        )
+        self.restore_programmables_cb.pack(anchor=tk.W)
+        self.restore_constraints_var = tk.BooleanVar(value=True)
+        self.restore_constraints_cb = ttk.Checkbutton(
+            restore_options_frame, text="Constraints", variable=self.restore_constraints_var
+        )
+        self.restore_constraints_cb.pack(anchor=tk.W)
+        self.restore_indexes_var = tk.BooleanVar(value=True)
+        self.restore_indexes_cb = ttk.Checkbutton(
+            restore_options_frame, text="Indexes", variable=self.restore_indexes_var
+        )
+        self.restore_indexes_cb.pack(anchor=tk.W)
+        self.restore_continue_on_error_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(restore_options_frame, text="Continue on error (recommended)", variable=self.restore_continue_on_error_var).pack(anchor=tk.W)
+        self.restore_mirror_source_var = tk.BooleanVar(value=True)
+        self.restore_mirror_source_cb = ttk.Checkbutton(
+            restore_options_frame,
+            text="Mirror source (attempt all batches; minimal Azure filter)",
+            variable=self.restore_mirror_source_var,
+        )
+        self.restore_mirror_source_cb.pack(anchor=tk.W)
+        self.restore_security_var = tk.BooleanVar(value=True)
+        self.restore_security_cb = ttk.Checkbutton(
+            restore_options_frame,
+            text="Security (database users/roles and permissions from 04_security/)",
+            variable=self.restore_security_var,
+        )
+        self.restore_security_cb.pack(anchor=tk.W)
         self.restore_show_preview_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(restore_options_frame, text="Show preview before each batch (FKs, indexes, etc.) — for debugging", 
                        variable=self.restore_show_preview_var).pack(anchor=tk.W)
@@ -936,6 +975,7 @@ class SchemaTab:
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.restore_log = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
         self.restore_log.pack(fill=tk.BOTH, expand=True)
+        self._on_full_mirror_toggle()
         
     def _browse_backup_output(self):
         """Browse for backup output folder."""
@@ -948,6 +988,76 @@ class SchemaTab:
         folder = tk.filedialog.askdirectory(title="Select Backup Folder")
         if folder:
             self.restore_backup_path_var.set(folder)
+
+    def _on_full_mirror_toggle(self):
+        """When full mirror is on, enable all restore sub-options and mirror mode."""
+        full = self.restore_full_mirror_var.get()
+        state = tk.DISABLED if full else tk.NORMAL
+        for var in (
+            self.restore_tables_var,
+            self.restore_programmables_var,
+            self.restore_constraints_var,
+            self.restore_indexes_var,
+            self.restore_security_var,
+            self.restore_mirror_source_var,
+        ):
+            if full:
+                var.set(True)
+        for cb in (
+            self.restore_tables_cb,
+            self.restore_programmables_cb,
+            self.restore_constraints_cb,
+            self.restore_indexes_cb,
+            self.restore_security_cb,
+            self.restore_mirror_source_cb,
+        ):
+            cb.config(state=state)
+
+    def sync_connections_to_validation(self):
+        """Copy backup/restore connection fields to shared vars used by Schema Validation tab."""
+        if (self.backup_server_var.get() or "").strip():
+            self._sync_connection_to_shared(source=True)
+        if (self.restore_server_var.get() or "").strip():
+            self._sync_connection_to_shared(dest=True)
+
+    def _sync_connection_to_shared(self, *, source=False, dest=False):
+        """Push connection widget values to main_window shared StringVars."""
+        mw = self.main_window
+        if source:
+            mw.shared_src_server.set(self.backup_server_var.get())
+            mw.shared_src_db.set(self.backup_db_var.get())
+            mw.shared_src_auth.set(self.backup_auth_var.get())
+            mw.shared_src_user.set(self.backup_user_var.get())
+            self._sync_widget_extras_to_validation(self.backup_connection_widget, role="src")
+        if dest:
+            mw.shared_dest_server.set(self.restore_server_var.get())
+            mw.shared_dest_db.set(self.restore_db_var.get())
+            mw.shared_dest_auth.set(self.restore_auth_var.get())
+            mw.shared_dest_user.set(self.restore_user_var.get())
+            self._sync_widget_extras_to_validation(self.restore_connection_widget, role="dest")
+
+    def _sync_widget_extras_to_validation(self, widget, role):
+        """Copy db_type/port/schema from a ConnectionWidget to Schema Validation tab if loaded."""
+        val_tab = self.main_window._tab_instances.get(6)
+        if not val_tab:
+            return
+        db_type_var = getattr(widget, "db_type_var", None)
+        port_var = getattr(widget, "port_var", None)
+        schema_var = getattr(widget, "schema_var", None)
+        if role == "src":
+            if db_type_var:
+                val_tab.src_db_type_var.set(db_type_var.get())
+            if port_var:
+                val_tab.src_port_var.set(port_var.get())
+            if schema_var:
+                val_tab.src_schema_var.set(schema_var.get())
+        else:
+            if db_type_var:
+                val_tab.dest_db_type_var.set(db_type_var.get())
+            if port_var:
+                val_tab.dest_port_var.set(port_var.get())
+            if schema_var:
+                val_tab.dest_schema_var.set(schema_var.get())
             
     def _start_backup(self):
         """Start schema backup in a separate thread (SQL Server or DB2 based on source type)."""
@@ -1030,9 +1140,10 @@ class SchemaTab:
                     if not is_db2:
                         self.backup_log.insert(
                             tk.END,
-                            "Note: Default backup uses raw CREATE TABLE (no inline PK/column defaults). "
-                            "After data load, run restore with Constraints and/or Indexes to apply primary_keys.sql, "
-                            "indexes, checks, defaults, and FKs.\n",
+                            "Mirror backup written under schema/00_foundation, 01_tables, 02_programmables, "
+                            "03_constraints_indexes, and 04_security. See meta/restore_order.json.\n"
+                            "Note: CREATE TABLE omits inline PK/defaults by default; restore primary_keys.sql "
+                            "and constraints after data load for a full mirror.\n",
                         )
                     
                     # Auto-fill restore backup path with the backup that was just created
@@ -1065,6 +1176,8 @@ class SchemaTab:
                         self.restore_backup_path_var.set(backup_path)
                         self.backup_log.insert(tk.END, f"\n[Note] Backup path auto-filled in the Restore tab.\n")
                         self.backup_log.insert(tk.END, f"   Path: {backup_path}\n")
+
+                    self._sync_connection_to_shared(source=True)
                     
                     self.frame.after(0, lambda: messagebox.showinfo("Success", "Backup completed successfully!\n\nSwitch to the Restore tab to restore to a destination."))
                 else:
@@ -1095,6 +1208,8 @@ class SchemaTab:
         if not self.restore_db_var.get():
             messagebox.showerror("Error", "Destination database is required!")
             return
+
+        self._sync_connection_to_shared(dest=True)
             
         self.restore_btn.config(state=tk.DISABLED)
         self.restore_log.delete("1.0", tk.END)
@@ -1118,12 +1233,14 @@ class SchemaTab:
                     "dest_auth": self.restore_auth_var.get(),
                     "dest_user": self.restore_user_var.get(),
                     "dest_password": self.restore_password_var.get() or None,
+                    "full_mirror": self.restore_full_mirror_var.get(),
                     "restore_tables": self.restore_tables_var.get(),
                     "restore_programmables": self.restore_programmables_var.get(),
                     "restore_constraints": self.restore_constraints_var.get(),
                     "restore_indexes": self.restore_indexes_var.get(),
                     "continue_on_error": self.restore_continue_on_error_var.get(),
                     "mirror_source": self.restore_mirror_source_var.get(),
+                    "restore_security": self.restore_security_var.get(),
                     "dry_run": False,
                     "preview_callback": preview_callback,
                 }
@@ -1142,17 +1259,26 @@ class SchemaTab:
                     log("\n--- Summary ---\n")
                     log(f"  Batches executed: {stats.get('batches_executed', 0)}\n")
                     log(f"  Already existed (skipped): {stats.get('batches_already_existed', 0)}\n")
+                    log(f"  Expected skips: {stats.get('expected_skips', 0)}\n")
                     log(f"  Failed: {stats.get('batches_failed', 0)}\n")
                     log(f"  Other skips: {stats.get('batches_skipped', 0) - stats.get('batches_already_existed', 0)}\n")
                     filtered_azure = stats.get("batches_filtered_azure", 0)
                     if filtered_azure > 0:
-                        log(f"  Azure-incompatible (not restored): {filtered_azure}\n")
-                        note = summary.get("azure_filter_note")
+                        log(f"  Azure-incompatible (expected skip): {filtered_azure}\n")
+                        note = summary.get("azure_filter_note") or summary.get("expected_skip_note")
                         if note:
                             log(f"  Note: {note}\n")
+                seq = summary.get("restore_sequence")
+                if seq:
+                    log(f"\n  Restore sequence ({len(seq)} steps): {' -> '.join(seq[:8])}")
+                    if len(seq) > 8:
+                        log(f" ... +{len(seq) - 8} more\n")
+                    else:
+                        log("\n")
                 
-                if summary["status"] == "success":
+                if summary["status"] in ("success", "success_with_expected_skips"):
                     log("\n[OK] Restore completed successfully!\n")
+                    self._sync_connection_to_shared(dest=True)
                     self.frame.after(0, lambda: messagebox.showinfo("Success", "Restore completed successfully!"))
                 else:
                     log("\n[FAIL] Restore completed with errors.\n")
@@ -1316,17 +1442,19 @@ class SchemaTab:
                         "dest_auth": cfg.get("dest_auth", self.restore_auth_var.get()),
                         "dest_user": cfg.get("dest_user", cfg.get("user", self.restore_user_var.get())),
                         "dest_password": cfg.get("dest_password", self.restore_password_var.get() or None),
+                        "full_mirror": cfg.get("full_mirror", self.restore_full_mirror_var.get()),
                         "restore_tables": cfg.get("restore_tables", self.restore_tables_var.get()),
                         "restore_programmables": cfg.get("restore_programmables", self.restore_programmables_var.get()),
                         "restore_constraints": cfg.get("restore_constraints", self.restore_constraints_var.get()),
                         "restore_indexes": cfg.get("restore_indexes", self.restore_indexes_var.get()),
                         "continue_on_error": cfg.get("continue_on_error", self.restore_continue_on_error_var.get()),
                         "mirror_source": cfg.get("mirror_source", self.restore_mirror_source_var.get()),
+                        "restore_security": cfg.get("restore_security", self.restore_security_var.get()),
                         "dry_run": False,
                         "preview_callback": None,
                     }
                     summary = restore_schema.run_restore(restore_cfg)
-                    if summary["status"] == "success":
+                    if summary["status"] in ("success", "success_with_expected_skips"):
                         log(f"[OK] {cfg.get('dest_db')}\n")
                         success_count += 1
                     else:

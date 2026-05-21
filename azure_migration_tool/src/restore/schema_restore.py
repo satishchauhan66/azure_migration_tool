@@ -12,17 +12,295 @@ from typing import Optional
 import pyodbc
 
 from ..utils.azure_compat import (
+    EXPECTED_SKIP_REASONS,
+    classify_expected_skip,
+    detect_azure_sql_target,
     filter_azure_incompatible_batches,
+    is_expected_skip_inventory_file,
+    detect_azure_engine_edition,
+    is_azure_managed_instance_edition,
+    should_apply_azure_batch_filter,
     should_skip_already_exists_error,
     should_skip_azure_error,
     should_skip_default_constraint_error,
     should_skip_index_error,
+    should_skip_windows_principal_error,
 )
 from ..utils.database import build_conn_str, pick_sql_driver, resolve_password, connect_to_database
 from ..utils.logging import setup_logger
 from ..utils.paths import app_data_dir, short_slug, utc_iso, utc_ts_compact
-from ..utils.sql import split_sql_on_go
+from ..utils.sql import normalize_alter_database_current, prepare_sql_batches
 from .nullability_fix import apply_nullability_fixes
+
+
+# Comprehensive restore sequence (file_key, file_type, cfg flag group or None = always in full mirror).
+# flag group: tables | programmables | constraints | indexes | security
+BUILTIN_RESTORE_ORDER: list[tuple[str, str, Optional[str]]] = [
+    ("server_logins_file", "SERVER_LOGINS", None),
+    ("database_options_file", "DATABASE_OPTIONS", None),
+    ("filegroups_file", "FILEGROUPS", None),
+    ("schemas_file", "SCHEMAS", None),
+    ("user_defined_types_file", "USER_DEFINED_TYPES", None),
+    ("memory_optimized_filegroup_file", "MEMORY_OPTIMIZED_FILEGROUP", None),
+    ("assemblies_file", "ASSEMBLIES", None),
+    ("database_credentials_file", "DATABASE_CREDENTIALS", None),
+    ("external_resources_file", "EXTERNAL_RESOURCES", None),
+    ("partitioning_file", "PARTITIONING", None),
+    ("xml_schema_collections_file", "XML_SCHEMA_COLLECTIONS", None),
+    ("legacy_rules_defaults_file", "LEGACY_RULES_DEFAULTS", None),
+    ("service_broker_file", "SERVICE_BROKER", None),
+    ("sequences_file", "SEQUENCES", None),
+    ("synonyms_file", "SYNONYMS", None),
+    ("replication_file", "REPLICATION", None),
+    ("graph_file", "GRAPH", None),
+    ("tables_file", "TABLES", "tables"),
+    ("tables_no_pk_file", "TABLES (without PKs)", "tables"),
+    ("column_collation_file", "COLUMN_COLLATIONS", "constraints"),
+    ("table_storage_file", "TABLE_STORAGE", "constraints"),
+    ("table_options_file", "TABLE_OPTIONS", "constraints"),
+    ("primary_keys_file", "PRIMARY_KEYS", "constraints"),
+    ("database_diagrams_file", "DATABASE_DIAGRAMS", "programmables"),
+    ("views_file", "VIEWS", "programmables"),
+    ("procedures_file", "PROCEDURES", "programmables"),
+    ("clr_procedures_file", "CLR_PROCEDURES", "programmables"),
+    ("functions_file", "FUNCTIONS", "programmables"),
+    ("external_tables_file", "EXTERNAL_TABLES", "programmables"),
+    ("triggers_file", "TRIGGERS", "programmables"),
+    ("ddl_triggers_file", "DDL_TRIGGERS", "programmables"),
+    ("plan_guides_file", "PLAN_GUIDES", "programmables"),
+    ("indexes_file", "INDEXES", "indexes"),
+    ("specialized_indexes_file", "SPECIALIZED_INDEXES", "indexes"),
+    ("index_options_file", "INDEX_OPTIONS", "indexes"),
+    ("unique_constraints_file", "UNIQUE_CONSTRAINTS", "indexes"),
+    ("check_constraints_file", "CHECK_CONSTRAINTS", "constraints"),
+    ("default_constraints_file", "DEFAULT_CONSTRAINTS", "constraints"),
+    ("foreign_keys_file", "FOREIGN_KEYS", "constraints"),
+    ("fulltext_file", "FULLTEXT", "indexes"),
+    ("statistics_file", "STATISTICS", "indexes"),
+    ("security_policies_file", "SECURITY_POLICIES", "programmables"),
+    ("change_tracking_file", "CHANGE_TRACKING", "programmables"),
+    ("cdc_file", "CDC", "programmables"),
+    ("database_principals_file", "DATABASE_PRINCIPALS", "security"),
+    ("role_memberships_file", "ROLE_MEMBERSHIPS", "security"),
+    ("schema_authorization_file", "SCHEMA_AUTHORIZATION", "security"),
+    ("permissions_file", "PERMISSIONS", "security"),
+    ("column_permissions_file", "COLUMN_PERMISSIONS", "security"),
+    ("always_encrypted_file", "ALWAYS_ENCRYPTED", "security"),
+    ("data_masking_file", "DATA_MASKING", "security"),
+    ("cryptographic_objects_file", "CRYPTOGRAPHIC_OBJECTS", "security"),
+    ("audit_specifications_file", "AUDIT_SPECIFICATIONS", "security"),
+    ("sequence_current_values_file", "SEQUENCE_VALUES", "programmables"),
+    ("extended_properties_file", "EXTENDED_PROPERTIES", None),
+    ("encrypted_modules_file", "ENCRYPTED_MODULES", None),
+]
+
+# Maps meta/restore_order.json path entries to get_backup_paths() keys.
+_MANIFEST_PATH_TO_FILE_KEY: dict[str, str] = {
+    "meta/server_logins.sql": "server_logins_file",
+    "meta/server_logins.sql (master)": "server_logins_file",
+    "meta/database_diagrams.sql": "database_diagrams_file",
+    "meta/encrypted_modules.sql": "encrypted_modules_file",
+    "00_foundation/database_options.sql": "database_options_file",
+    "00_foundation/filegroups.sql": "filegroups_file",
+    "00_foundation/schemas.sql": "schemas_file",
+    "00_foundation/user_defined_types.sql": "user_defined_types_file",
+    "00_foundation/memory_optimized_filegroup.sql": "memory_optimized_filegroup_file",
+    "00_foundation/assemblies.sql": "assemblies_file",
+    "00_foundation/database_credentials.sql": "database_credentials_file",
+    "00_foundation/external_resources.sql": "external_resources_file",
+    "00_foundation/partitioning.sql": "partitioning_file",
+    "00_foundation/xml_schema_collections.sql": "xml_schema_collections_file",
+    "01_tables_all.sql": "tables_file",
+    "01_tables_no_pk.sql": "tables_no_pk_file",
+    "schema/01_tables_all.sql": "tables_file",
+    "schema/01_tables_no_pk.sql": "tables_no_pk_file",
+    "02_programmables/sequences.sql": "sequences_file",
+    "02_programmables/synonyms.sql": "synonyms_file",
+    "02_programmables/service_broker.sql": "service_broker_file",
+    "02_programmables/replication.sql": "replication_file",
+    "02_programmables/graph.sql": "graph_file",
+    "02_programmables/views.sql": "views_file",
+    "02_programmables/procedures.sql": "procedures_file",
+    "02_programmables/procedures/": "_procedures_dir_",
+    "02_programmables/clr_procedures.sql": "clr_procedures_file",
+    "02_programmables/functions.sql": "functions_file",
+    "02_programmables/external_tables.sql": "external_tables_file",
+    "02_programmables/triggers.sql": "triggers_file",
+    "02_programmables/ddl_triggers.sql": "ddl_triggers_file",
+    "02_programmables/plan_guides.sql": "plan_guides_file",
+    "02_programmables/legacy_rules_defaults.sql": "legacy_rules_defaults_file",
+    "02_programmables/security_policies.sql": "security_policies_file",
+    "02_programmables/change_tracking.sql": "change_tracking_file",
+    "02_programmables/cdc.sql": "cdc_file",
+    "02_programmables/sequence_current_values.sql": "sequence_current_values_file",
+    "03_constraints_indexes/column_collation.sql": "column_collation_file",
+    "03_constraints_indexes/table_storage.sql": "table_storage_file",
+    "03_constraints_indexes/table_options.sql": "table_options_file",
+    "03_constraints_indexes/primary_keys.sql": "primary_keys_file",
+    "03_constraints_indexes/indexes.sql": "indexes_file",
+    "03_constraints_indexes/specialized_indexes.sql": "specialized_indexes_file",
+    "03_constraints_indexes/index_options.sql": "index_options_file",
+    "03_constraints_indexes/unique_constraints.sql": "unique_constraints_file",
+    "03_constraints_indexes/check_constraints.sql": "check_constraints_file",
+    "03_constraints_indexes/default_constraints.sql": "default_constraints_file",
+    "03_constraints_indexes/foreign_keys.sql": "foreign_keys_file",
+    "03_constraints_indexes/fulltext.sql": "fulltext_file",
+    "03_constraints_indexes/statistics.sql": "statistics_file",
+    "03_constraints_indexes/extended_properties.sql": "extended_properties_file",
+    "04_security/database_principals.sql": "database_principals_file",
+    "04_security/role_memberships.sql": "role_memberships_file",
+    "04_security/schema_authorization.sql": "schema_authorization_file",
+    "04_security/permissions.sql": "permissions_file",
+    "04_security/column_permissions.sql": "column_permissions_file",
+    "04_security/cryptographic_objects.sql": "cryptographic_objects_file",
+    "04_security/always_encrypted.sql": "always_encrypted_file",
+    "04_security/data_masking.sql": "data_masking_file",
+    "04_security/audit_specifications.sql": "audit_specifications_file",
+}
+
+
+def normalize_full_mirror_cfg(cfg: dict) -> dict:
+    """Enable all restore flags and mirror mode for a full sequential mirror restore."""
+    if not cfg.get("full_mirror", False):
+        return cfg
+    merged = dict(cfg)
+    merged["restore_tables"] = True
+    merged["restore_programmables"] = True
+    merged["restore_constraints"] = True
+    merged["restore_indexes"] = True
+    merged["restore_security"] = True
+    merged["restore_primary_keys"] = True
+    merged["mirror_source"] = True
+    return merged
+
+
+def run_full_mirror_restore(cfg: dict) -> dict:
+    """Restore every discovered backup object in manifest order (expected Azure gaps logged as skips)."""
+    return run_restore({**cfg, "full_mirror": True})
+
+
+def _cfg_allows_restore_group(cfg: dict, group: Optional[str]) -> bool:
+    if group is None:
+        return True
+    if group == "tables":
+        return bool(cfg.get("restore_tables", False))
+    if group == "programmables":
+        return bool(cfg.get("restore_programmables", False))
+    if group == "constraints":
+        return bool(cfg.get("restore_constraints", False))
+    if group == "indexes":
+        return bool(cfg.get("restore_indexes", False))
+    if group == "security":
+        return bool(cfg.get("restore_security", True))
+    return True
+
+
+def load_manifest_restore_keys(backup_path: Path) -> Optional[list[str]]:
+    """Load file_key order from meta/restore_order.json when present."""
+    manifest_path = backup_path / "meta" / "restore_order.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        order = data.get("order") or []
+        keys: list[str] = []
+        for entry in order:
+            entry = (entry or "").strip()
+            if not entry:
+                continue
+            key = _MANIFEST_PATH_TO_FILE_KEY.get(entry)
+            if key:
+                keys.append(key)
+        return keys or None
+    except Exception:
+        return None
+
+
+def build_restore_order(
+    backup_path: Path,
+    backup_paths: dict,
+    cfg: dict,
+    logger,
+) -> list[tuple[str, str, Path]]:
+    """Build ordered list of (file_key, file_type, path) to restore."""
+    full_mirror = bool(cfg.get("full_mirror", False))
+    restore_order: list[tuple[str, str, Path]] = []
+    seen_keys: set[str] = set()
+
+    def append_file(file_key: str, file_type: str, path: Path) -> None:
+        if file_key in seen_keys:
+            return
+        seen_keys.add(file_key)
+        restore_order.append((file_key, file_type, path))
+
+    def append_from_spec(file_key: str, file_type: str, group: Optional[str]) -> None:
+        if file_key in seen_keys:
+            return
+        if file_key == "primary_keys_file" and not effective_restore_primary_keys(cfg):
+            return
+        if not _cfg_allows_restore_group(cfg, group):
+            return
+        if file_key == "tables_file" and cfg.get("use_tables_no_pk", False):
+            return
+        if file_key == "tables_no_pk_file" and not cfg.get("use_tables_no_pk", False) and "tables_file" in backup_paths:
+            return
+        if file_key not in backup_paths:
+            return
+        path = backup_paths[file_key]
+        if isinstance(path, Path) and path.is_file():
+            append_file(file_key, file_type, path)
+
+    manifest_keys = load_manifest_restore_keys(backup_path)
+    spec_by_key = {fk: (fk, ft, grp) for fk, ft, grp in BUILTIN_RESTORE_ORDER}
+
+    if manifest_keys:
+        for file_key in manifest_keys:
+            if file_key == "_procedures_dir_":
+                proc_files = backup_paths.get("procedure_files")
+                if proc_files and _cfg_allows_restore_group(cfg, "programmables"):
+                    for proc_path in proc_files:
+                        append_file(f"procedure:{proc_path.stem}", "PROCEDURE", proc_path)
+                continue
+            spec = spec_by_key.get(file_key)
+            if spec:
+                append_from_spec(*spec)
+    else:
+        for file_key, file_type, group in BUILTIN_RESTORE_ORDER:
+            if file_key == "procedures_file" and backup_paths.get("procedure_files"):
+                if _cfg_allows_restore_group(cfg, "programmables"):
+                    for proc_path in backup_paths["procedure_files"]:
+                        append_file(f"procedure:{proc_path.stem}", "PROCEDURE", proc_path)
+                continue
+            append_from_spec(file_key, file_type, group)
+
+    # Per-procedure directory when not already expanded from manifest/builtin
+    if backup_paths.get("procedure_files") and not any(k.startswith("procedure:") for k, _, _ in restore_order):
+        if _cfg_allows_restore_group(cfg, "programmables"):
+            for proc_path in backup_paths["procedure_files"]:
+                append_file(f"procedure:{proc_path.stem}", "PROCEDURE", proc_path)
+            logger.info(
+                "Restoring %d procedure file(s) from %s",
+                len(backup_paths["procedure_files"]),
+                backup_paths.get("procedures_dir", "procedures/"),
+            )
+
+    # Nullability fix after tables when using tables_no_pk
+    if (
+        cfg.get("restore_tables", False)
+        and cfg.get("use_tables_no_pk", False)
+        and cfg.get("fix_nullability", True)
+    ):
+        ref_tables = backup_paths.get("tables_file") or backup_paths.get("tables_no_pk_file")
+        if ref_tables and ("nullability_fix", "NULLABILITY_FIX", ref_tables) not in [
+            (a, b, c) for a, b, c in restore_order
+        ]:
+            insert_at = next(
+                (i + 1 for i, (k, _, _) in enumerate(restore_order) if k.startswith("tables")),
+                len(restore_order),
+            )
+            restore_order.insert(insert_at, ("nullability_fix", "NULLABILITY_FIX", ref_tables))
+
+    return restore_order
 
 
 def find_latest_backup(backup_root: Path, server: str, db: str) -> Optional[Path]:
@@ -180,10 +458,40 @@ def get_backup_paths(backup_path: Path) -> dict:
     if not schema_dir.exists():
         return {}
 
+    foundation_dir = schema_dir / "00_foundation"
     prog_dir = schema_dir / "02_programmables"
     cx_dir = schema_dir / "03_constraints_indexes"
+    security_dir = schema_dir / "04_security"
 
     paths = {}
+
+    if foundation_dir.exists():
+        for key, fname in (
+            ("schemas_file", "schemas.sql"),
+            ("user_defined_types_file", "user_defined_types.sql"),
+            ("external_resources_file", "external_resources.sql"),
+            ("partitioning_file", "partitioning.sql"),
+            ("filegroups_file", "filegroups.sql"),
+            ("database_credentials_file", "database_credentials.sql"),
+            ("database_options_file", "database_options.sql"),
+            ("xml_schema_collections_file", "xml_schema_collections.sql"),
+            ("assemblies_file", "assemblies.sql"),
+            ("memory_optimized_filegroup_file", "memory_optimized_filegroup.sql"),
+        ):
+            p = foundation_dir / fname
+            if p.exists():
+                paths[key] = p
+
+    meta_dir = backup_path / "meta"
+    if meta_dir.exists():
+        for key, fname in (
+            ("server_logins_file", "server_logins.sql"),
+            ("database_diagrams_file", "database_diagrams.sql"),
+            ("encrypted_modules_file", "encrypted_modules.sql"),
+        ):
+            p = meta_dir / fname
+            if p.exists():
+                paths[key] = p
     
     # Tables files (two versions available):
     # - tables_no_pk_file: Tables without PKs (for faster data loading, PKs added later)
@@ -200,23 +508,97 @@ def get_backup_paths(backup_path: Path) -> dict:
         paths["sequences_file"] = prog_dir / "sequences.sql"
         paths["synonyms_file"] = prog_dir / "synonyms.sql"
         paths["views_file"] = prog_dir / "views.sql"
-        paths["procedures_file"] = prog_dir / "procedures.sql"
+        procedures_dir = prog_dir / "procedures"
+        if procedures_dir.is_dir():
+            proc_files = sorted(procedures_dir.glob("*.sql"))
+            if proc_files:
+                paths["procedures_dir"] = procedures_dir
+                paths["procedure_files"] = proc_files
+        procedures_file = prog_dir / "procedures.sql"
+        if procedures_file.exists() and "procedure_files" not in paths:
+            paths["procedures_file"] = procedures_file
+        clr_procedures = prog_dir / "clr_procedures.sql"
+        if clr_procedures.exists():
+            paths["clr_procedures_file"] = clr_procedures
         paths["functions_file"] = prog_dir / "functions.sql"
         paths["triggers_file"] = prog_dir / "triggers.sql"
+        for key, fname in (
+            ("ddl_triggers_file", "ddl_triggers.sql"),
+            ("security_policies_file", "security_policies.sql"),
+            ("plan_guides_file", "plan_guides.sql"),
+            ("legacy_rules_defaults_file", "legacy_rules_defaults.sql"),
+            ("service_broker_file", "service_broker.sql"),
+            ("external_tables_file", "external_tables.sql"),
+            ("change_tracking_file", "change_tracking.sql"),
+            ("cdc_file", "cdc.sql"),
+            ("replication_file", "replication.sql"),
+            ("graph_file", "graph.sql"),
+            ("sequence_current_values_file", "sequence_current_values.sql"),
+        ):
+            p = prog_dir / fname
+            if p.exists():
+                paths[key] = p
 
-        if cx_dir.exists():
-            paths["foreign_keys_file"] = cx_dir / "foreign_keys.sql"
-            paths["check_constraints_file"] = cx_dir / "check_constraints.sql"
-            paths["default_constraints_file"] = cx_dir / "default_constraints.sql"
-            paths["indexes_file"] = cx_dir / "indexes.sql"
-            # Primary keys (to add after tables, before foreign keys)
-            primary_keys_file = cx_dir / "primary_keys.sql"
-            if primary_keys_file.exists():
-                paths["primary_keys_file"] = primary_keys_file
-            # Extended properties (comments/metadata)
-            extended_properties_file = cx_dir / "extended_properties.sql"
-            if extended_properties_file.exists():
-                paths["extended_properties_file"] = extended_properties_file
+    if cx_dir.exists():
+        for key, fname in (
+            ("foreign_keys_file", "foreign_keys.sql"),
+            ("check_constraints_file", "check_constraints.sql"),
+            ("default_constraints_file", "default_constraints.sql"),
+            ("indexes_file", "indexes.sql"),
+            ("primary_keys_file", "primary_keys.sql"),
+            ("extended_properties_file", "extended_properties.sql"),
+            ("unique_constraints_file", "unique_constraints.sql"),
+            ("statistics_file", "statistics.sql"),
+            ("fulltext_file", "fulltext.sql"),
+            ("table_options_file", "table_options.sql"),
+            ("column_collation_file", "column_collation.sql"),
+            ("table_storage_file", "table_storage.sql"),
+            ("specialized_indexes_file", "specialized_indexes.sql"),
+            ("index_options_file", "index_options.sql"),
+        ):
+            p = cx_dir / fname
+            if p.exists():
+                paths[key] = p
+
+    if security_dir.exists():
+        for key, fname in (
+            ("database_principals_file", "database_principals.sql"),
+            ("permissions_file", "permissions.sql"),
+            ("role_memberships_file", "role_memberships.sql"),
+            ("cryptographic_objects_file", "cryptographic_objects.sql"),
+            ("audit_specifications_file", "audit_specifications.sql"),
+            ("always_encrypted_file", "always_encrypted.sql"),
+            ("data_masking_file", "data_masking.sql"),
+            ("column_permissions_file", "column_permissions.sql"),
+            ("schema_authorization_file", "schema_authorization.sql"),
+        ):
+            p = security_dir / fname
+            if p.exists():
+                paths[key] = p
+
+    # Discover any additional foundation SQL not in the static map (forward-compatible).
+    if foundation_dir.exists():
+        known_foundation = {
+            foundation_dir / fname
+            for _, fname in (
+                ("schemas_file", "schemas.sql"),
+                ("user_defined_types_file", "user_defined_types.sql"),
+                ("external_resources_file", "external_resources.sql"),
+                ("partitioning_file", "partitioning.sql"),
+                ("filegroups_file", "filegroups.sql"),
+                ("database_credentials_file", "database_credentials.sql"),
+                ("database_options_file", "database_options.sql"),
+                ("xml_schema_collections_file", "xml_schema_collections.sql"),
+                ("assemblies_file", "assemblies.sql"),
+                ("memory_optimized_filegroup_file", "memory_optimized_filegroup.sql"),
+            )
+        }
+        extra = sorted(
+            p for p in foundation_dir.glob("*.sql")
+            if p.is_file() and p not in known_foundation and p not in paths.values()
+        )
+        if extra:
+            paths["extra_foundation_files"] = extra
 
     return paths
 
@@ -231,6 +613,8 @@ def execute_sql_file(
     dry_run: bool,
     preview_callback=None,  # Optional callback to preview SQL before execution
     mirror_source: bool = False,  # If True, attempt all batches (no Azure filter); get mirror of source
+    azure_target: bool = False,  # Azure SQL DB/MI — filter platform-incompatible batches
+    azure_engine_edition: Optional[int] = None,  # 5=Azure SQL DB, 8=Managed Instance (CLR on MI)
 ) -> dict:
     """Execute a SQL file. Returns dict with status, batches_executed, errors."""
     result = {
@@ -243,10 +627,28 @@ def execute_sql_file(
         "batches_failed": 0,
         "batches_skipped": 0,
         "batches_already_existed": 0,  # Track objects that already existed
+        "expected_skips": 0,
+        "expected_skip_reasons": [],
         "errors": [],
         "warnings": [],  # Track warnings (e.g., already exists)
         "duration_seconds": None,
     }
+
+    if is_expected_skip_inventory_file(file_type):
+        result["status"] = "expected_skip_inventory"
+        result["expected_skips"] = 1
+        reason = classify_expected_skip(file_type=file_type) or "encrypted_module_inventory"
+        result["expected_skip_reasons"].append(
+            {"reason": reason, "detail": EXPECTED_SKIP_REASONS.get(reason, reason)}
+        )
+        logger.info(
+            "Skipping %s (%s): %s",
+            sql_file.name,
+            file_type,
+            EXPECTED_SKIP_REASONS.get(reason, reason),
+        )
+        result["duration_seconds"] = 0.0
+        return result
 
     if not sql_file.exists():
         result["status"] = "skipped"
@@ -258,7 +660,9 @@ def execute_sql_file(
 
     try:
         sql_text = sql_file.read_text(encoding="utf-8")
-        batches = split_sql_on_go(sql_text)
+        if file_type == "DATABASE_OPTIONS":
+            sql_text = normalize_alter_database_current(sql_text)
+        batches = prepare_sql_batches(sql_text, file_type=file_type)
         result["batches_total"] = len(batches)
 
         if dry_run:
@@ -273,143 +677,218 @@ def execute_sql_file(
             result["duration_seconds"] = round(time.time() - t0, 3)
             return result
 
-        logger.info("Executing %s: %d batches (mirror_source=%s)", sql_file.name, len(batches), mirror_source)
+        logger.info(
+            "Executing %s: %d batches (mirror_source=%s, azure_target=%s)",
+            sql_file.name,
+            len(batches),
+            mirror_source,
+            azure_target,
+        )
 
-        # Optionally filter out Azure SQL incompatible batches (when mirror_source=False)
-        if mirror_source:
-            compatible_batches = [(i, batch.strip(), []) for i, batch in enumerate(batches, 1) if batch and batch.strip()]
-            result["batches_filtered"] = 0
-        else:
-            compatible_batches = filter_azure_incompatible_batches(batches, logger)
+        if should_apply_azure_batch_filter(
+            mirror_source, azure_target, file_type, engine_edition=azure_engine_edition
+        ):
+            compatible_batches = filter_azure_incompatible_batches(
+                batches, logger, file_type=file_type, engine_edition=azure_engine_edition
+            )
             result["batches_filtered"] = len(batches) - len(compatible_batches)
             if result["batches_filtered"] > 0:
-                logger.info("After Azure compatibility filter: %d/%d batches compatible (%d filtered)",
-                            len(compatible_batches), len(batches), result["batches_filtered"])
-
-        for orig_idx, batch, issues in compatible_batches:
-            # Show preview dialog if callback provided (GUI mode, not bulk/Excel)
-            if preview_callback and not dry_run:
-                # Only preview for certain object types (foreign keys, indexes, constraints)
-                if file_type in ("FOREIGN_KEYS", "INDEXES", "CHECK_CONSTRAINTS", "DEFAULT_CONSTRAINTS"):
-                    user_approved = preview_callback(
-                        file_type=file_type,
-                        batch_number=orig_idx,
-                        total_batches=len(compatible_batches),
-                        sql_batch=batch,
-                        batch_index=orig_idx
+                result["expected_skips"] += result["batches_filtered"]
+                reason = classify_expected_skip(file_type=file_type) or "azure_unsupported_feature"
+                if reason not in [r.get("reason") for r in result["expected_skip_reasons"]]:
+                    result["expected_skip_reasons"].append(
+                        {"reason": reason, "detail": EXPECTED_SKIP_REASONS.get(reason, reason)}
                     )
-                    if not user_approved:
-                        # User cancelled or skipped this batch
-                        logger.info("User skipped batch %d/%d in %s", orig_idx, len(compatible_batches), file_type)
-                        result["batches_skipped"] += 1
-                        continue
-            
-            try:
-                cur.execute(batch)
-                conn.commit()
-                result["batches_executed"] += 1
+                logger.info(
+                    "After Azure compatibility filter: %d/%d batches compatible (%d expected skips)",
+                    len(compatible_batches),
+                    len(batches),
+                    result["batches_filtered"],
+                )
+        else:
+            compatible_batches = [
+                (i, batch.strip(), [])
+                for i, batch in enumerate(batches, 1)
+                if batch and batch.strip()
+            ]
+            result["batches_filtered"] = 0
 
-                if orig_idx % 50 == 0:
-                    logger.debug("Progress %s: batch %d/%d", sql_file.name, orig_idx, len(batches))
+        use_autocommit = file_type == "DATABASE_OPTIONS"
+        prev_autocommit = conn.autocommit
+        if use_autocommit:
+            conn.autocommit = True
 
-            except Exception as ex:
-                error_msg = str(ex)
-                error_str = f"{type(ex).__name__}: {ex}"
-                
-                # Check if this is an error we should skip (Azure incompatibility, already exists, etc.)
-                should_skip = False
-                skip_reason = None
-                
-                if should_skip_azure_error(error_str):
-                    should_skip = True
-                    skip_reason = "Azure SQL incompatible feature"
-                elif file_type == "DEFAULT_CONSTRAINTS" and should_skip_default_constraint_error(error_str):
-                    should_skip = True
-                    skip_reason = "Default constraint already exists (included in table definition)"
-                elif file_type == "INDEXES" and should_skip_index_error(error_str):
-                    should_skip = True
-                    skip_reason = "Index conflict (already exists or clustered index conflict)"
-                elif should_skip_already_exists_error(error_str):
-                    # Handle "already exists" errors for all object types (tables, views, SPs, functions, FKs, etc.)
-                    should_skip = True
-                    skip_reason = f"{file_type} object already exists"
-                elif file_type == "FOREIGN_KEYS" and ("Incorrect syntax near ')'" in error_str or "syntax error" in error_str.lower()):
-                    # Handle invalid foreign key SQL (empty column lists, etc.)
-                    should_skip = True
-                    skip_reason = "Invalid foreign key SQL (likely missing column information in backup)"
-                elif file_type == "FOREIGN_KEYS" and ("no primary or candidate keys" in error_str.lower() or "1776" in error_str):
-                    # Handle foreign key errors where referenced table doesn't have PK/unique constraint
-                    # This can happen if:
-                    # 1. Tables were restored without PKs (using tables_no_pk_file)
-                    # 2. PKs weren't created properly during table restore
-                    # 3. Tables already existed from a previous run without PKs
-                    should_skip = True
-                    skip_reason = "Referenced table missing primary key or unique constraint - ensure tables are restored with primary keys before creating foreign keys"
-                    logger.warning(
-                        "Foreign key creation failed: %s. This usually means the referenced table doesn't have a primary key. "
-                        "Ensure tables are restored WITH primary keys (use tables_file, not tables_no_pk_file) before restoring foreign keys.",
-                        error_str[:200]
-                    )
-                elif file_type == "INDEXES" and "Incorrect syntax near 'WHERE'" in error_str:
-                    # Handle invalid index SQL (empty WHERE clause, etc.)
-                    should_skip = True
-                    skip_reason = "Invalid index SQL (likely empty or malformed WHERE clause in backup)"
-                elif file_type == "INDEXES" and ("cannot specify included columns for a clustered index" in error_str.lower() or "10601" in error_str):
-                    # Handle clustered index with INCLUDE columns (not allowed in SQL Server)
-                    # This should be fixed in the backup, but handle gracefully if old backup is used
-                    should_skip = True
-                    skip_reason = "Clustered index with INCLUDE columns (not supported) - re-run backup with latest code to fix"
-                    logger.warning(
-                        "Index creation failed: %s. Clustered indexes cannot have INCLUDE columns. "
-                        "Re-run schema backup with the latest code to automatically convert to nonclustered.",
-                        error_str[:200]
-                    )
-                
-                if should_skip:
-                    # Track if this is an "already exists" skip vs other skip
-                    is_already_exists = "already exists" in skip_reason.lower() or "already has" in skip_reason.lower()
-                    
-                    if is_already_exists:
-                        logger.info(
-                            "%s | Batch %d/%d - object already exists (%s): %s",
-                            sql_file.name,
-                            orig_idx,
-                            len(batches),
-                            skip_reason,
-                            error_str[:200]  # Truncate long error messages
+        try:
+            for orig_idx, batch, issues in compatible_batches:
+                # Show preview dialog if callback provided (GUI mode, not bulk/Excel)
+                if preview_callback and not dry_run:
+                    # Only preview for certain object types (foreign keys, indexes, constraints)
+                    if file_type in ("FOREIGN_KEYS", "INDEXES", "CHECK_CONSTRAINTS", "DEFAULT_CONSTRAINTS"):
+                        user_approved = preview_callback(
+                            file_type=file_type,
+                            batch_number=orig_idx,
+                            total_batches=len(compatible_batches),
+                            sql_batch=batch,
+                            batch_index=orig_idx
                         )
-                        result["batches_already_existed"] += 1
-                        result["warnings"].append(f"Batch {orig_idx}: {skip_reason}")
-                    else:
-                        logger.warning(
-                            "%s | Batch %d/%d skipped (%s): %s",
-                            sql_file.name,
-                            orig_idx,
-                            len(batches),
-                            skip_reason,
-                            error_str[:200]  # Truncate long error messages
-                        )
-                    
-                    result["batches_skipped"] += 1
-                    result["batches_executed"] += 1  # Count as executed (intentionally skipped)
-                    continue
-                
-                # Real error - log and handle
-                result["batches_failed"] += 1
-                error_msg_full = f"Batch {orig_idx}/{len(batches)} failed: {error_str}"
-                result["errors"].append(error_msg_full)
-                logger.error("%s | %s", sql_file.name, error_msg_full)
+                        if not user_approved:
+                            # User cancelled or skipped this batch
+                            logger.info("User skipped batch %d/%d in %s", orig_idx, len(compatible_batches), file_type)
+                            result["batches_skipped"] += 1
+                            continue
 
                 try:
-                    conn.rollback()
-                except Exception:
-                    pass
+                    cur.execute(batch)
+                    if not use_autocommit:
+                        conn.commit()
+                    result["batches_executed"] += 1
 
-                if not continue_on_error:
-                    raise
+                    if orig_idx % 50 == 0:
+                        logger.debug("Progress %s: batch %d/%d", sql_file.name, orig_idx, len(batches))
+
+                except Exception as ex:
+                    error_msg = str(ex)
+                    error_str = f"{type(ex).__name__}: {ex}"
+
+                    # Check if this is an error we should skip (Azure incompatibility, already exists, etc.)
+                    should_skip = False
+                    skip_reason = None
+
+                    if should_skip_azure_error(error_str):
+                        should_skip = True
+                        skip_reason = "Azure SQL incompatible feature"
+                    elif should_skip_windows_principal_error(error_str):
+                        should_skip = True
+                        skip_reason = "Windows principal not portable to Azure SQL MI"
+                    elif file_type == "DEFAULT_CONSTRAINTS" and should_skip_default_constraint_error(error_str):
+                        should_skip = True
+                        skip_reason = "Default constraint already exists (included in table definition)"
+                    elif file_type == "INDEXES" and should_skip_index_error(error_str):
+                        should_skip = True
+                        skip_reason = "Index conflict (already exists or clustered index conflict)"
+                    elif should_skip_already_exists_error(error_str):
+                        # Handle "already exists" errors for all object types (tables, views, SPs, functions, FKs, etc.)
+                        should_skip = True
+                        skip_reason = f"{file_type} object already exists"
+                    elif file_type == "FOREIGN_KEYS" and ("Incorrect syntax near ')'" in error_str or "syntax error" in error_str.lower()):
+                        # Handle invalid foreign key SQL (empty column lists, etc.)
+                        should_skip = True
+                        skip_reason = "Invalid foreign key SQL (likely missing column information in backup)"
+                    elif file_type == "FOREIGN_KEYS" and ("no primary or candidate keys" in error_str.lower() or "1776" in error_str):
+                        # Handle foreign key errors where referenced table doesn't have PK/unique constraint
+                        # This can happen if:
+                        # 1. Tables were restored without PKs (using tables_no_pk_file)
+                        # 2. PKs weren't created properly during table restore
+                        # 3. Tables already existed from a previous run without PKs
+                        should_skip = True
+                        skip_reason = "Referenced table missing primary key or unique constraint - ensure tables are restored with primary keys before creating foreign keys"
+                        logger.warning(
+                            "Foreign key creation failed: %s. This usually means the referenced table doesn't have a primary key. "
+                            "Ensure tables are restored WITH primary keys (use tables_file, not tables_no_pk_file) before restoring foreign keys.",
+                            error_str[:200]
+                        )
+                    elif file_type == "INDEXES" and "Incorrect syntax near 'WHERE'" in error_str:
+                        # Handle invalid index SQL (empty WHERE clause, etc.)
+                        should_skip = True
+                        skip_reason = "Invalid index SQL (likely empty or malformed WHERE clause in backup)"
+                    elif file_type == "INDEXES" and ("cannot specify included columns for a clustered index" in error_str.lower() or "10601" in error_str):
+                        # Handle clustered index with INCLUDE columns (not allowed in SQL Server)
+                        # This should be fixed in the backup, but handle gracefully if old backup is used
+                        should_skip = True
+                        skip_reason = "Clustered index with INCLUDE columns (not supported) - re-run backup with latest code to fix"
+                        logger.warning(
+                            "Index creation failed: %s. Clustered indexes cannot have INCLUDE columns. "
+                            "Re-run schema backup with the latest code to automatically convert to nonclustered.",
+                            error_str[:200]
+                        )
+                    else:
+                        expected_on_error = classify_expected_skip(
+                            error_msg=error_str,
+                            file_type=file_type,
+                            batch_text=batch,
+                        )
+                        if expected_on_error:
+                            should_skip = True
+                            skip_reason = EXPECTED_SKIP_REASONS.get(
+                                expected_on_error, expected_on_error
+                            )
+
+                    if should_skip:
+                        # Track if this is an "already exists" skip vs other skip
+                        is_already_exists = "already exists" in skip_reason.lower() or "already has" in skip_reason.lower()
+                        expected_key = classify_expected_skip(
+                            error_msg=error_str,
+                            file_type=file_type,
+                            skip_reason=skip_reason,
+                            batch_text=batch,
+                        )
+                        is_expected = expected_key is not None
+
+                        if is_already_exists:
+                            logger.info(
+                                "%s | Batch %d/%d - object already exists (%s): %s",
+                                sql_file.name,
+                                orig_idx,
+                                len(batches),
+                                skip_reason,
+                                error_str[:200]  # Truncate long error messages
+                            )
+                            result["batches_already_existed"] += 1
+                            result["warnings"].append(f"Batch {orig_idx}: {skip_reason}")
+                        elif is_expected:
+                            logger.info(
+                                "%s | Batch %d/%d expected skip (%s): %s",
+                                sql_file.name,
+                                orig_idx,
+                                len(batches),
+                                EXPECTED_SKIP_REASONS.get(expected_key, expected_key),
+                                error_str[:200],
+                            )
+                            result["expected_skips"] += 1
+                            if expected_key not in [r.get("reason") for r in result["expected_skip_reasons"]]:
+                                result["expected_skip_reasons"].append(
+                                    {
+                                        "reason": expected_key,
+                                        "detail": EXPECTED_SKIP_REASONS.get(expected_key, expected_key),
+                                    }
+                                )
+                        else:
+                            logger.warning(
+                                "%s | Batch %d/%d skipped (%s): %s",
+                                sql_file.name,
+                                orig_idx,
+                                len(batches),
+                                skip_reason,
+                                error_str[:200]  # Truncate long error messages
+                            )
+
+                        result["batches_skipped"] += 1
+                        result["batches_executed"] += 1  # Count as executed (intentionally skipped)
+                        continue
+
+                    # Real error - log and handle
+                    result["batches_failed"] += 1
+                    error_msg_full = f"Batch {orig_idx}/{len(batches)} failed: {error_str}"
+                    result["errors"].append(error_msg_full)
+                    logger.error("%s | %s", sql_file.name, error_msg_full)
+
+                    if not use_autocommit:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+
+                    if not continue_on_error:
+                        raise
+        finally:
+            if use_autocommit:
+                conn.autocommit = prev_autocommit
 
         if result["batches_failed"] == 0:
-            result["status"] = "success"
+            if result["expected_skips"] > 0 and result["batches_skipped"] == result["expected_skips"]:
+                result["status"] = "success_with_expected_skips"
+            else:
+                result["status"] = "success"
         elif result["batches_executed"] > 0:
             result["status"] = "completed_with_errors"
         else:
@@ -424,6 +903,7 @@ def execute_sql_file(
             f"executed={result['batches_executed'] - result['batches_skipped']}",  # Actually executed
             f"already_existed={result['batches_already_existed']}",
             f"filtered={result['batches_filtered']}",
+            f"expected_skips={result['expected_skips']}",
             f"skipped={result['batches_skipped'] - result['batches_already_existed']}",  # Other skips
             f"failed={result['batches_failed']}",
             f"duration={result['duration_seconds']:.3f}s"
@@ -472,6 +952,7 @@ def effective_restore_primary_keys(cfg: dict) -> bool:
 
 def run_restore(cfg: dict):
     """Run schema restore with provided configuration"""
+    cfg = normalize_full_mirror_cfg(cfg)
     run_id = utc_ts_compact()
 
     # Use project path if provided, otherwise user-writable app data dir
@@ -529,9 +1010,12 @@ def run_restore(cfg: dict):
     logger.info("Starting schema restore run: %s", run_id)
     logger.info("Backup path: %s", backup_path)
     logger.info("Destination: %s | %s | auth=%s | user=%s", cfg["dest_server"], cfg["dest_db"], cfg["dest_auth"], cfg["dest_user"])
+    logger.info("Full mirror restore: %s", cfg.get("full_mirror", False))
+    logger.info("Restore tables: %s", cfg.get("restore_tables", False))
     logger.info("Restore programmables: %s", cfg["restore_programmables"])
     logger.info("Restore constraints: %s", cfg["restore_constraints"])
     logger.info("Restore indexes: %s", cfg["restore_indexes"])
+    logger.info("Restore security: %s", cfg.get("restore_security", True))
     logger.info("Restore primary keys: %s (effective)", effective_restore_primary_keys(cfg))
     logger.info("Continue on error: %s", cfg["continue_on_error"])
     logger.info("Mirror source (no Azure filter): %s", cfg.get("mirror_source", False))
@@ -619,6 +1103,20 @@ def run_restore(cfg: dict):
             db_name, login_name, server_time = cur.fetchone()
             logger.info("Connected. DB=%s Login=%s ServerTime=%s", db_name, login_name, server_time)
 
+            azure_target = cfg.get("azure_target")
+            if azure_target is None:
+                azure_target = detect_azure_sql_target(cur, cfg["dest_server"])
+            cfg["azure_target"] = bool(azure_target)
+            cfg["azure_engine_edition"] = detect_azure_engine_edition(cur, cfg["dest_server"])
+            if azure_target:
+                if is_azure_managed_instance_edition(cfg.get("azure_engine_edition")):
+                    logger.info(
+                        "Azure SQL Managed Instance detected — CLR assemblies/types will be restored; "
+                        "Windows principals and server-level batches remain filtered"
+                    )
+                else:
+                    logger.info("Azure SQL target detected — CLR/assemblies and legacy DDL batches will be filtered")
+
             # If restoring tables, ensure all required schemas exist first
             tables_sql_path = None
             if cfg.get("restore_tables", False):
@@ -639,89 +1137,8 @@ def run_restore(cfg: dict):
                 else:
                     logger.info("No custom schemas found (using default schemas)")
 
-            # Restore order (matching Red Gate SQL Compare approach):
-            # 0. Sequences (before tables that use them)
-            # 1. Synonyms (before objects that use them)
-            # 2. Tables (if restore_tables is True - for initial setup)
-            # 3. Primary Keys (must be before foreign keys and indexes)
-            # 4. Programmables (views, procedures, functions)
-            # 5. Indexes (non-clustered, before foreign keys)
-            # 6. Constraints (check constraints, default constraints)
-            # 7. Foreign Keys (LAST - after all tables and PKs exist)
-
-            restore_order = []
-
-            # Restore sequences first (before tables that use them)
-            if "sequences_file" in backup_paths:
-                restore_order.append(("sequences_file", "SEQUENCES", backup_paths["sequences_file"]))
-                logger.info("Sequences will be restored before tables")
-
-            # Restore synonyms early (before objects that use them)
-            if "synonyms_file" in backup_paths:
-                restore_order.append(("synonyms_file", "SYNONYMS", backup_paths["synonyms_file"]))
-                logger.info("Synonyms will be restored before other objects")
-
-            # Restore tables first if requested (for initial setup before data migration)
-            # IMPORTANT: For foreign keys to work, tables MUST have primary keys.
-            # Prefer tables_file (with PKs) over tables_no_pk_file (without PKs) unless explicitly requested.
-            if cfg.get("restore_tables", False):
-                # Check if we should use tables without PKs (for faster data loading)
-                use_tables_no_pk = cfg.get("use_tables_no_pk", False)
-                
-                if use_tables_no_pk and "tables_no_pk_file" in backup_paths:
-                    restore_order.append(("tables_no_pk_file", "TABLES (without PKs)", backup_paths["tables_no_pk_file"]))
-                    logger.warning("Using tables_no_pk_file - primary keys will need to be restored separately before foreign keys")
-                elif "tables_file" in backup_paths:
-                    restore_order.append(("tables_file", "TABLES", backup_paths["tables_file"]))
-                    logger.info("Using tables_file for table DDL")
-                elif "tables_no_pk_file" in backup_paths:
-                    # Fallback to no_pk version if tables_file doesn't exist
-                    restore_order.append(("tables_no_pk_file", "TABLES (without PKs)", backup_paths["tables_no_pk_file"]))
-                    logger.warning("tables_file not found, using tables_no_pk_file - primary keys will need to be restored separately")
-                    
-                    # After tables are restored, fix nullability mismatches
-                    # This compares source (backup) vs destination (current) and applies ALTER statements
-                    if cfg.get("fix_nullability", True):  # Default to True
-                        logger.info("Nullability fix enabled - will check and fix mismatches after table restore")
-                        ref_tables = backup_paths.get("tables_file") or backup_paths.get("tables_no_pk_file")
-                        if ref_tables:
-                            restore_order.append(("nullability_fix", "NULLABILITY_FIX", ref_tables))
-
-            # Restore Primary Keys BEFORE indexes and foreign keys
-            # (PKs create clustered indexes which are needed for foreign key references)
-            if effective_restore_primary_keys(cfg) and "primary_keys_file" in backup_paths:
-                restore_order.append(("primary_keys_file", "PRIMARY_KEYS", backup_paths["primary_keys_file"]))
-                logger.info("Primary keys will be restored before indexes and foreign keys")
-
-            if cfg["restore_programmables"]:
-                if "views_file" in backup_paths:
-                    restore_order.append(("views_file", "VIEWS", backup_paths["views_file"]))
-                if "procedures_file" in backup_paths:
-                    restore_order.append(("procedures_file", "PROCEDURES", backup_paths["procedures_file"]))
-                if "functions_file" in backup_paths:
-                    restore_order.append(("functions_file", "FUNCTIONS", backup_paths["functions_file"]))
-                if "triggers_file" in backup_paths:
-                    restore_order.append(("triggers_file", "TRIGGERS", backup_paths["triggers_file"]))
-
-            # Restore indexes BEFORE foreign keys (indexes may be needed for FK performance)
-            if cfg["restore_indexes"]:
-                if "indexes_file" in backup_paths:
-                    restore_order.append(("indexes_file", "INDEXES", backup_paths["indexes_file"]))
-
-            # Restore constraints (check and default) BEFORE foreign keys
-            if cfg["restore_constraints"]:
-                if "check_constraints_file" in backup_paths:
-                    restore_order.append(("check_constraints_file", "CHECK_CONSTRAINTS", backup_paths["check_constraints_file"]))
-                if "default_constraints_file" in backup_paths:
-                    restore_order.append(("default_constraints_file", "DEFAULT_CONSTRAINTS", backup_paths["default_constraints_file"]))
-                # Foreign keys LAST - after all tables, PKs, and indexes exist
-                if "foreign_keys_file" in backup_paths:
-                    restore_order.append(("foreign_keys_file", "FOREIGN_KEYS", backup_paths["foreign_keys_file"]))
-
-            # Restore extended properties (comments/metadata) AFTER all objects are created
-            if "extended_properties_file" in backup_paths:
-                restore_order.append(("extended_properties_file", "EXTENDED_PROPERTIES", backup_paths["extended_properties_file"]))
-
+            restore_order = build_restore_order(backup_path, backup_paths, cfg, logger)
+            summary["restore_sequence"] = [f"{fk}:{ft}" for fk, ft, _ in restore_order]
             logger.info("Restore order: %s", " -> ".join([name for _, name, _ in restore_order]))
 
             for file_key, file_type, sql_file in restore_order:
@@ -755,13 +1172,18 @@ def run_restore(cfg: dict):
                     dry_run=cfg.get("dry_run", False),
                     preview_callback=cfg.get("preview_callback"),  # Optional preview callback for GUI mode
                     mirror_source=cfg.get("mirror_source", False),
+                    azure_target=cfg.get("azure_target", False),
+                    azure_engine_edition=cfg.get("azure_engine_edition"),
                 )
                 summary["files_restored"][file_key] = result
 
                 if result["status"] == "failed" and not cfg["continue_on_error"]:
                     raise RuntimeError(f"Stopping due to failure in {file_type}")
 
-                if result["errors"]:
+                if result["errors"] and result["status"] not in (
+                    "expected_skip_inventory",
+                    "success_with_expected_skips",
+                ):
                     summary["errors"].extend([f"{file_type}: {e}" for e in result["errors"]])
 
         # Calculate overall statistics
@@ -771,6 +1193,8 @@ def run_restore(cfg: dict):
         total_failed = 0
         total_skipped = 0
         total_filtered = 0
+        total_expected_skips = 0
+        expected_skip_reasons: dict[str, str] = {}
         
         for file_result in summary["files_restored"].values():
             total_batches += file_result.get("batches_total", 0)
@@ -779,6 +1203,12 @@ def run_restore(cfg: dict):
             total_failed += file_result.get("batches_failed", 0)
             total_skipped += file_result.get("batches_skipped", 0)
             total_filtered += file_result.get("batches_filtered", 0)
+            total_expected_skips += file_result.get("expected_skips", 0)
+            for entry in file_result.get("expected_skip_reasons") or []:
+                if entry.get("reason"):
+                    expected_skip_reasons[entry["reason"]] = entry.get("detail") or EXPECTED_SKIP_REASONS.get(
+                        entry["reason"], entry["reason"]
+                    )
         
         summary["statistics"] = {
             "total_batches": total_batches,
@@ -787,14 +1217,33 @@ def run_restore(cfg: dict):
             "batches_failed": total_failed,
             "batches_skipped": total_skipped,
             "batches_filtered_azure": total_filtered,
+            "expected_skips": total_expected_skips,
         }
+        if expected_skip_reasons:
+            summary["expected_skips"] = {
+                "count": total_expected_skips,
+                "reasons": expected_skip_reasons,
+            }
+        if total_filtered > 0 or total_expected_skips > 0:
+            summary["expected_skip_note"] = (
+                f"{total_expected_skips} expected skip(s): passwords/login secrets, encrypted modules (inventory), "
+                "CLR assemblies, and server/master batches not controllable on Azure SQL."
+            )
         if total_filtered > 0:
             summary["azure_filter_note"] = (
-                f"{total_filtered} batch(es) were skipped as Azure SQL incompatible (e.g. CREATE LOGIN, USE master, "
-                "syslogins). Missing stored procedures in schema comparison (e.g. RoundhousE.AddSqlUserAndLogin) are expected."
+                f"{total_filtered} batch(es) were filtered as Azure SQL incompatible (e.g. CREATE LOGIN, USE master, "
+                "syslogins, CLR). These count as expected skips, not failures."
             )
         
-        summary["status"] = "success" if not summary["errors"] else "completed_with_errors"
+        if not summary["errors"]:
+            if total_failed > 0:
+                summary["status"] = "completed_with_errors"
+            elif total_expected_skips > 0:
+                summary["status"] = "success_with_expected_skips"
+            else:
+                summary["status"] = "success"
+        else:
+            summary["status"] = "completed_with_errors"
 
     except Exception as ex:
         msg = f"{type(ex).__name__}: {ex}"
@@ -829,6 +1278,10 @@ def run_restore(cfg: dict):
             logger.info("  Already existed (skipped): %d", stats["batches_already_existed"])
             logger.info("  Failed: %d", stats["batches_failed"])
             logger.info("  Other skips: %d", stats["batches_skipped"] - stats["batches_already_existed"])
+            if stats.get("expected_skips", 0) > 0:
+                logger.info("  Expected skips (not failures): %d", stats["expected_skips"])
+                if summary.get("expected_skip_note"):
+                    logger.info("  Note: %s", summary["expected_skip_note"])
             if stats.get("batches_filtered_azure", 0) > 0:
                 logger.info("  Azure-incompatible (filtered): %d", stats["batches_filtered_azure"])
                 if summary.get("azure_filter_note"):
