@@ -11,6 +11,10 @@
 ; ---------------------------------------------------------------------------
 !define PRODUCT_NAME       "Azure Migration Tool"
 !define PRODUCT_PUBLISHER  "Satish Chauhan"
+; Stable uninstall id so upgrades replace the same Add/Remove Programs entry (not per-version keys).
+!define PRODUCT_UNINSTALL_ID "{7E4A9B2C-3D5F-41E8-9A6B-2C8D1E0F3A4B}"
+!define UNINSTALL_REG_KEY    "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_UNINSTALL_ID}"
+!define LEGACY_UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 
 ; ---------------------------------------------------------------------------
 ; Multi-user (must be before !include MultiUser.nsh; MULTIUSER_MUI pulls in MUI2)
@@ -81,7 +85,58 @@ Function .onInit
 FunctionEnd
 
 Function un.onInit
-  !insertmacro MULTIUSER_INIT
+  !insertmacro MULTIUSER_UNINIT
+FunctionEnd
+
+; Remove a previous install (same scope: current user or all users) before copying new files.
+Function UninstallPreviousVersion
+  Push $R1
+  Push $R2
+
+  ${if} $MultiUser.InstallMode == "AllUsers"
+    Call upv_read_allusers
+    ${IfThen} $R1 != "" ${|} Call upv_run_allusers ${|}
+  ${else}
+    Call upv_read_currentuser
+    ${IfThen} $R1 != "" ${|} Call upv_run_currentuser ${|}
+  ${endif}
+
+  Pop $R2
+  Pop $R1
+FunctionEnd
+
+Function upv_read_allusers
+  ReadRegStr $R1 HKLM "Software\${PRODUCT_NAME}" "InstallPath"
+  ${if} $R1 == ""
+    ReadRegStr $R1 HKLM "${UNINSTALL_REG_KEY}" "InstallLocation"
+  ${endif}
+  ${if} $R1 == ""
+    ReadRegStr $R1 HKLM "${LEGACY_UNINSTALL_KEY}" "InstallLocation"
+  ${endif}
+FunctionEnd
+
+Function upv_read_currentuser
+  ReadRegStr $R1 HKCU "Software\${PRODUCT_NAME}" "InstallPath"
+  ${if} $R1 == ""
+    ReadRegStr $R1 HKCU "${UNINSTALL_REG_KEY}" "InstallLocation"
+  ${endif}
+  ${if} $R1 == ""
+    ReadRegStr $R1 HKCU "${LEGACY_UNINSTALL_KEY}" "InstallLocation"
+  ${endif}
+FunctionEnd
+
+Function upv_run_allusers
+  IfFileExists "$R1\Uninstall.exe" 0 upv_run_allusers_done
+  DetailPrint "Removing previous version from $R1..."
+  ExecWait '"$R1\Uninstall.exe" /allusers /S _?=$R1' $R2
+upv_run_allusers_done:
+FunctionEnd
+
+Function upv_run_currentuser
+  IfFileExists "$R1\Uninstall.exe" 0 upv_run_currentuser_done
+  DetailPrint "Removing previous version from $R1..."
+  ExecWait '"$R1\Uninstall.exe" /currentuser /S _?=$R1' $R2
+upv_run_currentuser_done:
 FunctionEnd
 
 !insertmacro MUI_PAGE_WELCOME
@@ -99,6 +154,7 @@ FunctionEnd
 ; Installer sections
 ; ---------------------------------------------------------------------------
 Section "MainSection" SEC01
+  Call UninstallPreviousVersion
   SetOutPath "$INSTDIR"
 
   ; Main exe (versioned in dist; install as AzureMigrationTool.exe for shortcuts)
@@ -131,19 +187,36 @@ Section "MainSection" SEC01
   SetOutPath "$INSTDIR"
   !endif
 
-  ; Registry + uninstall (hive follows install mode)
+  ; Registry + uninstall (hive follows install mode; stable id for in-place upgrades)
   ${if} $MultiUser.InstallMode == "AllUsers"
     WriteRegStr HKLM "Software\${PRODUCT_NAME}" "InstallPath" "$INSTDIR"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "DisplayName" "${PRODUCT_NAME}"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "UninstallString" "$INSTDIR\Uninstall.exe"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "Publisher" "${PRODUCT_PUBLISHER}"
+    WriteRegStr HKLM "${UNINSTALL_REG_KEY}" "DisplayName" "${PRODUCT_NAME}"
+    WriteRegStr HKLM "${UNINSTALL_REG_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe" /allusers'
+    WriteRegStr HKLM "${UNINSTALL_REG_KEY}" "QuietUninstallString" '"$INSTDIR\Uninstall.exe" /allusers /S'
+    WriteRegStr HKLM "${UNINSTALL_REG_KEY}" "InstallLocation" "$INSTDIR"
+    WriteRegStr HKLM "${UNINSTALL_REG_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
   ${else}
     WriteRegStr HKCU "Software\${PRODUCT_NAME}" "InstallPath" "$INSTDIR"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "DisplayName" "${PRODUCT_NAME}"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "UninstallString" "$INSTDIR\Uninstall.exe"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "Publisher" "${PRODUCT_PUBLISHER}"
+    WriteRegStr HKCU "${UNINSTALL_REG_KEY}" "DisplayName" "${PRODUCT_NAME}"
+    WriteRegStr HKCU "${UNINSTALL_REG_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe" /currentuser'
+    WriteRegStr HKCU "${UNINSTALL_REG_KEY}" "QuietUninstallString" '"$INSTDIR\Uninstall.exe" /currentuser /S'
+    WriteRegStr HKCU "${UNINSTALL_REG_KEY}" "InstallLocation" "$INSTDIR"
+    WriteRegStr HKCU "${UNINSTALL_REG_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
+  ${endif}
+  !ifdef VERSION
+    ${if} $MultiUser.InstallMode == "AllUsers"
+      WriteRegStr HKLM "${UNINSTALL_REG_KEY}" "DisplayVersion" "${VERSION}"
+    ${else}
+      WriteRegStr HKCU "${UNINSTALL_REG_KEY}" "DisplayVersion" "${VERSION}"
+    ${endif}
+  !endif
+  ; Drop legacy uninstall key from older installers (same display name, separate registry path).
+  ${if} $MultiUser.InstallMode == "AllUsers"
+    DeleteRegKey HKLM "${LEGACY_UNINSTALL_KEY}"
+  ${else}
+    DeleteRegKey HKCU "${LEGACY_UNINSTALL_KEY}"
   ${endif}
 
   ; Start Menu: SetShellVarContext was set by MultiUser (all vs current)
@@ -168,10 +241,12 @@ Section "Uninstall"
   RMDir /r "$SMPROGRAMS\${PRODUCT_NAME}"
 
   ${if} $MultiUser.InstallMode == "AllUsers"
-    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
+    DeleteRegKey HKLM "${UNINSTALL_REG_KEY}"
+    DeleteRegKey HKLM "${LEGACY_UNINSTALL_KEY}"
     DeleteRegKey HKLM "Software\${PRODUCT_NAME}"
   ${else}
-    DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
+    DeleteRegKey HKCU "${UNINSTALL_REG_KEY}"
+    DeleteRegKey HKCU "${LEGACY_UNINSTALL_KEY}"
     DeleteRegKey HKCU "Software\${PRODUCT_NAME}"
   ${endif}
 SectionEnd

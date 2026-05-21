@@ -436,8 +436,48 @@ def fetch_triggers(cur):
     return cur.fetchall()
 
 
+def clr_object_definition(cur, object_id: int) -> Optional[str]:
+    """Build CREATE ... EXTERNAL NAME for CLR modules when OBJECT_DEFINITION is empty."""
+    cur.execute(
+        """
+        SELECT
+            s.name AS schema_name,
+            o.name AS object_name,
+            o.type AS object_type,
+            a.name AS assembly_name,
+            am.assembly_class,
+            am.assembly_method
+        FROM sys.objects o
+        JOIN sys.schemas s ON s.schema_id = o.schema_id
+        JOIN sys.assembly_modules am ON am.object_id = o.object_id
+        JOIN sys.assemblies a ON a.assembly_id = am.assembly_id
+        WHERE o.object_id = ?;
+        """,
+        object_id,
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    schema_name = row.schema_name
+    object_name = row.object_name
+    asm = row.assembly_name
+    cls = row.assembly_class or ""
+    method = row.assembly_method or ""
+    full = f"{qident(schema_name)}.{qident(object_name)}"
+    otype = (row.object_type or "").upper()
+    if otype in ("PC", "P"):
+        header = f"CREATE PROCEDURE {full}"
+    elif otype in ("FS", "FN", "IF", "TF"):
+        header = f"CREATE FUNCTION {full}"
+    elif otype == "AF":
+        header = f"CREATE AGGREGATE {full}"
+    else:
+        header = f"CREATE PROCEDURE {full}"
+    return f"{header}\nAS EXTERNAL NAME [{asm}].[{cls}].[{method}]"
+
+
 def object_definition(cur, object_id: int):
-    """Get object definition (view/procedure/function body)."""
+    """Get object definition (view/procedure/function/CLR body)."""
     cur.execute("SELECT CAST(OBJECT_DEFINITION(?) AS NVARCHAR(MAX)) AS defn;", object_id)
     r = cur.fetchone()
     if r and r[0]:
@@ -447,7 +487,9 @@ def object_definition(cur, object_id: int):
         object_id,
     )
     r = cur.fetchone()
-    return r[0] if r and r[0] else None
+    if r and r[0]:
+        return r[0]
+    return clr_object_definition(cur, object_id)
 
 
 def object_module_session_options(cur, object_id: int) -> Tuple[bool, bool]:
@@ -496,7 +538,7 @@ def _normalize_module_definition(
         (r"^\s*CREATE\s+TRIGGER\s+", "CREATE OR ALTER TRIGGER "),
     ]
     for pat, rep in patterns:
-        text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+        text = re.sub(pat, rep, text, flags=re.IGNORECASE | re.MULTILINE)
 
     if normalize_literals:
         text = normalize_double_quoted_string_literals(text)
@@ -507,6 +549,35 @@ def _normalize_module_definition(
         text = "\n".join([preamble, text])
 
     return text
+
+
+def normalize_assembly_batch_for_deploy(batch: str) -> str:
+    """
+    Return a single CREATE ASSEMBLY statement (no IF/BEGIN/END wrapper) for repair/restore.
+    Joins continuation lines so hex is not truncated at line breaks.
+    """
+    if not (batch or "").strip():
+        return ""
+    parts: List[str] = []
+    for line in batch.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.upper() == "GO":
+            continue
+        if stripped.startswith("--"):
+            continue
+        if re.match(r"^IF\s+NOT\s+EXISTS\b", stripped, re.IGNORECASE):
+            continue
+        if stripped.upper() in ("BEGIN", "END"):
+            continue
+        parts.append(stripped)
+    merged = re.sub(r"\s+", " ", " ".join(parts)).strip()
+    if not re.search(r"\bCREATE\s+ASSEMBLY\b", merged, re.IGNORECASE):
+        return ""
+    if not re.search(r"\bWITH\s+PERMISSION_SET\s*=", merged, re.IGNORECASE):
+        return ""
+    if not merged.endswith(";"):
+        merged += ";"
+    return merged
 
 
 def format_module_sql_single(

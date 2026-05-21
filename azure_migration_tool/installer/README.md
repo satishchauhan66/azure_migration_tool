@@ -35,6 +35,8 @@ This folder contains a **separate installer flow** that does not change the exis
 3. **Distribute** the setup exe (e.g. `AzureMigrationTool_Setup_1.1.6.exe`).  
    End users run the setup to install the app (Start Menu shortcut, Add/Remove Programs, uninstaller). The installer can include **ODBC Driver 18** and **Java 17** so the destination PC has everything for SQL Server, Azure SQL, and DB2/JDBC.
 
+   **Upgrades:** Running a newer setup on a PC that already has the app installed (same scope: current user or all users) automatically runs the previous uninstaller silently, then installs the new version. Add/Remove Programs keeps a single entry (stable uninstall id), with `DisplayVersion` updated to the new build.
+
 ## What the installer can include (all-in-one)
 
 | Component | How to include | Purpose |

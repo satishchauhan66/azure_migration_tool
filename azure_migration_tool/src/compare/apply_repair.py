@@ -2,12 +2,21 @@
 
 """Apply generated schema repair scripts on a target database."""
 
-import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..restore.schema_restore import execute_sql_file
-from ..utils.azure_compat import detect_azure_engine_edition, detect_azure_sql_target
+from ..utils.azure_compat import (
+    classify_expected_skip,
+    detect_azure_engine_edition,
+    detect_azure_sql_target,
+    should_skip_already_exists_error,
+    should_skip_azure_error,
+    should_skip_windows_principal_error,
+    EXPECTED_SKIP_REASONS,
+)
+from ..utils.sql import prepare_sql_batches
 
 
 def apply_redgate_deployment_script(
@@ -71,11 +80,92 @@ def apply_schema_repair(
     )
 
 
+def _expand_item_batches(batches: List[str]) -> List[str]:
+    """Ensure each batch is ODBC-safe (PRINT/DROP/SET/CREATE never merged)."""
+    expanded: List[str] = []
+    for batch in batches:
+        text = (batch or "").strip()
+        if not text:
+            continue
+        sub = prepare_sql_batches(text, file_type="SCHEMA_REPAIR")
+        expanded.extend(sub if sub else [text])
+    return [b for b in expanded if b and b.strip()]
+
+
 def _item_sql_text(item: Dict[str, Any]) -> str:
     batches: List[str] = list(item.get("sql_batches") or [])
     if batches:
         return "\nGO\n".join(b.strip() for b in batches if b and str(b).strip())
     return ""
+
+
+def _execute_repair_batches(
+    logger,
+    cur,
+    conn,
+    batches: List[str],
+    *,
+    continue_on_error: bool = True,
+) -> Dict[str, Any]:
+    """Run pre-split repair batches one at a time with commit after each."""
+    result = {
+        "status": "started",
+        "batches_total": len(batches),
+        "batches_executed": 0,
+        "batches_failed": 0,
+        "batches_skipped": 0,
+        "expected_skips": 0,
+        "errors": [],
+    }
+    t0 = time.time()
+    for idx, batch in enumerate(batches, 1):
+        try:
+            cur.execute(batch)
+            conn.commit()
+            result["batches_executed"] += 1
+        except Exception as ex:
+            error_str = f"{type(ex).__name__}: {ex}"
+            should_skip = False
+            skip_reason = None
+            if should_skip_azure_error(error_str):
+                should_skip = True
+                skip_reason = "Azure SQL incompatible feature"
+            elif should_skip_windows_principal_error(error_str):
+                should_skip = True
+                skip_reason = "Windows principal not portable to Azure SQL MI"
+            elif should_skip_already_exists_error(error_str):
+                should_skip = True
+                skip_reason = "Object already exists"
+            else:
+                expected_on_error = classify_expected_skip(error_msg=error_str, batch_text=batch)
+                if expected_on_error:
+                    should_skip = True
+                    skip_reason = EXPECTED_SKIP_REASONS.get(
+                        expected_on_error, expected_on_error
+                    )
+            if should_skip:
+                result["batches_skipped"] += 1
+                result["expected_skips"] += 1
+                logger.warning("Repair batch %d skipped: %s — %s", idx, skip_reason, error_str[:200])
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                continue
+            result["batches_failed"] += 1
+            result["errors"].append({"batch": idx, "error": error_str})
+            logger.error("Repair batch %d failed: %s", idx, error_str[:500])
+            if not continue_on_error:
+                result["status"] = "failed"
+                result["duration_seconds"] = round(time.time() - t0, 3)
+                return result
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    result["status"] = "failed" if result["batches_failed"] else "completed"
+    result["duration_seconds"] = round(time.time() - t0, 3)
+    return result
 
 
 def apply_repair_item(
@@ -100,8 +190,22 @@ def apply_repair_item(
             "batches_skipped": 0,
         }
 
-    sql_text = _item_sql_text(item)
-    if not sql_text.strip():
+    raw_batches = list(item.get("sql_batches") or [])
+    if not raw_batches:
+        sql_text = _item_sql_text(item)
+        if not sql_text.strip():
+            return {
+                "item_id": item_id,
+                "status": "skipped",
+                "reason": "no_sql",
+                "batches_executed": 0,
+                "batches_failed": 0,
+                "batches_skipped": 0,
+            }
+        raw_batches = prepare_sql_batches(sql_text, file_type="SCHEMA_REPAIR")
+
+    batches = _expand_item_batches(raw_batches)
+    if not batches:
         return {
             "item_id": item_id,
             "status": "skipped",
@@ -115,38 +219,17 @@ def apply_repair_item(
         return {
             "item_id": item_id,
             "status": "dry_run",
+            "batches_total": len(batches),
             "batches_executed": 0,
             "batches_failed": 0,
             "batches_skipped": 0,
         }
 
-    tmp_path: Optional[Path] = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".sql",
-            delete=False,
-            encoding="utf-8",
-        ) as tmp:
-            tmp.write(sql_text)
-            tmp_path = Path(tmp.name)
-        result = apply_schema_repair(
-            logger,
-            cur,
-            conn,
-            tmp_path,
-            server=server,
-            continue_on_error=continue_on_error,
-            dry_run=False,
-        )
-        result["item_id"] = item_id
-        return result
-    finally:
-        if tmp_path:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+    result = _execute_repair_batches(
+        logger, cur, conn, batches, continue_on_error=continue_on_error
+    )
+    result["item_id"] = item_id
+    return result
 
 
 def apply_repair_items(

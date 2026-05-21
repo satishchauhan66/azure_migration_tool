@@ -507,7 +507,7 @@ def export_database_permissions(cur) -> str:
             ON typ.user_type_id = dp.major_id
            AND dp.class_desc = N'TYPE'
         WHERE dp.class <> 0
-          AND grantee.principal_id > 4
+          AND grantee.principal_id NOT IN (1, 2, 3, 4)
           AND dp.permission_name <> 'CONNECT'
         ORDER BY grantee.name, dp.class_desc, dp.permission_name;
         """

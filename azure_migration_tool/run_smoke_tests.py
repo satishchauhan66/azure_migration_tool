@@ -581,6 +581,134 @@ def test_schema_compare_output_dir():
     assert "src-srv_MyDb_to_tgt-srv_OtherDb" in str(out)
 
 
+def test_normalize_module_create_after_comment():
+    from azure_migration_tool.src.backup.exporters import _normalize_module_definition
+
+    defn = "/* header */\nCREATE PROCEDURE [dbo].[GetHashCode] AS SELECT 1"
+    out = _normalize_module_definition(defn, "PROC", session_options=None)
+    assert "CREATE OR ALTER PROCEDURE" in out.upper()
+    assert "CREATE PROCEDURE" not in re.sub(
+        r"CREATE\s+OR\s+ALTER\s+PROCEDURE", "", out, flags=re.IGNORECASE
+    )
+
+
+def test_normalize_assembly_batch_strips_wrapper():
+    from azure_migration_tool.src.backup.exporters import normalize_assembly_batch_for_deploy
+
+    raw = (
+        "IF NOT EXISTS (SELECT 1 FROM sys.assemblies WHERE name = N'MyAsm')\n"
+        "BEGIN\n"
+        "    CREATE ASSEMBLY [MyAsm] AUTHORIZATION dbo FROM 0x00 WITH PERMISSION_SET = UNSAFE;\n"
+        "END"
+    )
+    out = normalize_assembly_batch_for_deploy(raw)
+    assert "BEGIN" not in out.upper().split()
+    assert out.upper().startswith("CREATE ASSEMBLY")
+    assert "WITH PERMISSION_SET" in out.upper()
+
+
+def test_repair_gethashcode_section_batches():
+    """Module repair must end proc batch before next PRINT (GO between items)."""
+    from azure_migration_tool.src.compare.repair_generator import (
+        generate_repair_items,
+        repair_items_to_sql,
+    )
+    from azure_migration_tool.src.compare.schema_compare import compare_schema_catalogs
+
+    source = {
+        "tables": [],
+        "procedures": {
+            "proc.dbo.gethashcode": {
+                "schema": "dbo",
+                "name": "GetHashCode",
+                "type": "PROC",
+                "definition": (
+                    "/* comment */\n"
+                    "CREATE PROCEDURE [dbo].[GetHashCode] AS\n"
+                    "    SELECT 1\n"
+                    "    RETURN 0\n"
+                ),
+                "uses_ansi_nulls": True,
+                "uses_quoted_identifier": False,
+                "hash": "a",
+            },
+            "proc.dbo.tempgetappid": {
+                "schema": "dbo",
+                "name": "TempGetAppID",
+                "type": "PROC",
+                "definition": "CREATE PROCEDURE [dbo].[TempGetAppID] AS SELECT 2",
+                "uses_ansi_nulls": True,
+                "uses_quoted_identifier": False,
+                "hash": "b",
+            },
+        },
+        "views": {},
+        "functions": {},
+        "assemblies": [],
+        "users": {},
+    }
+    target = {
+        "tables": [],
+        "procedures": {},
+        "views": {},
+        "functions": {},
+        "assemblies": [],
+        "users": {},
+    }
+    report = compare_schema_catalogs(source, target, dest_is_azure=True)
+    items = generate_repair_items(report, source, dest_is_azure=True)
+    gh = next(i for i in items if i.get("object_name") == "dbo.GetHashCode")
+    batches = gh["sql_batches"]
+    assert batches[0].startswith("PRINT")
+    create_batches = [b for b in batches if re.search(r"CREATE\s+OR\s+ALTER\s+PROC", b, re.I)]
+    assert len(create_batches) == 1
+    assert create_batches[0].strip().endswith("RETURN 0")
+    assert "SET ANSI_NULLS ON" in batches
+    assert "SET QUOTED_IDENTIFIER OFF" in batches
+    script = repair_items_to_sql(items)
+    norm = script.replace("\r\n", "\n")
+    assert "RETURN 0\nGO\nPRINT N'Fixing [dbo].[TempGetAppID]'" in norm
+
+
+def test_repair_clr_proc_batches_include_external_name():
+    from azure_migration_tool.src.compare.repair_generator import generate_repair_items
+    from azure_migration_tool.src.compare.schema_compare import compare_schema_catalogs
+
+    source = {
+        "tables": [],
+        "procedures": {
+            "proc.dbo.uspmsmqsend": {
+                "schema": "dbo",
+                "name": "uspMSMQSend",
+                "type": "PROC",
+                "type_desc": "CLR_STORED_PROCEDURE",
+                "definition": (
+                    "CREATE PROCEDURE [dbo].[uspMSMQSend] "
+                    "AS EXTERNAL NAME [MQSessionExpiration].[PressGaney.ElectronicSurvey."
+                    "SQLMQSessionExpiration.SQLMQSessionExpiration].[SendSessionData]"
+                ),
+                "uses_ansi_nulls": True,
+                "uses_quoted_identifier": True,
+                "hash": "x",
+                "fingerprint": "x",
+            }
+        },
+        "views": {},
+        "functions": {},
+        "assemblies": [],
+        "users": {},
+    }
+    target = dict(source)
+    target["procedures"] = {}
+    report = compare_schema_catalogs(source, target, dest_is_azure=True)
+    items = generate_repair_items(report, source, dest_is_azure=True)
+    proc = next(i for i in items if i.get("object_name") == "dbo.uspMSMQSend")
+    joined = "\n".join(proc["sql_batches"]).upper()
+    assert "EXTERNAL NAME" in joined
+    assert "CREATE OR ALTER PROCEDURE" in joined
+    assert "DEFINITION NOT AVAILABLE" not in joined
+
+
 def test_repair_items_from_mock_diff():
     from azure_migration_tool.src.compare.repair_generator import generate_repair_items
     from azure_migration_tool.src.compare.schema_compare import compare_schema_catalogs
@@ -649,6 +777,8 @@ def test_repair_script_permissions_from_live_catalog():
     report = compare_schema_catalogs(source, target, dest_is_azure=False)
     sql = generate_repair_script(report, source, dest_is_azure=False)
     assert "GRANT REFERENCES ON TYPE::" in sql
+    assert "TAPPNAME" in sql.upper()
+    assert "TO [PUBLIC]" in sql.upper()
     assert "permissions from source" in sql.lower()
     assert report["permissions"]["missing_count"] == 1
 
@@ -687,6 +817,53 @@ def test_type_permission_export_sql():
         object_name = "tAppName"
 
     assert _permission_target(Row()) == "TYPE::[dbo].[tAppName]"
+
+
+def test_repair_items_missing_type_grants_to_public():
+    """TYPE REFERENCES grants to [public] must diff and emit deployable repair batches."""
+    from azure_migration_tool.src.compare.repair_generator import generate_repair_items
+    from azure_migration_tool.src.compare.schema_compare import compare_schema_catalogs
+
+    type_grants = [
+        "GRANT REFERENCES ON TYPE::[dbo].[tSessionItemShort] TO [public];",
+        "GRANT REFERENCES ON TYPE::[dbo].[tSessionId] TO [public];",
+    ]
+    source = {
+        "tables": [],
+        "procedures": {},
+        "views": {},
+        "functions": {},
+        "assemblies": [],
+        "users": {},
+        "permission_batches": type_grants + [
+            "GRANT EXECUTE ON [dbo].[SomeProc] TO [app_user];",
+        ],
+    }
+    target = dict(source)
+    target["permission_batches"] = [
+        "GRANT EXECUTE ON [dbo].[SomeProc] TO [app_user];",
+    ]
+    report = compare_schema_catalogs(source, target, dest_is_azure=True)
+    assert report["permissions"]["missing_count"] == 2
+    missing = report["permissions"]["missing"]
+    for type_name in ("TSESSIONITEMSHORT", "TSESSIONID"):
+        assert any(type_name in b.upper() for b in missing)
+    assert all("TO [PUBLIC]" in b.upper() for b in missing)
+
+    items = generate_repair_items(report, source, dest_is_azure=True)
+    perm_items = [
+        i
+        for i in items
+        if i.get("category") == "PERMISSION"
+        and i.get("id") != "permission.header"
+        and not i.get("expected_skip")
+    ]
+    assert len(perm_items) == 2
+    for item in perm_items:
+        batch = item["sql_batches"][0]
+        assert batch.upper().startswith("GRANT REFERENCES ON TYPE::[")
+        assert "TYPE:: [" not in batch
+        assert "to [public]" in batch.lower()
 
 
 def test_expected_skip_windows_user_in_compare_report():
@@ -771,11 +948,16 @@ def main():
         test_azure_database_options_filter()
         test_normalize_procedure_text_for_compare()
         test_repair_script_missing_proc_drop_and_create()
+        test_normalize_module_create_after_comment()
+        test_normalize_assembly_batch_strips_wrapper()
+        test_repair_gethashcode_section_batches()
+        test_repair_clr_proc_batches_include_external_name()
         test_repair_items_from_mock_diff()
         test_schema_compare_output_dir()
         test_repair_script_permissions_from_live_catalog()
         test_diagram_procs_extra_on_target_compare()
         test_type_permission_export_sql()
+        test_repair_items_missing_type_grants_to_public()
         test_mi_blocked_framework_assembly_names()
         test_assemblies_expected_skip_in_compare_report()
         test_clr_custom_proc_not_expected_skip_on_mi()

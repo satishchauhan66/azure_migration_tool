@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..backup.exporters import format_module_sql_single, wrap_create_or_alter
+from ..backup.exporters import (
+    _normalize_module_definition,
+    format_module_sql_single,
+    normalize_assembly_batch_for_deploy,
+    wrap_create_or_alter,
+)
 from ..utils.azure_compat import (
     EXPECTED_SKIP_REASONS,
     is_azure_nonportable_module,
@@ -54,22 +59,43 @@ def _sql_to_batches(sql_text: str) -> List[str]:
     ]
 
 
+def _finalize_repair_batches(batches: List[str]) -> List[str]:
+    """Expand SET/CREATE splits; never merge PRINT/DROP with module bodies."""
+    out: List[str] = []
+    for batch in batches:
+        text = (batch or "").strip()
+        if not text:
+            continue
+        out.extend(_sql_to_batches(text))
+    deduped: List[str] = []
+    for b in out:
+        if b and (not deduped or deduped[-1] != b):
+            deduped.append(b)
+    return deduped
+
+
 def _repair_item(
     item_id: str,
     category: str,
     object_name: str,
     action: str,
-    sql_text: str,
+    sql_text: str = "",
     *,
+    sql_batches: Optional[List[str]] = None,
     expected_skip: bool = False,
     reason: str = "",
 ) -> RepairItem:
+    batches = (
+        _finalize_repair_batches(sql_batches)
+        if sql_batches is not None
+        else _sql_to_batches(sql_text)
+    )
     return {
         "id": item_id,
         "category": category,
         "object_name": object_name,
         "action": action,
-        "sql_batches": _sql_to_batches(sql_text),
+        "sql_batches": batches,
         "expected_skip": expected_skip,
         "reason": reason or "",
     }
@@ -87,15 +113,12 @@ def _drop_module_core(schema: str, name: str, kind: str) -> str:
         [
             f"IF OBJECT_ID(N'{full}', N'{obj_type}') IS NOT NULL",
             f"    DROP {drop_kw} {full}",
-            "GO",
-            "",
         ]
     )
 
 
-def _drop_module_sql(schema: str, name: str, kind: str) -> str:
-    full = f"{qident(schema)}.{qident(name)}"
-    return f"PRINT N'Dropping {full}'\nGO\n{_drop_module_core(schema, name, kind)}"
+def _drop_module_batches(schema: str, name: str, kind: str) -> List[str]:
+    return [_drop_module_core(schema, name, kind)]
 
 
 def _module_session_options_from_entry(entry: Dict[str, Any]):
@@ -104,31 +127,62 @@ def _module_session_options_from_entry(entry: Dict[str, Any]):
     return (bool(entry["uses_ansi_nulls"]), bool(entry.get("uses_quoted_identifier", True)))
 
 
-def _fix_module_batch(entry: Dict[str, Any], kind: str) -> str:
+def _module_body_text(entry: Dict[str, Any], kind: str) -> str:
     schema = entry.get("schema") or "dbo"
     name = entry.get("name") or ""
     defn = entry.get("definition") or ""
-    full = f"{qident(schema)}.{qident(name)}"
     session_opts = _module_session_options_from_entry(entry)
     if defn.strip():
-        body = format_module_sql_single(
-            schema, name, defn, kind, session_options=session_opts
+        return _normalize_module_definition(
+            defn, kind, session_options=None, normalize_literals=True
         ).strip()
-    else:
-        body = wrap_create_or_alter(
-            schema, name, defn, kind, session_options=session_opts
-        ).strip()
-        body = body.replace("\nGO\n", "\n").strip()
-    return "\n".join(
-        [
+    return wrap_create_or_alter(
+        schema, name, defn, kind, session_options=session_opts
+    ).replace("\nGO\n", "\n").strip()
+
+
+def _fix_module_batches(entry: Dict[str, Any], kind: str) -> List[str]:
+    """ODBC-safe batches: PRINT, DROP, SET options, CREATE — never merged."""
+    schema = entry.get("schema") or "dbo"
+    name = entry.get("name") or ""
+    full = f"{qident(schema)}.{qident(name)}"
+    body = _module_body_text(entry, kind)
+    if not body or "definition not available" in body.lower():
+        return [
             f"PRINT N'Fixing {full}'",
-            "GO",
-            _drop_module_core(schema, name, kind).strip(),
-            body,
-            "GO",
-            "",
+            _drop_module_core(schema, name, kind),
+            body or format_module_sql_single(schema, name, "", kind).strip(),
         ]
-    )
+
+    batches: List[str] = [
+        f"PRINT N'Fixing {full}'",
+        *_drop_module_batches(schema, name, kind),
+    ]
+    session_opts = _module_session_options_from_entry(entry)
+    if session_opts is not None:
+        ansi, qi = session_opts
+        batches.append(f"SET ANSI_NULLS {'ON' if ansi else 'OFF'}")
+        batches.append(f"SET QUOTED_IDENTIFIER {'ON' if qi else 'OFF'}")
+    batches.append(body)
+    return batches
+
+
+def _fix_module_batch(entry: Dict[str, Any], kind: str) -> str:
+    """Legacy string form (GO-separated) for callers that still join text."""
+    parts: List[str] = []
+    for batch in _fix_module_batches(entry, kind):
+        parts.append(batch)
+        parts.append("GO")
+    return "\n".join(parts) + "\n"
+
+
+def _assembly_repair_batches(asm_name: str, raw_batch: str) -> List[str]:
+    deploy = normalize_assembly_batch_for_deploy(raw_batch)
+    if not deploy:
+        return [
+            f"-- ASSEMBLY [{asm_name}] batch invalid or truncated; re-export from live source\n"
+        ]
+    return [f"PRINT N'Creating assembly [{asm_name}]'", deploy]
 
 
 def _module_category(kind: str) -> str:
@@ -252,14 +306,13 @@ def generate_repair_items(
             continue
         batch = asm_batches.get(asm_name)
         if batch:
-            sql = f"PRINT N'Creating assembly [{asm_name}]'\nGO\n{batch}\nGO\n"
             items.append(
                 _repair_item(
                     f"assembly.missing.{asm_name}",
                     "ASSEMBLY",
                     asm_name,
                     "CREATE",
-                    sql,
+                    sql_batches=_assembly_repair_batches(asm_name, batch),
                 )
             )
         else:
@@ -345,7 +398,7 @@ def generate_repair_items(
                     category,
                     obj,
                     action,
-                    _fix_module_batch(entry, kind),
+                    sql_batches=_fix_module_batches(entry, kind),
                 )
             )
 
@@ -382,18 +435,17 @@ def generate_repair_items(
                 else:
                     schema, name = "dbo", key
                 obj = f"{schema}.{name}"
-                sql = (
-                    _drop_module_sql(schema, name, kind)
-                    + f"-- Extra on target only: {key}\n"
-                )
+                sql_batches = [
+                    f"PRINT N'Dropping {qident(schema)}.{qident(name)}'",
+                    *_drop_module_batches(schema, name, kind),
+                    f"-- Extra on target only: {key}",
+                ]
                 items.append(
-                    _repair_item(key, category, obj, "DROP", sql)
+                    _repair_item(key, category, obj, "DROP", sql_batches=sql_batches)
                 )
 
     perm_diff = diff_report.get("permissions") or {}
     perm_batches = list(perm_diff.get("missing") or [])
-    if not perm_batches and not (perm_diff.get("missing_count")):
-        perm_batches = list(source_catalog.get("permission_batches") or [])
     if perm_batches:
         items.append(
             _repair_item(
@@ -401,7 +453,7 @@ def generate_repair_items(
                 "PERMISSION",
                 "(database permissions)",
                 "ALTER",
-                "PRINT N'Applying database permissions from source'\nGO\n",
+                sql_batches=["PRINT N'Applying database permissions from source'"],
             )
         )
         for idx, batch in enumerate(perm_batches):
@@ -421,14 +473,13 @@ def generate_repair_items(
                     )
                 )
                 continue
-            sql = f"{batch.strip()}\nGO\n"
             items.append(
                 _repair_item(
                     f"permission.{idx}",
                     "PERMISSION",
                     first_line,
                     "ALTER",
-                    sql,
+                    sql_batches=[batch.strip()],
                 )
             )
 
@@ -453,7 +504,7 @@ def repair_items_to_sql(
                 f"-- {item.get('category')} {item.get('object_name')} "
                 f"({item.get('action')}) {reason}\nGO\n"
             )
-    return "\n".join(chunks)
+    return "\nGO\n".join(chunks)
 
 
 def generate_repair_script(

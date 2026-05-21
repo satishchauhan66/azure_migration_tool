@@ -2,6 +2,7 @@
 
 """Compare source vs target schema catalogs object-by-object."""
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -172,7 +173,9 @@ def _diff_principal_schemas(
 
 
 def _normalize_permission_batch(batch: str) -> str:
-    return " ".join((batch or "").split()).upper().rstrip(";")
+    s = " ".join((batch or "").split()).upper().rstrip(";")
+    # TYPE::[schema].[name] — ignore stray space after TYPE::
+    return re.sub(r"TYPE::\s+\[", "TYPE::[", s)
 
 
 def _diff_permission_batches(

@@ -380,6 +380,12 @@ def prepare_sql_batches(sql_text: str, file_type: Optional[str] = None) -> List[
             if _is_procedure_batch(go_batch):
                 proc_batches = split_procedure_batches(go_batch) or [go_batch]
                 result.extend(_finalize_procedure_batches(proc_batches))
+            elif re.match(r"^\s*PRINT\b", go_batch, re.IGNORECASE):
+                result.append(go_batch)
+            elif re.match(r"^\s*IF\s+OBJECT_ID\b", go_batch, re.IGNORECASE):
+                result.append(go_batch)
+            elif re.search(r"\bCREATE\s+ASSEMBLY\b", go_batch, re.IGNORECASE):
+                result.append(go_batch)
             else:
                 expanded = expand_module_session_set_batches([go_batch])
                 result.extend(

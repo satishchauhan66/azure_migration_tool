@@ -147,10 +147,16 @@ def fetch_live_permission_batches(cur) -> List[str]:
 
 def fetch_live_assembly_batches(cur) -> Dict[str, str]:
     """CREATE ASSEMBLY batches keyed by assembly name from live source."""
+    from ..backup.exporters import normalize_assembly_batch_for_deploy
     from ..backup.remaining_exporters import export_assemblies_full
 
     text, _warnings = export_assemblies_full(cur)
-    return _parse_assembly_batches_from_sql(text)
+    raw = _parse_assembly_batches_from_sql(text)
+    out: Dict[str, str] = {}
+    for name, batch in raw.items():
+        deploy = normalize_assembly_batch_for_deploy(batch)
+        out[name] = deploy or batch
+    return out
 
 
 def _parse_assembly_batches_from_sql(sql_text: str) -> Dict[str, str]:
