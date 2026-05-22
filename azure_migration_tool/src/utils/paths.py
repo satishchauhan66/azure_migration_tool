@@ -5,6 +5,7 @@
 import hashlib
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,6 +86,20 @@ def app_data_dir() -> Path:
         root = Path(os.path.expanduser("~")) / ".azure_migration_tool"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def data_root(project_path=None) -> Path:
+    """Writable root for backups, schema compare output, restores, etc.
+
+    Uses the user-configured project folder when set.  When unset and the app
+    runs as a frozen exe (e.g. under ``Program Files``), uses :func:`app_data_dir`
+    instead of the process working directory, which is often not writable.
+    """
+    if project_path is not None and str(project_path).strip():
+        return Path(project_path)
+    if getattr(sys, "frozen", False):
+        return app_data_dir()
+    return Path.cwd()
 
 
 def qident(name: str) -> str:

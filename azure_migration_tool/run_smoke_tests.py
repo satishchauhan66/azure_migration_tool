@@ -581,6 +581,17 @@ def test_schema_compare_output_dir():
     assert "src-srv_MyDb_to_tgt-srv_OtherDb" in str(out)
 
 
+def test_data_root_uses_project_when_set():
+    import tempfile
+
+    from azure_migration_tool.src.utils.paths import data_root
+
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        assert data_root(base) == base
+        assert data_root(str(base)) == base
+
+
 def test_normalize_module_create_after_comment():
     from azure_migration_tool.src.backup.exporters import _normalize_module_definition
 
@@ -954,6 +965,7 @@ def main():
         test_repair_clr_proc_batches_include_external_name()
         test_repair_items_from_mock_diff()
         test_schema_compare_output_dir()
+        test_data_root_uses_project_when_set()
         test_repair_script_permissions_from_live_catalog()
         test_diagram_procs_extra_on_target_compare()
         test_type_permission_export_sql()

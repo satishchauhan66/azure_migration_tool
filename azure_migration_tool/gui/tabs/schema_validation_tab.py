@@ -925,7 +925,16 @@ class SchemaValidationTab:
         
     def set_project_path(self, project_path):
         """Set the current project path."""
-        self.project_path = project_path
+        self.project_path = Path(project_path) if project_path else None
+
+    def _resolve_project_path(self):
+        """Project folder from this tab or main window (Project tab)."""
+        if self.project_path:
+            return self.project_path
+        mw = getattr(self, "main_window", None)
+        if mw and getattr(mw, "_project_path", None):
+            return Path(mw._project_path)
+        return None
         
     def _create_widgets(self):
         """Create UI widgets."""
@@ -1152,7 +1161,8 @@ class SchemaValidationTab:
         tk.Label(
             mirror_frame,
             text="Uses live source and destination connections above. Reports and repair scripts are written under "
-            "schema_compare_output/<source>_<db>_to_<target>_<db>/ in the project folder (or current directory).",
+            "schema_compare_output/<source>_<db>_to_<target>_<db>/ under your project folder "
+            "(Project tab). Without a project, output goes to %LOCALAPPDATA%\\AzureMigrationTool.",
             font=("Arial", 8),
             fg="gray",
             wraplength=720,
@@ -6189,9 +6199,9 @@ After installation, restart this application.
         return (0, 0)
 
     def _schema_compare_output_dir(self) -> Path:
-        from src.utils.paths import schema_compare_output_dir
+        from src.utils.paths import data_root, schema_compare_output_dir
 
-        base = self.project_path or Path.cwd()
+        base = data_root(self._resolve_project_path())
         return schema_compare_output_dir(
             base,
             self.src_server_var.get(),
