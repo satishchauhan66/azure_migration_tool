@@ -277,10 +277,22 @@ class AzureTokenCache:
             )
         return self.app.get_accounts()
     
-    def _refresh_token_silent(self, username: str, tenant_id: Optional[str] = None) -> Optional[str]:
+    def _refresh_token_silent(
+        self,
+        username: str,
+        tenant_id: Optional[str] = None,
+        force_refresh: bool = False,
+    ) -> Optional[str]:
         """
         Proactively refresh token using silent acquisition (no browser prompt).
         This uses the cached refresh token to get a new access token.
+        
+        Args:
+            username: User principal name (email)
+            tenant_id: Azure AD tenant ID (optional)
+            force_refresh: If True, bypass MSAL's cached access token and mint a new
+                one from the refresh token (needed when SQL rejected a token that still
+                looks unexpired by the local clock).
         
         Returns:
             New access token string, or None if refresh failed
@@ -309,10 +321,12 @@ class AzureTokenCache:
         
         account_to_use = matching_account or accounts[0]
         
-        # Try silent token acquisition (uses refresh token)
+        # Try silent token acquisition (uses refresh token). force_refresh=True forces
+        # MSAL to hit AAD with the refresh token instead of returning a cached access token.
         result = self.app.acquire_token_silent(
             scopes=[SQL_DATABASE_SCOPE],
-            account=account_to_use
+            account=account_to_use,
+            force_refresh=force_refresh,
         )
         
         if result and 'access_token' in result:
@@ -342,6 +356,15 @@ class AzureTokenCache:
             Access token string, or None if authentication failed
         """
         return self.get_token(username, tenant_id, refresh_if_expiring_soon=True)
+
+    def force_refresh(self, username: str, tenant_id: Optional[str] = None) -> Optional[str]:
+        """
+        Force a brand-new access token from the cached refresh token, silently (no browser).
+        Use this when a previously handed-out token was rejected by the server even though
+        the local clock says it is not yet expired. Returns None if the refresh token is
+        gone/expired (caller should then do an interactive sign-in via 'Test Connection').
+        """
+        return self._refresh_token_silent(username, tenant_id, force_refresh=True)
     
     def _is_token_valid(self, token: Dict) -> bool:
         """Check if token is still valid (not expired)."""
@@ -432,6 +455,32 @@ def get_cached_token(username: str, tenant_id: Optional[str] = None, cache_file:
             return None
     
     return _token_cache.get_token(username, tenant_id, refresh_if_expiring_soon=refresh_if_expiring_soon)
+
+
+def force_refresh_token(
+    username: str,
+    tenant_id: Optional[str] = None,
+    cache_file: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Force a fresh SQL access token from the cached refresh token, silently (no browser).
+
+    Use after a cached token was rejected by SQL Server. Returns a new access token, or
+    None if a silent refresh is not possible (refresh token missing/expired) — in which
+    case the user must sign in interactively (e.g. via 'Test Connection').
+    """
+    global _token_cache
+
+    if _token_cache is None:
+        try:
+            _token_cache = AzureTokenCache(cache_file=cache_file)
+        except ImportError:
+            return None
+
+    try:
+        return _token_cache.force_refresh(username, tenant_id)
+    except Exception:
+        return None
 
 
 def clear_token_cache():

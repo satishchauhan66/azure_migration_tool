@@ -21,8 +21,31 @@ from __future__ import annotations
 import sys
 import threading
 import tkinter as tk
+from collections.abc import Mapping
 from tkinter import messagebox, ttk
 from typing import Any, Callable, List, Optional, Tuple
+
+
+def _first_account_key(list_keys_result: Any) -> str:
+    """Return the first storage account key value from a StorageAccounts.list_keys() result.
+
+    azure-mgmt-storage 25+ returns MutableMapping-based models, where the ``keys`` field
+    collides with ``Mapping.keys()`` — so ``result.keys`` is a *method*, not the list, and
+    ``result.keys[0]`` raises ``'method' object is not subscriptable``. Access the field by
+    subscription on those models, and fall back to attribute access on older (msrest) models.
+    """
+    if list_keys_result is None:
+        return ""
+    if isinstance(list_keys_result, Mapping):
+        key_items = list_keys_result.get("keys")
+    else:
+        key_items = getattr(list_keys_result, "keys", None)
+    if not key_items:
+        return ""
+    first = key_items[0]
+    if isinstance(first, Mapping):
+        return first.get("value") or ""
+    return getattr(first, "value", "") or ""
 
 
 def azure_browse_dependency_error() -> Optional[str]:
@@ -458,7 +481,7 @@ class AzureBlobBrowser(tk.Toplevel):
 
                 sm = StorageManagementClient(self._credential, sub_id)
                 keys = sm.storage_accounts.list_keys(rg, name)
-                key = keys.keys[0].value if keys.keys else ""
+                key = _first_account_key(keys)
                 if not key:
                     raise RuntimeError("No account keys returned.")
                 conn_str = (
