@@ -1,4 +1,4 @@
-# Author: Satish Ch@uhan
+# Author: S@tish Ch@uhan
 
 """
 Common schemas and utilities for DB2 to Azure Migration Validation.

@@ -1,4 +1,4 @@
-# Author: Satish Ch@uhan
+# Author: S@tish Ch@uhan
 
 """
 Open DB2 (jaydebeapi) and Azure SQL (pyodbc) connections from config.

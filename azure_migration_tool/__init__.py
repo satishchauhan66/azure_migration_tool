@@ -1,4 +1,4 @@
-# Author: Satish Ch@uhan
+# Author: S@tish Ch@uhan
 
 """Azure Migration Tool - GUI Application for SQL Server/Azure SQL Migrations."""
 

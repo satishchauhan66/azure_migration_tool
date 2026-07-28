@@ -1,4 +1,4 @@
-# Author: Satish Ch@uhan
+# Author: S@tish Ch@uhan
 
 """
 Restore SQL Server database from Azure Blob Storage (.bak) via RESTORE DATABASE FROM URL.

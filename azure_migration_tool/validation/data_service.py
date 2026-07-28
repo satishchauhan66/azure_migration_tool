@@ -1,4 +1,4 @@
-# Author: Satish Ch@uhan
+# Author: S@tish Ch@uhan
 
 """
 LegacyDataValidationService: Python-only data comparison (DB2 vs Azure SQL).

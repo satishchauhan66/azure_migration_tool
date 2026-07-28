@@ -1,4 +1,4 @@
-# Author: Satish Ch@uhan
+# Author: S@tish Ch@uhan
 
 """
 SQL Server schema export utilities for schema comparison and script generation.

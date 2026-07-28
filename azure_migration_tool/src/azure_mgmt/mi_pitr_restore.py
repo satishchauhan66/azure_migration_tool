@@ -39,6 +39,21 @@ def managed_database_id(subscription_id: str, resource_group: str, managed_insta
     )
 
 
+def managed_instance_id(subscription_id: str, resource_group: str, managed_instance: str) -> str:
+    return (
+        f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+        f"/providers/Microsoft.Sql/managedInstances/{managed_instance}"
+    )
+
+
+def _subscription_from_arm_id(arm_id: str) -> Optional[str]:
+    """Extract the subscription GUID from an ARM resource id (``/subscriptions/<id>/...``)."""
+    parts = [p for p in (arm_id or "").strip().split("/") if p]
+    if len(parts) >= 2 and parts[0].lower() == "subscriptions":
+        return parts[1]
+    return None
+
+
 def _headers(access_token: str) -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {access_token}",
@@ -139,8 +154,12 @@ def start_point_in_time_restore(
     location: str,
 ) -> StartRestoreResult:
     """
-    PUT managed database with createMode PointInTimeRestore (cross-instance when
-    ``source_database_arm_id`` points at another MI).
+    PUT managed database with createMode PointInTimeRestore.
+
+    - Same subscription (cross-instance or same-instance): uses ``sourceDatabaseId``.
+    - Cross-subscription (source subscription differs from target): Azure requires
+      ``crossSubscriptionTargetManagedInstanceId`` + ``crossSubscriptionSourceDatabaseId``
+      instead. This is auto-detected from the source database ARM id.
     """
     try:
         token = get_access_token(credential)
@@ -149,13 +168,22 @@ def start_point_in_time_restore(
             f"/providers/Microsoft.Sql/managedInstances/{target_managed_instance}/databases/{new_database_name}"
             f"?api-version={API_VERSION_DATABASE}"
         )
+        properties: Dict[str, Any] = {
+            "createMode": "PointInTimeRestore",
+            "restorePointInTime": restore_point_in_time_utc,
+        }
+        source_sub = _subscription_from_arm_id(source_database_arm_id)
+        is_cross_subscription = bool(source_sub) and source_sub.lower() != (target_subscription_id or "").lower()
+        if is_cross_subscription:
+            properties["crossSubscriptionTargetManagedInstanceId"] = managed_instance_id(
+                target_subscription_id, target_resource_group, target_managed_instance
+            )
+            properties["crossSubscriptionSourceDatabaseId"] = source_database_arm_id.strip()
+        else:
+            properties["sourceDatabaseId"] = source_database_arm_id.strip()
         payload = {
             "location": location,
-            "properties": {
-                "createMode": "PointInTimeRestore",
-                "restorePointInTime": restore_point_in_time_utc,
-                "sourceDatabaseId": source_database_arm_id.strip(),
-            },
+            "properties": properties,
         }
         r = requests.put(url, headers=_headers(token), json=payload, timeout=300)
         if r.status_code not in (200, 201, 202):

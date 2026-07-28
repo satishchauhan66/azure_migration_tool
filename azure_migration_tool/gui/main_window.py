@@ -87,23 +87,21 @@ class MainWindow:
         self._create_menu()
         
         # Lazy-loaded tabs: create content only when tab is first selected
-        # Order: Projects, Backup & Restore, Full Migration, ADF Migration, ...
-        # IDENTITY (CDC) is under Tools > Experiments (POC) — separate window.
+        # Order: Projects, Backup & Restore, Full Migration, Schema Backup/Migration, ...
+        # ADF Migration, Data Migration, and (single) MI PITR Restore live under the Tools
+        # menu as separate windows. IDENTITY (CDC) is under Tools > Experiments (POC).
         self._project_path = None
         self._poc_experiment_tabs = []  # tab instances opened from Experiments menu (for set_project_path)
-        self._num_main_tabs = 10
+        self._num_main_tabs = 7
         self._tab_created = {i: False for i in range(self._num_main_tabs)}
         self._tab_instances = {}
         self._tab_labels = [
             "Projects",
             "Backup & Restore",
             "Full Migration",
-            "ADF Migration",
             "Schema Backup/Migration",
-            "Data Migration",
             "Schema Validation",
             "Data Validation",
-            "MI PITR Restore",
             "MI PITR Bulk Restore",
         ]
         
@@ -155,9 +153,9 @@ class MainWindow:
             return
         if not self._tab_created.get(idx, False):
             self._ensure_tab_created(idx)
-        # Schema Validation (6): copy source/dest from Schema Backup/Migration (4) if filled in
-        if idx == 6:
-            schema_tab = self._tab_instances.get(4)
+        # Schema Validation (4): copy source/dest from Schema Backup/Migration (3) if filled in
+        if idx == 4:
+            schema_tab = self._tab_instances.get(3)
             if schema_tab and hasattr(schema_tab, "sync_connections_to_validation"):
                 schema_tab.sync_connections_to_validation()
     
@@ -173,12 +171,9 @@ class MainWindow:
             ("azure_migration_tool.gui.tabs.project_tab", "ProjectTab"),
             ("azure_migration_tool.gui.tabs.backup_restore_tab", "BackupRestoreTab"),
             ("azure_migration_tool.gui.tabs.full_migration_tab", "FullMigrationTab"),
-            ("azure_migration_tool.gui.tabs.adf_trigger_tab", "ADFTriggerTab"),
             ("azure_migration_tool.gui.tabs.schema_tab", "SchemaTab"),
-            ("azure_migration_tool.gui.tabs.data_migration_tab", "DataMigrationTab"),
             ("azure_migration_tool.gui.tabs.schema_validation_tab", "SchemaValidationTab"),
             ("azure_migration_tool.gui.tabs.data_validation_tab", "DataValidationTab"),
-            ("azure_migration_tool.gui.tabs.mi_pitr_restore_tab", "MiPitrRestoreTab"),
             ("azure_migration_tool.gui.tabs.mi_pitr_bulk_restore_tab", "MiPitrBulkRestoreTab"),
         ]
         mod_name, class_name = tab_specs[idx]
@@ -224,7 +219,7 @@ class MainWindow:
                 "3. Enter your source and destination database details.\n"
                 "4. Click Run to migrate.\n\n"
                 "Need help? Use Help > About or Tools > Check what's installed.\n\n"
-                "ADF migration: use the 'ADF Migration' tab.\n"
+                "ADF migration, Data migration, and MI PITR Restore: see the Tools menu.\n"
                 "POC features: Tools > Experiments (POC) — IDENTITY (CDC)."
             )
             messagebox.showinfo("Getting started", msg)
@@ -262,10 +257,13 @@ class MainWindow:
         tools_menu.add_command(label="Check what's installed...", command=self._show_dependency_check)
         tools_menu.add_command(label="Install database driver...", command=self._install_odbc_driver)
         tools_menu.add_separator()
+        tools_menu.add_command(label="ADF Migration...", command=self._open_adf_migration)
+        tools_menu.add_command(label="Data Migration...", command=self._open_data_migration)
+        tools_menu.add_command(label="MI PITR Restore...", command=self._open_mi_pitr_restore)
+        tools_menu.add_separator()
         tools_menu.add_command(label="Legacy Data Validation...", command=self._open_legacy_data_window)
         tools_menu.add_command(label="Compare DB2 (Schema)...", command=self._open_compare_db2_window)
         tools_menu.add_separator()
-        tools_menu.add_command(label="ADF Migration...", command=self._goto_adf_tab)
         experiments_menu = tk.Menu(tools_menu, tearoff=0)
         tools_menu.add_cascade(label="Experiments (POC)", menu=experiments_menu)
         experiments_menu.add_command(
@@ -318,10 +316,29 @@ class MainWindow:
             "Compare DB2 (Schema)",
         )
 
-    def _goto_adf_tab(self):
-        """Switch to the ADF Migration tab (index 3)."""
-        self._ensure_tab_created(3)
-        self.notebook.select(3)
+    def _open_adf_migration(self):
+        """Open ADF Migration in a separate window (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.adf_trigger_tab",
+            "ADFTriggerTab",
+            "ADF Migration",
+        )
+
+    def _open_data_migration(self):
+        """Open Data Migration in a separate window (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.data_migration_tab",
+            "DataMigrationTab",
+            "Data Migration",
+        )
+
+    def _open_mi_pitr_restore(self):
+        """Open MI PITR Restore (single database) in a separate window (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.mi_pitr_restore_tab",
+            "MiPitrRestoreTab",
+            "MI PITR Restore",
+        )
 
     def _open_identity_cdc_experiment(self):
         """Open IDENTITY (CDC) in a separate window (Tools > Experiments POC)."""

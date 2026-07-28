@@ -28,7 +28,7 @@ Usage:
 """
 
 __version__ = "1.0.0"
-__author__ = "Satish Chauhan"
+__author__ = "66 degrees"
 
 # Lazy imports - don't import PySpark services at module load time
 # This allows the app to start even if PySpark is not installed

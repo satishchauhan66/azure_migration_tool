@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Author: Satish Ch@uhan
+# Author: S@tish Ch@uhan
 
 """
 Test Legacy Schema Validation (DB2 -> Azure SQL) from the command line.

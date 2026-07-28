@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Author: Satish Ch@uhan
+# Author: S@tish Ch@uhan
 
 """
 Azure Migration Tool - Main Application

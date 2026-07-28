@@ -1,3 +1,3 @@
-# Author: Satish Ch@uhan
+# Author: S@tish Ch@uhan
 
 # Example scripts for db2_azure_validation module
