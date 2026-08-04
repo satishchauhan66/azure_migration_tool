@@ -165,7 +165,7 @@ a = Analysis(
         "gui", "gui.main_window",
         "gui.tabs", "gui.tabs.schema_tab", "gui.tabs.data_migration_tab",
         "gui.tabs.data_validation_tab", "gui.tabs.schema_validation_tab",
-        "gui.tabs.mi_pitr_restore_tab",
+        "gui.tabs.mi_pitr_restore_tab", "gui.tabs.mi_pitr_bulk_restore_tab",
         "gui.tabs.legacy_schema_validation_tab", "gui.tabs.legacy_data_validation_tab",
         "gui.tabs.full_migration_tab", "gui.tabs.project_tab",
         "gui.tabs.backup_restore_tab", "gui.tabs.adf_trigger_tab",
