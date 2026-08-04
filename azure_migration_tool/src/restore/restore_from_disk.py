@@ -12,6 +12,7 @@ This module handles:
 
 import logging
 import time
+import threading
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List, Tuple
 
@@ -136,6 +137,7 @@ def restore_database_from_disk(
     replace_existing: bool = False,
     recovery: bool = True,
     log: Optional[Callable[[str], None]] = None,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ) -> Dict[str, Any]:
     """
     Restore SQL Server database from a local or network .bak file.
@@ -287,14 +289,61 @@ def restore_database_from_disk(
         log("")
         
         restore_start = time.time()
-        
+
+        # Best-effort progress monitor (second connection polls percent_complete).
         try:
-            cur.execute(restore_sql, (backup_file_path,))
-            
-            # Fetch progress messages
-            while cur.nextset():
-                pass
-            
+            from azure_migration_tool.src.restore.restore_from_blob import (
+                _get_spid,
+                _monitor_request_progress,
+            )
+        except ImportError:
+            try:
+                from src.restore.restore_from_blob import _get_spid, _monitor_request_progress
+            except ImportError:
+                _get_spid = None
+                _monitor_request_progress = None
+
+        stop_event = threading.Event()
+        monitor = None
+        spid = _get_spid(cur) if _get_spid else None
+        if spid and _monitor_request_progress:
+            monitor_connect_kwargs = dict(
+                server=server,
+                db="master",
+                user=user or "",
+                driver=driver,
+                auth=auth or "windows",
+                password=password,
+                timeout=60,
+                logger=logger,
+            )
+            monitor = threading.Thread(
+                target=_monitor_request_progress,
+                kwargs=dict(
+                    connect_kwargs=monitor_connect_kwargs,
+                    spid=spid,
+                    log=log,
+                    stop_event=stop_event,
+                    poll_sec=5.0,
+                    progress_callback=progress_callback,
+                ),
+                daemon=True,
+            )
+            log(f"Monitoring restore progress (SPID {spid}) — % complete will appear below...")
+            monitor.start()
+
+        try:
+            try:
+                cur.execute(restore_sql, (backup_file_path,))
+
+                # Fetch progress messages
+                while cur.nextset():
+                    pass
+            finally:
+                stop_event.set()
+                if monitor is not None:
+                    monitor.join(timeout=6)
+
             restore_elapsed = time.time() - restore_start
             
             log("")

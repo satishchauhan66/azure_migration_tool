@@ -18,15 +18,21 @@ sys.path.insert(0, str(parent_dir))
 
 
 def _get_cached_token_for_mfa(user: str, refresh_if_expiring_soon: bool = True):
-    """Get cached Azure AD token for MFA so List DBs and Validate use the same session. Returns None if unavailable."""
+    """Get a SILENT cached Azure AD token for MFA so List DBs / Validate reuse the session.
+
+    Silent only (no browser): avoids triggering an MSAL sign-in with the Azure CLI app id that
+    Conditional Access can block (AADSTS53003). If nothing is cached, callers fall back to the
+    ODBC driver's ActiveDirectoryInteractive (the same sign-in SSMS uses). Returns None if
+    unavailable.
+    """
     try:
-        from azure_migration_tool.azure_token_cache import get_cached_token
-        return get_cached_token(user, refresh_if_expiring_soon=refresh_if_expiring_soon)
+        from azure_migration_tool.azure_token_cache import get_cached_token_silent
+        return get_cached_token_silent(user)
     except ImportError:
         pass
     try:
-        from azure_token_cache import get_cached_token
-        return get_cached_token(user, refresh_if_expiring_soon=refresh_if_expiring_soon)
+        from azure_token_cache import get_cached_token_silent
+        return get_cached_token_silent(user)
     except ImportError:
         pass
     return None

@@ -52,7 +52,23 @@ _AUTH_ERROR_KEYWORDS = (
     "consent",
     "sign in",
     "sign-in",
+    "conditional access",
+    "does not meet",
+    "cannot access this",
 )
+
+# Conditional Access block (org policy blocks the app / device / location).
+_CONDITIONAL_ACCESS_MARKERS = (
+    "53003",
+    "conditional access",
+    "does not meet",
+    "cannot access this",
+)
+
+
+def _is_conditional_access_error(err: str) -> bool:
+    low = (err or "").lower()
+    return any(k in low for k in _CONDITIONAL_ACCESS_MARKERS)
 
 
 def _auth_hint_suffix(err: str) -> str:
@@ -62,11 +78,19 @@ def _auth_hint_suffix(err: str) -> str:
     the automatic retry still failed.
     """
     low = (err or "").lower()
+    if _is_conditional_access_error(low):
+        return (
+            "\n\nThis is a Conditional Access block (error 53003): your organization does not "
+            "allow the 'Microsoft Azure CLI' app to sign in from this device/location. "
+            "Workarounds: use 'SQL Server login' auth (no Azure AD), or ask your admin to allow "
+            "the app / use a registered (compliant) device. Then click 'Re-authenticate' and retry."
+        )
     if any(k in low for k in _AUTH_ERROR_KEYWORDS):
         return (
             "\n\nA sign-in/authorization problem was detected and the tool tried to "
             "re-authenticate automatically. If it still fails: confirm the Microsoft account "
-            "(UPN) and its permissions on the SQL instance/storage, or run 'az login', then retry."
+            "(UPN) and its permissions on the SQL instance/storage, click 'Re-authenticate', "
+            "or run 'az login', then retry."
         )
     return ""
 
@@ -670,6 +694,22 @@ class BackupRestoreTab:
             width=20
         )
         self.restore_disk_btn.pack(side=tk.LEFT, padx=5)
+
+        # Progress
+        disk_prog_frame = ttk.Frame(parent)
+        disk_prog_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
+        tk.Label(disk_prog_frame, text="Restore progress:").pack(side=tk.LEFT)
+        self.restore_disk_progress_var = tk.DoubleVar(value=0.0)
+        self.restore_disk_progress_bar = ttk.Progressbar(
+            disk_prog_frame,
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            maximum=100,
+            variable=self.restore_disk_progress_var,
+        )
+        self.restore_disk_progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6))
+        self.restore_disk_progress_label = tk.Label(disk_prog_frame, text="", width=20, anchor=tk.W)
+        self.restore_disk_progress_label.pack(side=tk.LEFT)
 
         # Log
         log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
@@ -1701,6 +1741,30 @@ class BackupRestoreTab:
             width=26,
         )
         self.test_restore_blob_sql_headeronly_btn.pack(side=tk.LEFT, padx=5)
+        # Always enabled — recovers the UI if a previous sign-in left the buttons disabled,
+        # and forces a fresh Azure sign-in.
+        self.restore_reauth_btn = ttk.Button(
+            btn_frame,
+            text="Re-authenticate",
+            command=self._reauth_restore_from_blob,
+            width=16,
+        )
+        self.restore_reauth_btn.pack(side=tk.LEFT, padx=5)
+
+        prog_frame = ttk.Frame(parent)
+        prog_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
+        tk.Label(prog_frame, text="Restore progress:").pack(side=tk.LEFT)
+        self.restore_progress_var = tk.DoubleVar(value=0.0)
+        self.restore_progress_bar = ttk.Progressbar(
+            prog_frame,
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            maximum=100,
+            variable=self.restore_progress_var,
+        )
+        self.restore_progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6))
+        self.restore_progress_label = tk.Label(prog_frame, text="", width=20, anchor=tk.W)
+        self.restore_progress_label.pack(side=tk.LEFT)
 
         log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -1986,6 +2050,75 @@ class BackupRestoreTab:
         self.restore_from_blob_btn.config(state=st)
         self.test_restore_blob_sdk_btn.config(state=st)
         self.test_restore_blob_sql_headeronly_btn.config(state=st)
+        # restore_reauth_btn is intentionally left enabled so the user can always sign in again.
+
+    def _set_restore_progress(self, pct: float, text: Optional[str] = None) -> None:
+        """Update the restore progress bar (0-100) and its label. Call on the UI thread."""
+        try:
+            pct = max(0.0, min(100.0, float(pct)))
+        except (TypeError, ValueError):
+            return
+        self.restore_progress_var.set(pct)
+        self.restore_progress_label.config(text=text if text is not None else f"{pct:.1f}%")
+
+    def _reset_restore_progress(self, text: str = "") -> None:
+        """Reset the restore progress bar to 0 with an optional status label."""
+        self.restore_progress_var.set(0.0)
+        self.restore_progress_label.config(text=text)
+
+    def _set_restore_disk_progress(self, pct: float, text: Optional[str] = None) -> None:
+        """Update the restore-from-disk progress bar (0-100). Call on the UI thread."""
+        try:
+            pct = max(0.0, min(100.0, float(pct)))
+        except (TypeError, ValueError):
+            return
+        self.restore_disk_progress_var.set(pct)
+        self.restore_disk_progress_label.config(text=text if text is not None else f"{pct:.1f}%")
+
+    def _reauth_restore_from_blob(self) -> None:
+        """Manual re-authenticate: recover the UI (in case a prior sign-in left buttons
+        disabled) and force a fresh Azure sign-in for the selected auth type."""
+        # If a previous operation hung during sign-in and left the action buttons disabled,
+        # clicking this un-sticks them.
+        self._restore_blob_tab_set_busy(False)
+        auth = (self.restore_blob_auth_var.get() or "windows").strip()
+        user = (self.restore_blob_user_var.get() or "").strip()
+        self.restore_reauth_btn.config(state=tk.DISABLED)
+
+        def log(msg):
+            self.frame.after(0, lambda m=msg: self.restore_from_blob_log.insert(tk.END, m + "\n"))
+            self.frame.after(0, lambda: self.restore_from_blob_log.see(tk.END))
+
+        def run():
+            try:
+                ok = self._try_reauth_azure(auth, user, log)
+                if ok:
+                    self.frame.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Re-authenticated",
+                            "Azure sign-in refreshed. Run the restore or tests again now.",
+                        ),
+                    )
+                else:
+                    self.frame.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "Re-authenticate",
+                            "Could not complete sign-in. See the Log for details and next steps "
+                            "(if blocked by Conditional Access / error 53003, use SQL Server login).",
+                        ),
+                    )
+            except Exception as e:
+                log(f"[X] Re-authenticate error: {e}")
+                self.frame.after(
+                    0,
+                    lambda x=str(e): messagebox.showerror("Re-authenticate failed", _compact_dialog_error(x)),
+                )
+            finally:
+                self.frame.after(0, lambda: self.restore_reauth_btn.config(state=tk.NORMAL))
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _try_reauth_azure(self, auth: str, user: str, log) -> bool:
         """Try to (re)authenticate to Azure without a dedicated button.
@@ -2000,7 +2133,6 @@ class BackupRestoreTab:
         try:
             from azure_token_cache import (
                 clear_token_cache,
-                get_cached_token,
                 force_refresh_token,
                 get_token_via_azure_cli,
                 get_token_device_code,
@@ -2009,14 +2141,12 @@ class BackupRestoreTab:
             try:
                 from azure_migration_tool.azure_token_cache import (
                     clear_token_cache,
-                    get_cached_token,
                     force_refresh_token,
                     get_token_via_azure_cli,
                     get_token_device_code,
                 )
             except ImportError:
                 clear_token_cache = None
-                get_cached_token = None
                 force_refresh_token = None
                 get_token_via_azure_cli = None
                 get_token_device_code = None
@@ -2090,23 +2220,22 @@ class BackupRestoreTab:
                 log("[OK] Used the Azure CLI (az login) session as a fallback.")
                 return True
 
-            # Option 3: clear and do an interactive browser sign-in (MFA).
+            # Option 3: clear cached tokens and let the SQL ODBC driver do the interactive
+            # sign-in on the next attempt (the same ActiveDirectoryInteractive mechanism SSMS
+            # uses). We avoid an MSAL browser here because its Azure CLI app id can be blocked by
+            # Conditional Access (AADSTS53003) while the SQL driver sign-in that SSMS uses works.
             if clear_token_cache:
                 try:
                     clear_token_cache()
                     log("Cleared SQL Entra (MFA) token cache.")
                 except Exception as e:
                     log(f"(warn) Could not clear SQL token cache: {e}")
-            if not get_cached_token:
-                log("Token cache module unavailable; cannot sign in interactively.")
-                return False
-            log(f"Signing in for {user} — complete the browser MFA prompt (do not cancel it)…")
-            token = get_cached_token(user)
-            if token:
-                log("[OK] Interactive sign-in complete; fresh token cached.")
-                return True
-            log("[X] Interactive sign-in did not return a token.")
-            return False
+            log(
+                "On retry, sign-in is handled by the SQL driver (SSMS-style) — a Microsoft "
+                "sign-in window may appear. If your org still blocks it (error 53003), switch "
+                "auth to 'SQL Server login'."
+            )
+            return True
         except Exception as e:
             log(f"[X] Re-authentication error: {e}")
             return False
@@ -2328,10 +2457,15 @@ class BackupRestoreTab:
 
         self._restore_blob_tab_set_busy(True)
         self.restore_from_blob_log.delete("1.0", tk.END)
+        self._reset_restore_progress("waiting for progress…")
 
         def log(msg):
             self.frame.after(0, lambda m=msg: self.restore_from_blob_log.insert(tk.END, m + "\n"))
             self.frame.after(0, lambda: self.restore_from_blob_log.see(tk.END))
+
+        def on_progress(pct):
+            # Called from the restore monitor thread; marshal to the UI thread.
+            self.frame.after(0, lambda pv=pct: self._set_restore_progress(pv))
 
         def run():
             try:
@@ -2349,17 +2483,20 @@ class BackupRestoreTab:
                         target_managed_instance=self.restore_blob_managed_instance_var.get(),
                         blob_auth_mode=p["blob_auth_mode"],
                         storage_account_url=p["storage_account_url"],
+                        progress_callback=on_progress,
                     ),
                     auth=self.restore_blob_auth_var.get() or "windows",
                     user=self.restore_blob_user_var.get() or "",
                     log=log,
                 )
                 if summary.get("status") == "success":
+                    self.frame.after(0, lambda: self._set_restore_progress(100.0, "Completed"))
                     self.frame.after(
                         0, lambda: messagebox.showinfo("Success", "Restore from blob completed successfully.")
                     )
                 else:
                     err = summary.get("error") or "Unknown error"
+                    self.frame.after(0, lambda: self.restore_progress_label.config(text="Failed"))
                     self.frame.after(
                         0,
                         lambda e=err: messagebox.showerror(
@@ -2368,6 +2505,7 @@ class BackupRestoreTab:
                     )
             except Exception as e:
                 log(str(e))
+                self.frame.after(0, lambda: self.restore_progress_label.config(text="Failed"))
                 self.frame.after(
                     0,
                     lambda x=str(e): messagebox.showerror(
@@ -2521,10 +2659,16 @@ class BackupRestoreTab:
         
         self.restore_disk_log.delete('1.0', tk.END)
         self.restore_disk_btn.config(state=tk.DISABLED)
+        self.restore_disk_progress_var.set(0.0)
+        self.restore_disk_progress_label.config(text="waiting for progress…")
         
         def log(msg):
             self.frame.after(0, lambda: self.restore_disk_log.insert(tk.END, msg + "\n"))
             self.frame.after(0, lambda: self.restore_disk_log.see(tk.END))
+
+        def on_progress(pct):
+            # Called from the restore monitor thread; marshal to the UI thread.
+            self.frame.after(0, lambda pv=pct: self._set_restore_disk_progress(pv))
         
         def run():
             try:
@@ -2541,10 +2685,12 @@ class BackupRestoreTab:
                     log_file_path=log_file,
                     replace_existing=replace_existing,
                     recovery=True,
-                    log=log
+                    log=log,
+                    progress_callback=on_progress,
                 )
                 
                 if result.get("success"):
+                    self.frame.after(0, lambda: self._set_restore_disk_progress(100.0, "Completed"))
                     self.frame.after(
                         0, lambda: messagebox.showinfo(
                             "Success",
@@ -2553,6 +2699,7 @@ class BackupRestoreTab:
                     )
                 else:
                     err = result.get("message", "Unknown error")
+                    self.frame.after(0, lambda: self.restore_disk_progress_label.config(text="Failed"))
                     self.frame.after(
                         0,
                         lambda: messagebox.showerror("Restore Failed", _compact_dialog_error(err))
@@ -2560,6 +2707,7 @@ class BackupRestoreTab:
             except Exception as e:
                 error_msg = str(e)
                 log(f"\nERROR: {error_msg}")
+                self.frame.after(0, lambda: self.restore_disk_progress_label.config(text="Failed"))
                 self.frame.after(
                     0,
                     lambda: messagebox.showerror("Error", _compact_dialog_error(error_msg))

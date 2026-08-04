@@ -9,6 +9,8 @@ openpyxl>=3.0.0
 msal>=1.20.0
 requests>=2.28.0
 azure-identity>=1.15.0
+# WAM broker sign-in (SSMS-style; registered-device MFA to satisfy Conditional Access). Windows only.
+azure-identity-broker>=1.1.0 ; sys_platform == "win32"
 azure-mgmt-datafactory>=4.0.0
 azure-keyvault-secrets>=4.7.0
 

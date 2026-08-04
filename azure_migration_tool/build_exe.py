@@ -136,12 +136,26 @@ def build_pyinstaller(app_dir: Path, console: bool = False) -> bool:
 
     # Create spec file
     spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_all
 
 # Small exe - PySpark NOT bundled (users install it via: pip install pyspark)
 # DB2 JDBC driver IS bundled in drivers folder
 
 app_datas = {datas_str}
+
+# WAM broker (SSMS-style MFA) ships a native runtime (pymsalruntime) — bundle its
+# binaries/data/submodules so the frozen exe can do broker sign-in. Optional: if the
+# package isn't installed, skip it gracefully.
+_broker_datas, _broker_binaries, _broker_hidden = [], [], []
+try:
+    _broker_datas, _broker_binaries, _broker_hidden = collect_all("pymsalruntime")
+except Exception:
+    pass
+try:
+    _broker_hidden += collect_submodules("azure.identity.broker")
+except Exception:
+    pass
+app_datas = app_datas + _broker_datas
 
 # Collect ALL submodules from packages that use dynamic/lazy imports
 _azure_hidden = (
@@ -153,12 +167,13 @@ _azure_hidden = (
     + collect_submodules("azure.mgmt.datafactory")
     + collect_submodules("azure.keyvault.secrets")
     + collect_submodules("msal")
+    + _broker_hidden
 )
 
 a = Analysis(
     [r"{app_dir / 'main.py'}"],
     pathex=[r"{project_root}", r"{app_dir}"],
-    binaries=[],
+    binaries=_broker_binaries,
     datas=app_datas,
     hiddenimports=_azure_hidden + [
         # App modules - gui
@@ -233,6 +248,8 @@ a = Analysis(
         "azure.storage.blob._generated.models",
         "azure.mgmt.storage", "azure.mgmt.subscription",
         "azure.mgmt.datafactory", "azure.keyvault.secrets",
+        # WAM broker (SSMS-style MFA)
+        "azure.identity.broker", "pymsalruntime",
         "tkinter", "tkinter.ttk", "tkinter.messagebox", "tkinter.filedialog",
         "tkinter.scrolledtext",
     ],

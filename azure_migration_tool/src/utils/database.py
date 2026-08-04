@@ -305,9 +305,12 @@ def connect_to_database(
     Connect to SQL Server database with automatic token handling.
     
     For entra_mfa authentication, this function:
-    1. Tries to get cached MSAL token
+    1. Tries a SILENT cached MSAL token (no browser prompt)
     2. If token available: Uses SQL_COPT_SS_ACCESS_TOKEN connection attribute
-    3. If no token: Falls back to ActiveDirectoryInteractive
+    3. If no token: Falls back to the ODBC driver's ActiveDirectoryInteractive (the same
+       sign-in mechanism SSMS uses). We deliberately do NOT trigger an MSAL interactive
+       browser with the Azure CLI app id, because org Conditional Access can block it
+       (AADSTS53003) while still allowing the SQL driver sign-in that SSMS uses.
     
     Args:
         server: Server name/address
@@ -351,9 +354,11 @@ def connect_to_database(
             if root_str not in sys.path:
                 sys.path.insert(0, root_str)
             
-            from azure_token_cache import get_cached_token
-            
-            access_token = get_cached_token(user, refresh_if_expiring_soon=True)
+            from azure_token_cache import get_cached_token_silent
+
+            # Silent only — never opens the Azure CLI browser (which Conditional Access may block).
+            # If there is no usable cached token, we fall through to ODBC ActiveDirectoryInteractive.
+            access_token = get_cached_token_silent(user)
             if access_token:
                 # ODBC Driver 18 doesn't support AccessToken= in connection string
                 # Use SQL_COPT_SS_ACCESS_TOKEN connection attribute instead (1256)
@@ -396,8 +401,8 @@ def connect_to_database(
                         if logger:
                             logger.debug(f"force_refresh_token failed: {type(refresh_err).__name__}: {refresh_err}")
                     if not access_token_2:
-                        # Fall back to the normal (possibly proactively refreshed) path
-                        access_token_2 = get_cached_token(user, refresh_if_expiring_soon=True)
+                        # Silent only (do not open the Azure CLI browser here)
+                        access_token_2 = get_cached_token_silent(user)
                     if access_token_2 and access_token_2 != access_token:
                         token_bytes_2 = access_token_2.encode('utf-16-le')
                         token_struct_2 = struct.pack(f"<I{len(token_bytes_2)}s", len(token_bytes_2), token_bytes_2)
@@ -428,7 +433,27 @@ def connect_to_database(
                 logger.warning(f"Could not get cached MSAL token for {user}: {e}, falling back to interactive auth")
                 logger.debug(f"Token fetch exception details: {type(e).__name__}: {e}", exc_info=True)
         
-        # Fallback to interactive authentication only when we had no token (first-time sign-in)
+        # SSMS-style sign-in: try the Windows WAM broker first (registered/compliant device +
+        # SQL tooling app id) so Conditional Access policies that block a plain browser sign-in
+        # (AADSTS53003) are satisfied. Pass the resulting token via SQL_COPT_SS_ACCESS_TOKEN.
+        try:
+            from azure_token_cache import get_sql_token_via_broker
+
+            broker_token = get_sql_token_via_broker(
+                username=user, log=(logger.info if logger else None)
+            )
+        except Exception as broker_err:
+            broker_token = None
+            if logger:
+                logger.debug(f"Broker sign-in unavailable: {broker_err}")
+        if broker_token:
+            if logger:
+                logger.info("Connected using WAM broker token (SSMS-style) via SQL_COPT_SS_ACCESS_TOKEN")
+            token_bytes = broker_token.encode("utf-16-le")
+            token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+            return pyodbc.connect(base, timeout=timeout, attrs_before={1256: token_struct})
+
+        # Fallback to the ODBC driver's own interactive sign-in (also SSMS-like).
         if logger:
             logger.info(f"Using ActiveDirectoryInteractive authentication for {user}")
         conn_str = base + f"UID={user};Authentication=ActiveDirectoryInteractive;"

@@ -11,7 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Callable, Optional, Dict
+from typing import Any, Callable, Optional, Dict
 from datetime import datetime, timezone
 
 try:
@@ -51,6 +51,72 @@ def get_token_via_azure_cli(scope: str = SQL_DATABASE_SCOPE) -> Optional[str]:
         return cred.get_token(scope).token
     except Exception:
         return None
+
+
+# Public client id used by the SQL Server tooling / drivers (SSMS, ODBC, ADO.NET) for
+# Microsoft Entra interactive auth. Using it (instead of the Azure CLI app id) makes the
+# tool present the same application identity SSMS uses.
+SQL_TOOLS_CLIENT_ID = "a94f9c62-97fe-4d19-b06d-472bed8d2bcf"
+
+
+def _foreground_window_handle() -> int:
+    """Best-effort parent window handle for the WAM broker (0 if unavailable)."""
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        return int(hwnd or 0)
+    except Exception:
+        return 0
+
+
+def get_sql_token_via_broker(
+    username: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
+    """
+    Acquire a SQL access token via the Windows WAM broker — the same sign-in SSMS uses.
+
+    The broker presents a *registered/compliant device* to Microsoft Entra (unlike a plain
+    browser flow, which shows the device as "Unregistered"), so Conditional Access policies
+    that require a managed device are satisfied. We also use the SQL tooling app id so the
+    application identity matches SSMS. Returns None (silently) if the broker isn't available;
+    callers should then fall back to the ODBC driver's ActiveDirectoryInteractive.
+    """
+    log = log or (lambda _m: None)
+    try:
+        from azure.identity.broker import InteractiveBrowserBrokerCredential
+    except ImportError:
+        return None
+
+    hwnd = _foreground_window_handle()
+    # Prefer the SQL-tools app id (SSMS-style); if its broker redirect isn't accepted,
+    # retry with the library default client id (still via the broker / registered device).
+    attempts = [
+        {"client_id": SQL_TOOLS_CLIENT_ID},
+        {},
+    ]
+    for extra in attempts:
+        try:
+            kwargs: Dict[str, Any] = {
+                "parent_window_handle": hwnd,
+                "additionally_allowed_tenants": ["*"],
+                "use_default_broker_account": True,
+            }
+            if tenant_id:
+                kwargs["tenant_id"] = tenant_id
+            kwargs.update(extra)
+            cred = InteractiveBrowserBrokerCredential(**kwargs)
+            token = cred.get_token(SQL_DATABASE_SCOPE)
+            if token and token.token:
+                return token.token
+        except Exception as e:
+            log(f"(broker sign-in attempt failed: {e})")
+            continue
+    return None
 
 
 class AzureTokenCache:
@@ -375,6 +441,22 @@ class AzureTokenCache:
         """
         return self.get_token(username, tenant_id, refresh_if_expiring_soon=True)
 
+    def get_token_silent(self, username: str, tenant_id: Optional[str] = None) -> Optional[str]:
+        """
+        Return a cached / silently-refreshed access token, or None. NEVER prompts (no browser).
+
+        Use this when the interactive sign-in should be delegated elsewhere (e.g. to the ODBC
+        driver's ActiveDirectoryInteractive, which uses the SQL tooling app id that orgs allow),
+        so we don't trigger a browser sign-in with the Azure CLI app id that Conditional Access
+        may block (AADSTS53003).
+        """
+        self._username = username
+        if self._cached_token:
+            expires_in = int((self._cached_token.get("expires_on", 0) - time.time()) / 60)
+            if expires_in > 5:
+                return self._cached_token.get("access_token")
+        return self._refresh_token_silent(username, tenant_id, force_refresh=False)
+
     def force_refresh(self, username: str, tenant_id: Optional[str] = None) -> Optional[str]:
         """
         Force a brand-new access token from the cached refresh token, silently (no browser).
@@ -560,6 +642,25 @@ def force_refresh_token(
 
     try:
         return _token_cache.force_refresh(username, tenant_id)
+    except Exception:
+        return None
+
+
+def get_cached_token_silent(
+    username: str,
+    tenant_id: Optional[str] = None,
+    cache_file: Optional[str] = None,
+) -> Optional[str]:
+    """Silent-only token accessor (no browser prompt). Returns None if nothing is cached."""
+    global _token_cache
+
+    if _token_cache is None:
+        try:
+            _token_cache = AzureTokenCache(cache_file=cache_file)
+        except ImportError:
+            return None
+    try:
+        return _token_cache.get_token_silent(username, tenant_id)
     except Exception:
         return None
 

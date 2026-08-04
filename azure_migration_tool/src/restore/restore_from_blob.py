@@ -18,6 +18,7 @@ Diagnostic helpers:
 import re
 import time
 import logging
+import threading
 from typing import Optional, Dict, Any, List, Tuple
 
 try:
@@ -33,6 +34,103 @@ logger = logging.getLogger(__name__)
 
 
 _STRIPE_RE = re.compile(r"_part(\d+)of(\d+)\.bak$", re.IGNORECASE)
+
+# Commands that expose percent_complete in sys.dm_exec_requests.
+_PROGRESS_COMMANDS = (
+    "BACKUP DATABASE",
+    "RESTORE DATABASE",
+    "RESTORE LOG",
+    "DBCC TABLE CHECK",
+    "ALTER INDEX",
+    "DBCC ALLOC CHECK",
+    "UPDATE STATISTICS",
+    "KILLED/ROLLBACK",
+)
+
+
+def _get_spid(cur) -> Optional[int]:
+    """Return the SPID (session_id) of the given connection's cursor, or None."""
+    try:
+        cur.execute("SELECT @@SPID")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+
+
+def _monitor_request_progress(
+    *,
+    connect_kwargs: Dict[str, Any],
+    spid: int,
+    log,
+    stop_event: "threading.Event",
+    poll_sec: float = 5.0,
+    progress_callback=None,
+) -> None:
+    """Best-effort progress monitor.
+
+    Opens a SECOND connection and polls ``sys.dm_exec_requests`` for the restore's SPID,
+    logging ``percent_complete`` and the estimated completion time while the RESTORE runs on
+    the main connection. Never raises into the caller; if the monitor cannot connect it simply
+    logs a note and returns (the restore itself is unaffected).
+    """
+    try:
+        from ..utils.database import connect_to_database
+    except ImportError:
+        try:
+            from src.utils.database import connect_to_database
+        except ImportError:
+            from utils.database import connect_to_database
+
+    query = (
+        "SELECT r.percent_complete, r.command, "
+        "DATEADD(second, r.estimated_completion_time/1000, GETDATE()) AS est_completion, "
+        "r.total_elapsed_time "
+        "FROM sys.dm_exec_requests r "
+        "WHERE r.session_id = ? "
+        "AND r.command IN ("
+        + ",".join("'" + c + "'" for c in _PROGRESS_COMMANDS)
+        + ")"
+    )
+
+    mconn = None
+    try:
+        mconn = connect_to_database(**connect_kwargs)
+        try:
+            mconn.timeout = 30
+        except Exception:
+            pass
+        mcur = mconn.cursor()
+        last_pct = -1.0
+        while not stop_event.is_set():
+            try:
+                mcur.execute(query, spid)
+                row = mcur.fetchone()
+                if row and row[0] is not None:
+                    pct = float(row[0])
+                    cmd = row[1]
+                    est = row[2]
+                    if pct >= 0 and (pct - last_pct >= 0.5 or pct >= 100.0):
+                        est_s = est.strftime("%Y-%m-%d %H:%M:%S") if hasattr(est, "strftime") else str(est)
+                        log(f"  [progress] {cmd}: {pct:.1f}% complete (est. finish {est_s})")
+                        last_pct = pct
+                        if progress_callback:
+                            try:
+                                progress_callback(pct)
+                            except Exception:
+                                pass
+            except Exception:
+                # Transient DMV/read errors should not stop monitoring.
+                pass
+            stop_event.wait(poll_sec)
+    except Exception as e:
+        log(f"  (progress monitor unavailable: {e})")
+    finally:
+        try:
+            if mconn is not None:
+                mconn.close()
+        except Exception:
+            pass
 
 
 def _log_sql_engine_context_for_mi_blob(cur, server: str, log) -> None:
@@ -536,6 +634,7 @@ def run_restore_from_blob(
     target_managed_instance: bool = False,
     blob_auth_mode: str = "connection_string",
     storage_account_url: str = "",
+    progress_callback: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Restore a SQL Server database from one or more .bak stripes in Azure Blob.
@@ -554,6 +653,7 @@ def run_restore_from_blob(
         target_managed_instance: If True, omit REPLACE/STATS (required for Azure SQL MI).
         blob_auth_mode: 'connection_string' (default, SAS) or 'managed_identity'.
         storage_account_url: Required for blob_auth_mode='managed_identity'.
+        progress_callback: Optional callable(percent: float) for driving a progress bar.
 
     Returns:
         dict with status, error message if failed.
@@ -673,16 +773,51 @@ def run_restore_from_blob(
         else:
             restore_sql = f"RESTORE DATABASE {_q(database)} FROM {url_clauses} WITH REPLACE, STATS = 5"
 
+        # Start a best-effort progress monitor on a second connection (polls percent_complete).
+        stop_event = threading.Event()
+        monitor: Optional[threading.Thread] = None
+        spid = _get_spid(cur)
+        if spid:
+            monitor_connect_kwargs = dict(
+                server=server,
+                db="master",
+                user=user or "",
+                driver=driver,
+                auth=auth or "windows",
+                password=password,
+                timeout=60,
+                logger=logger,
+            )
+            monitor = threading.Thread(
+                target=_monitor_request_progress,
+                kwargs=dict(
+                    connect_kwargs=monitor_connect_kwargs,
+                    spid=spid,
+                    log=log,
+                    stop_event=stop_event,
+                    poll_sec=5.0,
+                    progress_callback=progress_callback,
+                ),
+                daemon=True,
+            )
+            log(f"Monitoring restore progress (SPID {spid}) — % complete will appear below…")
+            monitor.start()
+
         t0 = time.perf_counter()
-        cur.execute(restore_sql)
-        while True:
-            try:
-                for _ in cur.fetchall():
+        try:
+            cur.execute(restore_sql)
+            while True:
+                try:
+                    for _ in cur.fetchall():
+                        pass
+                except Exception:
                     pass
-            except Exception:
-                pass
-            if not cur.nextset():
-                break
+                if not cur.nextset():
+                    break
+        finally:
+            stop_event.set()
+            if monitor is not None:
+                monitor.join(timeout=6)
         elapsed = time.perf_counter() - t0
         log(f"RESTORE command completed in {elapsed:.1f} s")
 
