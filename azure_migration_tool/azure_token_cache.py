@@ -410,6 +410,9 @@ class AzureTokenCache:
         self._cached_token = None
         self._username = None
         self.token_cache = SerializableTokenCache()
+        # Drop the MSAL app too; it was bound to the old token_cache and would otherwise keep
+        # returning the previous (possibly rejected) token. Rebuilt lazily on next get_token.
+        self.app = None
         if os.path.exists(self.cache_file):
             try:
                 os.remove(self.cache_file)

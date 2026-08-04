@@ -38,6 +38,39 @@ def _compact_dialog_error(msg: str, max_len: int = 600) -> str:
     return m[: max_len].rstrip() + "\n\n(Full message is in the Log panel.)"
 
 
+_AUTH_ERROR_KEYWORDS = (
+    "not authorized",
+    "not authorised",
+    "unauthorized",
+    "unauthorised",
+    "forbidden",
+    "aadsts",
+    "token",
+    "login failed",
+    "authentication",
+    "expired",
+    "consent",
+    "sign in",
+    "sign-in",
+)
+
+
+def _auth_hint_suffix(err: str) -> str:
+    """If an error looks like a sign-in / authorization problem, add guidance.
+
+    The tool already retries automatically after re-authenticating; this covers the case where
+    the automatic retry still failed.
+    """
+    low = (err or "").lower()
+    if any(k in low for k in _AUTH_ERROR_KEYWORDS):
+        return (
+            "\n\nA sign-in/authorization problem was detected and the tool tried to "
+            "re-authenticate automatically. If it still fails: confirm the Microsoft account "
+            "(UPN) and its permissions on the SQL instance/storage, or run 'az login', then retry."
+        )
+    return ""
+
+
 def _normalize_blob_account_url_for_gui(url: str) -> str:
     """Normalize to account-level blob URL for GUI list/read operations."""
     try:
@@ -1954,6 +1987,127 @@ class BackupRestoreTab:
         self.test_restore_blob_sdk_btn.config(state=st)
         self.test_restore_blob_sql_headeronly_btn.config(state=st)
 
+    def _try_reauth_azure(self, auth: str, user: str, log) -> bool:
+        """Try to (re)authenticate to Azure without a dedicated button.
+
+        Clears cached credentials, then attempts sign-in with several methods (more auth
+        options): a silent refresh of the SQL token, then an interactive browser sign-in.
+        Returns True if it believes a fresh credential/token is now available so the caller
+        can retry the operation once.
+        """
+        # Lazy imports: msal (SQL token cache) is optional and the blob browser lives in gui.widgets;
+        # importing here keeps the tab loadable without msal and supports both package layouts.
+        try:
+            from azure_token_cache import clear_token_cache, get_cached_token, force_refresh_token
+        except ImportError:
+            try:
+                from azure_migration_tool.azure_token_cache import (
+                    clear_token_cache,
+                    get_cached_token,
+                    force_refresh_token,
+                )
+            except ImportError:
+                clear_token_cache = None
+                get_cached_token = None
+                force_refresh_token = None
+        try:
+            from gui.widgets.azure_blob_browser import clear_azure_credential_cache
+        except ImportError:
+            try:
+                from azure_migration_tool.gui.widgets.azure_blob_browser import clear_azure_credential_cache
+            except ImportError:
+                clear_azure_credential_cache = None
+
+        auth = (auth or "windows").strip()
+        user = (user or "").strip()
+
+        try:
+            log("Attempting automatic re-authentication…")
+            # Always refresh the this-PC Azure identity used for blob SDK / Browse Azure.
+            if clear_azure_credential_cache:
+                try:
+                    clear_azure_credential_cache()
+                    log("Cleared this-PC Azure credential cache (blob / Browse Azure).")
+                except Exception as e:
+                    log(f"(warn) Could not clear this-PC Azure cache: {e}")
+
+            if auth != "entra_mfa":
+                # SQL side uses windows/sql/entra_password creds from the fields; nothing cached to
+                # refresh — clearing the blob credential above is enough for a retry.
+                log("Non-MFA auth: cleared cached Azure credential; will retry with current settings.")
+                return True
+
+            if not user:
+                log("Cannot re-auth MFA: no Microsoft account (UPN) set in Step 2.")
+                return False
+
+            # Option 1: silent refresh from the cached refresh token (no prompt).
+            if force_refresh_token:
+                try:
+                    tok = force_refresh_token(user)
+                    if tok:
+                        log("[OK] Refreshed the SQL sign-in silently (no prompt).")
+                        return True
+                except Exception as e:
+                    log(f"(warn) Silent refresh failed: {e}")
+
+            # Option 2: clear and do an interactive browser sign-in (MFA).
+            if clear_token_cache:
+                try:
+                    clear_token_cache()
+                    log("Cleared SQL Entra (MFA) token cache.")
+                except Exception as e:
+                    log(f"(warn) Could not clear SQL token cache: {e}")
+            if not get_cached_token:
+                log("Token cache module unavailable; cannot sign in interactively.")
+                return False
+            log(f"Signing in for {user} — complete the browser MFA prompt (do not cancel it)…")
+            token = get_cached_token(user)
+            if token:
+                log("[OK] Interactive sign-in complete; fresh token cached.")
+                return True
+            log("[X] Interactive sign-in did not return a token.")
+            return False
+        except Exception as e:
+            log(f"[X] Re-authentication error: {e}")
+            return False
+
+    def _run_with_auto_reauth(self, op, *, auth: str, user: str, log):
+        """Run ``op()`` (returns a summary dict). If it fails with a sign-in/authorization
+        error, re-authenticate automatically and retry once. Returns the final summary; may
+        re-raise the operation's exception if it was not auth-related or reauth did not help.
+        """
+
+        def _failure_text(summary, exc) -> str:
+            if exc is not None:
+                return str(exc)
+            if isinstance(summary, dict) and summary.get("status") != "success":
+                return str(summary.get("error") or "")
+            return ""
+
+        summary = None
+        exc = None
+        try:
+            summary = op()
+        except Exception as e:  # noqa: BLE001 - surfaced/retried below
+            exc = e
+
+        text = _failure_text(summary, exc)
+        if text and any(k in text.lower() for k in _AUTH_ERROR_KEYWORDS):
+            log("Sign-in/authorization problem detected — trying to re-authenticate automatically…")
+            if self._try_reauth_azure(auth, user, log):
+                log("Re-authentication done. Retrying once…")
+                exc = None
+                summary = None
+                try:
+                    summary = op()
+                except Exception as e:  # noqa: BLE001
+                    exc = e
+
+        if exc is not None:
+            raise exc
+        return summary
+
     def _test_restore_blob_sdk_read(self):
         """Azure SDK get_blob_properties on this PC (same identity as list-backups)."""
         try:
@@ -1979,13 +2133,18 @@ class BackupRestoreTab:
         def run():
             try:
                 log("=== Test: Azure SDK get_blob_properties (this PC) ===")
-                summary = run_test_blob_sdk_read(
-                    blob_connection_string=p["conn_str"],
-                    container=p["container"],
-                    blob_path=p["blob_path"],
-                    log_callback=log,
-                    blob_auth_mode=p["blob_auth_mode"],
-                    storage_account_url=p["storage_account_url"],
+                summary = self._run_with_auto_reauth(
+                    lambda: run_test_blob_sdk_read(
+                        blob_connection_string=p["conn_str"],
+                        container=p["container"],
+                        blob_path=p["blob_path"],
+                        log_callback=log,
+                        blob_auth_mode=p["blob_auth_mode"],
+                        storage_account_url=p["storage_account_url"],
+                    ),
+                    auth=self.restore_blob_auth_var.get() or "windows",
+                    user=self.restore_blob_user_var.get() or "",
+                    log=log,
                 )
                 if summary.get("status") == "success":
                     sz = summary.get("size_bytes")
@@ -2002,7 +2161,9 @@ class BackupRestoreTab:
                     err = summary.get("error") or "Unknown error"
                     self.frame.after(
                         0,
-                        lambda e=err: messagebox.showerror("SDK test failed", _compact_dialog_error(e)),
+                        lambda e=err: messagebox.showerror(
+                            "SDK test failed", _compact_dialog_error(e) + _auth_hint_suffix(e)
+                        ),
                     )
             except Exception as e:
                 log(str(e))
@@ -2042,18 +2203,23 @@ class BackupRestoreTab:
         def run():
             try:
                 log("=== Test: RESTORE HEADERONLY FROM URL (ODBC → SQL Server → blob) ===")
-                summary = run_test_blob_headeronly_via_sql_odbc(
-                    server=p["server"],
+                summary = self._run_with_auto_reauth(
+                    lambda: run_test_blob_headeronly_via_sql_odbc(
+                        server=p["server"],
+                        auth=self.restore_blob_auth_var.get() or "windows",
+                        user=self.restore_blob_user_var.get() or None,
+                        password=self.restore_blob_password_var.get() or None,
+                        blob_connection_string=p["conn_str"],
+                        container=p["container"],
+                        blob_path=p["blob_path"],
+                        log_callback=log,
+                        target_managed_instance=self.restore_blob_managed_instance_var.get(),
+                        blob_auth_mode=p["blob_auth_mode"],
+                        storage_account_url=p["storage_account_url"],
+                    ),
                     auth=self.restore_blob_auth_var.get() or "windows",
-                    user=self.restore_blob_user_var.get() or None,
-                    password=self.restore_blob_password_var.get() or None,
-                    blob_connection_string=p["conn_str"],
-                    container=p["container"],
-                    blob_path=p["blob_path"],
-                    log_callback=log,
-                    target_managed_instance=self.restore_blob_managed_instance_var.get(),
-                    blob_auth_mode=p["blob_auth_mode"],
-                    storage_account_url=p["storage_account_url"],
+                    user=self.restore_blob_user_var.get() or "",
+                    log=log,
                 )
                 if summary.get("status") == "success":
                     n = summary.get("header_rows", 0)
@@ -2071,7 +2237,7 @@ class BackupRestoreTab:
                     self.frame.after(
                         0,
                         lambda e=err: messagebox.showerror(
-                            "SQL HEADERONLY failed", _compact_dialog_error(e)
+                            "SQL HEADERONLY failed", _compact_dialog_error(e) + _auth_hint_suffix(e)
                         ),
                     )
             except Exception as e:
@@ -2110,19 +2276,24 @@ class BackupRestoreTab:
 
         def run():
             try:
-                summary = run_restore_from_blob(
-                    server=p["server"],
-                    database=p["database"],
+                summary = self._run_with_auto_reauth(
+                    lambda: run_restore_from_blob(
+                        server=p["server"],
+                        database=p["database"],
+                        auth=self.restore_blob_auth_var.get() or "windows",
+                        user=self.restore_blob_user_var.get() or None,
+                        password=self.restore_blob_password_var.get() or None,
+                        blob_connection_string=p["conn_str"],
+                        container=p["container"],
+                        blob_path=p["blob_path"],
+                        log_callback=log,
+                        target_managed_instance=self.restore_blob_managed_instance_var.get(),
+                        blob_auth_mode=p["blob_auth_mode"],
+                        storage_account_url=p["storage_account_url"],
+                    ),
                     auth=self.restore_blob_auth_var.get() or "windows",
-                    user=self.restore_blob_user_var.get() or None,
-                    password=self.restore_blob_password_var.get() or None,
-                    blob_connection_string=p["conn_str"],
-                    container=p["container"],
-                    blob_path=p["blob_path"],
-                    log_callback=log,
-                    target_managed_instance=self.restore_blob_managed_instance_var.get(),
-                    blob_auth_mode=p["blob_auth_mode"],
-                    storage_account_url=p["storage_account_url"],
+                    user=self.restore_blob_user_var.get() or "",
+                    log=log,
                 )
                 if summary.get("status") == "success":
                     self.frame.after(
@@ -2132,13 +2303,17 @@ class BackupRestoreTab:
                     err = summary.get("error") or "Unknown error"
                     self.frame.after(
                         0,
-                        lambda e=err: messagebox.showerror("Restore failed", _compact_dialog_error(e)),
+                        lambda e=err: messagebox.showerror(
+                            "Restore failed", _compact_dialog_error(e) + _auth_hint_suffix(e)
+                        ),
                     )
             except Exception as e:
                 log(str(e))
                 self.frame.after(
                     0,
-                    lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)),
+                    lambda x=str(e): messagebox.showerror(
+                        "Error", _compact_dialog_error(x) + _auth_hint_suffix(x)
+                    ),
                 )
             finally:
                 self.frame.after(0, lambda: self._restore_blob_tab_set_busy(False))
