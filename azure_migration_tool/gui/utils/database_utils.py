@@ -378,7 +378,31 @@ def connect_with_msal_cache(
     elif auth == "windows":
         conn_str = base + "Trusted_Connection=yes;"
         return pyodbc.connect(conn_str, timeout=timeout)
-    
+
+    elif auth in ("azure_cli", "device_code"):
+        access_token = None
+        if auth == "azure_cli":
+            try:
+                from azure_migration_tool.azure_token_cache import get_token_via_azure_cli
+            except ImportError:
+                from azure_token_cache import get_token_via_azure_cli
+            access_token = get_token_via_azure_cli()
+            if not access_token:
+                raise RuntimeError(
+                    "Could not get a token from Azure CLI. Run 'az login' in a terminal, then retry."
+                )
+        else:
+            try:
+                from azure_migration_tool.azure_token_cache import get_token_device_code
+            except ImportError:
+                from azure_token_cache import get_token_device_code
+            access_token = get_token_device_code(user or "")
+            if not access_token:
+                raise RuntimeError("Device code sign-in did not complete.")
+        token_bytes = access_token.encode("utf-16-le")
+        token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+        return pyodbc.connect(base, timeout=timeout, attrs_before={1256: token_struct})
+
     else:
         raise ValueError(f"Unknown auth type: {auth}")
 

@@ -38,6 +38,8 @@ DB_TYPE_DISPLAY = {"sqlserver": "SQL Server / Azure SQL", "db2": "IBM DB2"}
 DB_TYPE_TO_INTERNAL = {v: k for k, v in DB_TYPE_DISPLAY.items()}
 AUTH_DISPLAY = {
     "entra_mfa": "Microsoft account (with MFA)",
+    "azure_cli": "Azure CLI (az login)",
+    "device_code": "Microsoft account (device code)",
     "entra_password": "Microsoft account (password)",
     "sql": "SQL Server login",
     "windows": "Windows login",
@@ -402,9 +404,20 @@ class ConnectionWidget:
                 self.user_combo.grid_remove()
                 self.password_label.grid_remove()
                 self.password_entry.grid_remove()
+                self.windows_auth_hint.config(text="Using your Windows account")
                 self.windows_auth_hint.grid()
-            elif auth == "entra_mfa":
-                # Interactive / MFA — user principal only, no password field
+            elif auth == "azure_cli":
+                # Uses your existing 'az login' session; no username/password needed here.
+                self.user_label.grid_remove()
+                self.user_combo.grid_remove()
+                self.password_label.grid_remove()
+                self.password_entry.grid_remove()
+                self.windows_auth_hint.config(
+                    text="Using your Azure CLI session — run 'az login' once in a terminal"
+                )
+                self.windows_auth_hint.grid()
+            elif auth in ("entra_mfa", "device_code"):
+                # Interactive / MFA / device code — user principal only, no password field
                 self.windows_auth_hint.grid_remove()
                 self.user_label.grid()
                 self.user_combo.grid()

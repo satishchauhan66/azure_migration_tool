@@ -435,7 +435,48 @@ def connect_to_database(
         if logger:
             logger.debug(f"Connection string (masked): {conn_str.split('UID=')[0]}UID=***;Authentication=ActiveDirectoryInteractive;")
         return pyodbc.connect(conn_str, timeout=timeout)
-    
+
+    if auth in ("azure_cli", "device_code"):
+        # Both produce an Azure AD access token that we pass via SQL_COPT_SS_ACCESS_TOKEN (1256),
+        # the same mechanism as entra_mfa. No UID/PWD/Authentication in the connection string.
+        import sys
+        from pathlib import Path
+        root_dir = Path(__file__).parent.parent.parent
+        root_str = str(root_dir)
+        if root_str not in sys.path:
+            sys.path.insert(0, root_str)
+        access_token: Optional[str] = None
+        if auth == "azure_cli":
+            try:
+                from azure_token_cache import get_token_via_azure_cli
+            except ImportError as e:
+                raise RuntimeError(f"azure-identity not available for Azure CLI auth: {e}")
+            access_token = get_token_via_azure_cli()
+            if not access_token:
+                raise RuntimeError(
+                    "Could not get a token from Azure CLI. Open a terminal and run 'az login' "
+                    "(and 'az account set --subscription <id>' if needed), then retry."
+                )
+            if logger:
+                logger.info("Using Azure CLI (az login) token via SQL_COPT_SS_ACCESS_TOKEN")
+        else:  # device_code
+            try:
+                from azure_token_cache import get_token_device_code
+            except ImportError as e:
+                raise RuntimeError(f"msal not available for device code auth: {e}")
+            access_token = get_token_device_code(
+                user or "", log=(logger.info if logger else None)
+            )
+            if not access_token:
+                raise RuntimeError(
+                    "Device code sign-in did not complete. Retry and enter the code shown in the log."
+                )
+            if logger:
+                logger.info("Using device code token via SQL_COPT_SS_ACCESS_TOKEN")
+        token_bytes = access_token.encode("utf-16-le")
+        token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+        return pyodbc.connect(base, timeout=timeout, attrs_before={1256: token_struct})
+
     # For other auth types, use normal connection string
     conn_str = build_conn_str(server, db, user, driver, auth, password)
     return pyodbc.connect(conn_str, timeout=timeout)

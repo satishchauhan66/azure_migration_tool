@@ -1998,18 +1998,28 @@ class BackupRestoreTab:
         # Lazy imports: msal (SQL token cache) is optional and the blob browser lives in gui.widgets;
         # importing here keeps the tab loadable without msal and supports both package layouts.
         try:
-            from azure_token_cache import clear_token_cache, get_cached_token, force_refresh_token
+            from azure_token_cache import (
+                clear_token_cache,
+                get_cached_token,
+                force_refresh_token,
+                get_token_via_azure_cli,
+                get_token_device_code,
+            )
         except ImportError:
             try:
                 from azure_migration_tool.azure_token_cache import (
                     clear_token_cache,
                     get_cached_token,
                     force_refresh_token,
+                    get_token_via_azure_cli,
+                    get_token_device_code,
                 )
             except ImportError:
                 clear_token_cache = None
                 get_cached_token = None
                 force_refresh_token = None
+                get_token_via_azure_cli = None
+                get_token_device_code = None
         try:
             from gui.widgets.azure_blob_browser import clear_azure_credential_cache
         except ImportError:
@@ -2018,7 +2028,7 @@ class BackupRestoreTab:
             except ImportError:
                 clear_azure_credential_cache = None
 
-        auth = (auth or "windows").strip()
+        auth = (auth or "windows").strip().lower()
         user = (user or "").strip()
 
         try:
@@ -2031,10 +2041,34 @@ class BackupRestoreTab:
                 except Exception as e:
                     log(f"(warn) Could not clear this-PC Azure cache: {e}")
 
+            if auth == "azure_cli":
+                # Preferred: reuse the 'az login' session (no prompt). It auto-refreshes.
+                if get_token_via_azure_cli and get_token_via_azure_cli():
+                    log("[OK] Azure CLI session is valid; retrying.")
+                    return True
+                log("Azure CLI session missing/expired — run 'az login' in a terminal, then retry.")
+                return False
+
+            if auth == "device_code":
+                if clear_token_cache:
+                    try:
+                        clear_token_cache()
+                    except Exception:
+                        pass
+                if not get_token_device_code:
+                    log("Device code sign-in unavailable (msal missing).")
+                    return False
+                log("Starting device code sign-in — a code and URL will appear below.")
+                if get_token_device_code(user, log=log):
+                    log("[OK] Device code sign-in complete.")
+                    return True
+                log("[X] Device code sign-in did not complete.")
+                return False
+
             if auth != "entra_mfa":
-                # SQL side uses windows/sql/entra_password creds from the fields; nothing cached to
-                # refresh — clearing the blob credential above is enough for a retry.
-                log("Non-MFA auth: cleared cached Azure credential; will retry with current settings.")
+                # windows/sql/entra_password use field credentials; nothing cached to refresh —
+                # clearing the blob credential above is enough for a retry.
+                log("Non-token auth: cleared cached Azure credential; will retry with current settings.")
                 return True
 
             if not user:
@@ -2051,7 +2085,12 @@ class BackupRestoreTab:
                 except Exception as e:
                     log(f"(warn) Silent refresh failed: {e}")
 
-            # Option 2: clear and do an interactive browser sign-in (MFA).
+            # Option 2: as a hands-off fallback, try the 'az login' session if present.
+            if get_token_via_azure_cli and get_token_via_azure_cli():
+                log("[OK] Used the Azure CLI (az login) session as a fallback.")
+                return True
+
+            # Option 3: clear and do an interactive browser sign-in (MFA).
             if clear_token_cache:
                 try:
                     clear_token_cache()
@@ -2072,11 +2111,31 @@ class BackupRestoreTab:
             log(f"[X] Re-authentication error: {e}")
             return False
 
+    def _prewarm_auth_token(self, auth: str, user: str, log) -> None:
+        """For device code auth, acquire the token up front so the code + URL show in this log
+        (and the subsequent connection reuses it silently). No-op for other auth types."""
+        if (auth or "").strip().lower() != "device_code":
+            return
+        try:
+            from azure_token_cache import get_token_device_code
+        except ImportError:
+            try:
+                from azure_migration_tool.azure_token_cache import get_token_device_code
+            except ImportError:
+                return
+        log("Device code sign-in: a one-time code and URL will appear below — open the URL and enter the code.")
+        try:
+            get_token_device_code((user or "").strip(), log=log)
+        except Exception as e:
+            log(f"(warn) Device code pre-sign-in failed: {e}")
+
     def _run_with_auto_reauth(self, op, *, auth: str, user: str, log):
         """Run ``op()`` (returns a summary dict). If it fails with a sign-in/authorization
         error, re-authenticate automatically and retry once. Returns the final summary; may
         re-raise the operation's exception if it was not auth-related or reauth did not help.
         """
+        # Device code needs its code shown in this log before the connection is attempted.
+        self._prewarm_auth_token(auth, user, log)
 
         def _failure_text(summary, exc) -> str:
             if exc is not None:

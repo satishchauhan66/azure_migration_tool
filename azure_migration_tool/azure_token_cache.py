@@ -11,7 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Callable, Optional, Dict
 from datetime import datetime, timezone
 
 try:
@@ -33,6 +33,24 @@ DEFAULT_AZURE_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"  # Microsoft Az
 
 # Get client ID from environment variable or use default
 AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", DEFAULT_AZURE_CLIENT_ID)
+
+
+def get_token_via_azure_cli(scope: str = SQL_DATABASE_SCOPE) -> Optional[str]:
+    """Get a SQL access token from an existing ``az login`` session (no prompt).
+
+    Returns the access token string, or None if Azure CLI is not installed / not signed in.
+    This is the most reliable way to avoid repeated MFA prompts: sign in once with
+    ``az login`` and every connection reuses (and silently refreshes) that session.
+    """
+    try:
+        from azure.identity import AzureCliCredential
+    except ImportError:
+        return None
+    try:
+        cred = AzureCliCredential()
+        return cred.get_token(scope).token
+    except Exception:
+        return None
 
 
 class AzureTokenCache:
@@ -365,6 +383,66 @@ class AzureTokenCache:
         gone/expired (caller should then do an interactive sign-in via 'Test Connection').
         """
         return self._refresh_token_silent(username, tenant_id, force_refresh=True)
+
+    def acquire_token_device_code(
+        self,
+        username: str,
+        tenant_id: Optional[str] = None,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> Optional[str]:
+        """
+        Sign in with the OAuth device code flow (no local browser popup required).
+
+        Reuses a cached token silently when possible; otherwise shows a short code + URL via
+        ``log`` for the user to enter in any browser, then blocks until sign-in completes.
+        """
+        log = log or (lambda _m: None)
+        authority = f"https://login.microsoftonline.com/{tenant_id}" if tenant_id else "https://login.microsoftonline.com/common"
+        if self.app is None:
+            self.app = PublicClientApplication(
+                client_id=AZURE_CLIENT_ID,
+                authority=authority,
+                token_cache=self.token_cache,
+            )
+
+        # Try silent first so we don't prompt when a usable token is already cached.
+        accounts = self._get_accounts()
+        if accounts:
+            match = None
+            for a in accounts:
+                if username and a.get("username", "").lower() == username.lower():
+                    match = a
+                    break
+            result = self.app.acquire_token_silent(scopes=[SQL_DATABASE_SCOPE], account=match or accounts[0])
+            if result and "access_token" in result:
+                if not result.get("expires_on"):
+                    result["expires_on"] = time.time() + result.get("expires_in", 3600)
+                self._username = username
+                self._cached_token = result
+                self._save_cache()
+                return result["access_token"]
+
+        flow = self.app.initiate_device_flow(scopes=[SQL_DATABASE_SCOPE])
+        if "user_code" not in flow:
+            raise RuntimeError(
+                "Could not start device code sign-in: "
+                + str(flow.get("error_description") or flow.get("error") or flow)
+            )
+        # flow["message"] is a ready-made instruction like:
+        # "To sign in, use a web browser to open https://microsoft.com/devicelogin and enter the code XXXX".
+        log(flow.get("message") or f"Open {flow.get('verification_uri')} and enter code {flow.get('user_code')}")
+        result = self.app.acquire_token_by_device_flow(flow)  # blocks until completed or timeout
+        if result and "access_token" in result:
+            if not result.get("expires_on"):
+                result["expires_on"] = time.time() + result.get("expires_in", 3600)
+            self._username = username
+            self._cached_token = result
+            self._save_cache()
+            return result["access_token"]
+        raise RuntimeError(
+            "Device code sign-in failed: "
+            + str(result.get("error_description") or result.get("error") or "unknown error")
+        )
     
     def _is_token_valid(self, token: Dict) -> bool:
         """Check if token is still valid (not expired)."""
@@ -483,6 +561,32 @@ def force_refresh_token(
     try:
         return _token_cache.force_refresh(username, tenant_id)
     except Exception:
+        return None
+
+
+def get_token_device_code(
+    username: str,
+    tenant_id: Optional[str] = None,
+    cache_file: Optional[str] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
+    """
+    Get a SQL access token using the device code flow (shared cache), showing the code via ``log``.
+    Returns the access token, or None on failure.
+    """
+    global _token_cache
+
+    if _token_cache is None:
+        try:
+            _token_cache = AzureTokenCache(cache_file=cache_file)
+        except ImportError:
+            return None
+
+    try:
+        return _token_cache.acquire_token_device_code(username, tenant_id, log=log)
+    except Exception as e:
+        if log:
+            log(f"[X] Device code sign-in error: {e}")
         return None
 
 
