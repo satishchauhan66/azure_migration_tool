@@ -8,10 +8,11 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from pathlib import Path
 import threading
+import subprocess
 import sys
 import os
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 parent_dir = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(parent_dir))
@@ -127,6 +128,80 @@ def _resolve_container_for_gui(blob_auth_mode: str, container: str, storage_acco
     return resolved
 
 
+def _get_gui_blob_service_client(
+    *,
+    blob_auth_mode: str,
+    blob_connection_string: str,
+    blob_account_url: str,
+    container: str,
+    log=lambda _m: None,
+):
+    """Blob client for GUI list/read on this PC — same auth as upload and Browse Azure."""
+    try:
+        from src.backup.local_backup_and_upload import _get_tool_blob_service_client
+    except ImportError:
+        from azure_migration_tool.src.backup.local_backup_and_upload import _get_tool_blob_service_client
+    return _get_tool_blob_service_client(
+        blob_auth_mode=blob_auth_mode,
+        blob_connection_string=blob_connection_string,
+        blob_account_url=blob_account_url,
+        container=container,
+        log=log,
+    )
+
+
+def _blob_list_error_suffix(err: str, blob_auth_mode: str) -> str:
+    """Append IAM / auth hints for blob list/read failures."""
+    try:
+        from src.backup.bak_to_blob import _diagnose_precheck_sdk_error
+    except ImportError:
+        from azure_migration_tool.src.backup.bak_to_blob import _diagnose_precheck_sdk_error
+    return _diagnose_precheck_sdk_error(err, blob_auth_mode)
+
+
+def _import_blob_backup_catalog():
+    try:
+        from src.backup import blob_backup_catalog as catalog
+    except ImportError:
+        from azure_migration_tool.src.backup import blob_backup_catalog as catalog
+    return catalog
+
+
+def _is_azure_sql_managed_instance_host(server: str) -> bool:
+    """True for Azure SQL Managed Instance hostnames (*.database.windows.net)."""
+    return ".database.windows.net" in (server or "").lower()
+
+
+def _folder_from_backup_path(path: str) -> str:
+    """Return a directory from a folder path or a full .bak path."""
+    p = os.path.expanduser((path or "").strip())
+    if not p:
+        return ""
+    if p.lower().endswith(".bak"):
+        parent = str(Path(p).parent)
+        return "" if not parent or parent == "." else parent
+    return p
+
+
+def _open_folder_or_select_file(path: str) -> None:
+    """Open a folder in Explorer, or select a file if it exists locally."""
+    raw = os.path.expanduser((path or "").strip())
+    if not raw:
+        raise ValueError("Path is empty.")
+    norm = os.path.normpath(raw)
+    if os.path.isfile(norm):
+        subprocess.Popen(["explorer", "/select,", norm])
+        return
+    folder = _folder_from_backup_path(norm) if norm.lower().endswith(".bak") else norm
+    if folder and os.path.isdir(folder):
+        try:
+            os.startfile(folder)
+        except OSError:
+            subprocess.Popen(["explorer", os.path.normpath(folder)])
+        return
+    raise FileNotFoundError(f"Path not found or not accessible from this PC:\n{raw}")
+
+
 class BackupRestoreTab:
     """Tab for .bak backup to Azure Blob and restore from Blob."""
 
@@ -151,6 +226,26 @@ class BackupRestoreTab:
         # .bak to Blob: Step 1 must be validated before Browse Azure / backup
         self._bak_step1_validated = False
         self._bak_server_caps: Optional[Dict[str, Any]] = None
+        # Local Backup: last .bak(s) created locally (used to pre-fill the upload step)
+        self._local_last_backup_file: Optional[str] = None
+        self._local_last_backup_files: list = []
+        # Stop support for the Local Backup tab
+        self._local_stop_event = threading.Event()
+        self._local_active_conn = None
+        # .bak to Blob (Direct)
+        self._bak_stop_event = threading.Event()
+        self._bak_active_conn = None
+        # Restore from Disk
+        self._restore_disk_stop_event = threading.Event()
+        self._restore_disk_active_conn = None
+        # Restore from Blob
+        self._restore_blob_stop_event = threading.Event()
+        self._restore_blob_active_conn = None
+        # Blob → Local Restore
+        self._blob_local_label_to_path: dict = {}
+        self._blob_local_last_download_files: list = []
+        self._blob_local_stop_event = threading.Event()
+        self._blob_local_active_conn = None
 
         self._create_widgets()
 
@@ -200,6 +295,10 @@ class BackupRestoreTab:
         restore_disk_frame = ttk.Frame(notebook)
         notebook.add(restore_disk_frame, text="Restore from Disk")
         self._create_restore_from_disk_widgets(restore_disk_frame)
+
+        blob_local_frame = ttk.Frame(notebook)
+        notebook.add(blob_local_frame, text="Blob → Local Restore")
+        self._create_blob_local_restore_widgets(blob_local_frame)
 
         restore_frame = ttk.Frame(notebook)
         notebook.add(restore_frame, text="Restore from Blob")
@@ -323,12 +422,31 @@ class BackupRestoreTab:
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(6, 0))
 
+        timeout_row = ttk.Frame(step3)
+        timeout_row.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(timeout_row, text="Command timeout (minutes):").pack(side=tk.LEFT)
+        self.bak_timeout_min_var = tk.StringVar(value="240")
+        ttk.Entry(timeout_row, textvariable=self.bak_timeout_min_var, width=8).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(
+            timeout_row,
+            text="(How long to wait for BACKUP before the connection is considered dropped. Increase for large DBs over WAN.)",
+            fg="gray",
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(pady=10)
         self.bak_to_blob_btn = ttk.Button(
             btn_frame, text="Start .bak Backup to Blob", command=self._start_bak_to_blob, width=25
         )
         self.bak_to_blob_btn.pack(side=tk.LEFT, padx=5)
+        self.bak_stop_btn = ttk.Button(
+            btn_frame,
+            text="Stop",
+            command=self._stop_bak_process,
+            width=8,
+            state=tk.DISABLED,
+        )
+        self.bak_stop_btn.pack(side=tk.LEFT, padx=5)
 
         log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -447,26 +565,32 @@ class BackupRestoreTab:
             text="Use backup compression",
             variable=self.local_compression_var
         ).pack(side=tk.LEFT, padx=(0, 16))
-        
+
+        tk.Label(options_row, text="Stripes (files):").pack(side=tk.LEFT)
+        self.local_stripes_var = tk.IntVar(value=1)
+        ttk.Spinbox(
+            options_row,
+            from_=1,
+            to=64,
+            width=5,
+            textvariable=self.local_stripes_var,
+        ).pack(side=tk.LEFT, padx=(4, 4))
+        tk.Label(options_row, text="(split large DB into N .bak files)", fg="gray").pack(
+            side=tk.LEFT, padx=(0, 16)
+        )
+
         self.local_delete_after_upload_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             options_row,
             text="Delete local file after upload",
             variable=self.local_delete_after_upload_var
         ).pack(side=tk.LEFT)
-        
-        self.local_skip_upload_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            options_row,
-            text="Skip cloud upload (local-only backup)",
-            variable=self.local_skip_upload_var,
-            command=self._toggle_local_blob_section
-        ).pack(side=tk.LEFT, padx=(16, 0))
 
-        # Step 3: Azure Blob destination (initially hidden if skip_upload is True)
-        self.local_step3_frame = ttk.LabelFrame(parent, text="Step 3: Azure Blob destination", padding=10)
+        # Step 3: Azure Blob destination (used by the separate 'Upload .bak to Blob' step)
+        self.local_step3_frame = ttk.LabelFrame(
+            parent, text="Step 3: Azure Blob destination (for 'Upload .bak to Blob')", padding=10
+        )
         self.local_step3_frame.pack(fill=tk.X, padx=5, pady=5)
-        self.local_step3_frame.pack_forget()  # Hide initially
         
         self._create_blob_auth_widgets(
             self.local_step3_frame,
@@ -477,29 +601,70 @@ class BackupRestoreTab:
         
         folder_row = ttk.Frame(self.local_step3_frame)
         folder_row.pack(fill=tk.X, pady=(8, 0))
-        tk.Label(folder_row, text="Blob folder path (optional):").pack(side=tk.LEFT)
-        self.local_blob_folder_var = tk.StringVar(value="backups")
+        tk.Label(folder_row, text="Blob root prefix (optional):").pack(side=tk.LEFT)
+        self.local_blob_folder_var = tk.StringVar(value="")
         ttk.Entry(folder_row, textvariable=self.local_blob_folder_var, width=40).pack(
             side=tk.LEFT, padx=(8, 0)
         )
+        self.local_structured_blob_paths_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            self.local_step3_frame,
+            text="Use folder structure: database / run_id / file.bak (same as .bak to Blob tab)",
+            variable=self.local_structured_blob_paths_var,
+        ).pack(anchor=tk.W, pady=(6, 0))
         tk.Label(
             self.local_step3_frame,
-            text="Optional folder/prefix in container (e.g., 'backups/prod'). Leave empty to upload to container root.",
+            text="Example: container / MyDatabase / 20260810_031718 / MyDatabase_20260810_031718.bak "
+            "(run_id is taken from the backup filename or Step 1 database name). "
+            "Optional root prefix adds one folder above the database name.",
             fg="gray",
             wraplength=650,
         ).pack(anchor=tk.W, pady=(4, 0))
 
-        # Start button
+        # File to upload — auto-filled after 'Create Local Backup', or Browse an existing .bak.
+        upload_file_row = ttk.Frame(self.local_step3_frame)
+        upload_file_row.pack(fill=tk.X, pady=(10, 0))
+        tk.Label(upload_file_row, text="File to upload (.bak):").pack(side=tk.LEFT)
+        self.local_upload_file_var = tk.StringVar(value="")
+        ttk.Entry(upload_file_row, textvariable=self.local_upload_file_var, width=48).pack(
+            side=tk.LEFT, padx=(8, 4), fill=tk.X, expand=True
+        )
+        ttk.Button(
+            upload_file_row, text="Browse .bak...", command=self._browse_local_upload_file, width=14
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            self.local_step3_frame,
+            text="Auto-filled after 'Create Local Backup'. You can also browse an existing .bak "
+            "(must be readable from this PC — UNC files may not be).",
+            fg="gray",
+            wraplength=650,
+        ).pack(anchor=tk.W, pady=(4, 0))
+
+        # Two-step buttons: (1) create local backup, then (2) upload that file to blob.
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(pady=10)
         self.local_backup_btn = ttk.Button(
             btn_frame,
-            text="Start Local Backup + Upload",
-            command=self._start_local_backup_and_upload,
-            width=30
+            text="1. Create Local Backup",
+            command=self._start_local_create_backup,
+            width=24,
         )
         self.local_backup_btn.pack(side=tk.LEFT, padx=5)
-        
+        self.local_upload_btn = ttk.Button(
+            btn_frame,
+            text="2. Upload .bak to Blob",
+            command=self._start_local_upload_to_blob,
+            width=24,
+        )
+        self.local_upload_btn.pack(side=tk.LEFT, padx=5)
+        self.local_stop_btn = ttk.Button(
+            btn_frame,
+            text="Stop",
+            command=self._stop_local_process,
+            width=8,
+            state=tk.DISABLED,
+        )
+        self.local_stop_btn.pack(side=tk.LEFT, padx=5)
         ttk.Button(
             btn_frame,
             text="Open Backup Folder",
@@ -694,6 +859,14 @@ class BackupRestoreTab:
             width=20
         )
         self.restore_disk_btn.pack(side=tk.LEFT, padx=5)
+        self.restore_disk_stop_btn = ttk.Button(
+            btn_frame,
+            text="Stop",
+            command=self._stop_restore_disk_process,
+            width=8,
+            state=tk.DISABLED,
+        )
+        self.restore_disk_stop_btn.pack(side=tk.LEFT, padx=5)
 
         # Progress
         disk_prog_frame = ttk.Frame(parent)
@@ -892,7 +1065,7 @@ class BackupRestoreTab:
 
     def _on_blob_auth_mode_change(self, *_):
         """Show/hide credential fields in every blob-auth section (backup + restore)."""
-        for prefix in ("bak", "restore"):
+        for prefix in ("bak", "local", "restore", "blob_local"):
             self._apply_blob_auth_visibility(prefix)
 
     def _apply_bak_blob_auth_locks(self, *, mi_allowed: bool) -> None:
@@ -1200,14 +1373,46 @@ class BackupRestoreTab:
             except ValueError:
                 stripes_arg = None
 
-        self.bak_to_blob_btn.config(state=tk.DISABLED)
+        # Command timeout (minutes -> seconds). Guards against a long WAN backup being
+        # reported as a dropped connection before it finishes.
+        try:
+            timeout_min = int((self.bak_timeout_min_var.get() or "240").strip())
+        except (ValueError, AttributeError):
+            timeout_min = 240
+        command_timeout_sec = max(300, timeout_min * 60)
+
+        # On-prem source streaming straight to blob over the WAN is the fragile path:
+        # cap Auto stripes and warn (Local Backup two-step is safer).
+        is_onprem_source = not _is_azure_sql_managed_instance_host(server)
+        max_auto_stripes = 4 if is_onprem_source else None
+        if is_onprem_source:
+            if not messagebox.askyesno(
+                "On-prem source → direct blob backup",
+                "This runs BACKUP DATABASE ... TO URL on the source SQL Server and streams the whole "
+                "database to Azure over your network/WAN.\n\n"
+                "For on-prem servers this can saturate the uplink and make the server look "
+                "unresponsive, or the connection may drop on very large databases.\n\n"
+                "Safer option: use the 'Local Backup' tab — back up to a local/UNC disk over your LAN, "
+                "then upload the .bak to blob as a separate step.\n\n"
+                "Continue with direct-to-blob backup now?\n"
+                "(Auto stripes will be capped at 4 to limit parallel WAN streams; "
+                "adjust 'Command timeout' in Step 3 for very large DBs.)",
+            ):
+                return
+
+        self._bak_stop_event.clear()
+        self._bak_active_conn = None
+        self._bak_set_busy(True)
         self.bak_to_blob_log.delete("1.0", tk.END)
 
-        def run():
-            def log(msg):
-                self.bak_to_blob_log.insert(tk.END, msg + "\n")
-                self.bak_to_blob_log.see(tk.END)
+        def log(msg):
+            self.bak_to_blob_log.insert(tk.END, msg + "\n")
+            self.bak_to_blob_log.see(tk.END)
 
+        def _store_conn(conn):
+            self._bak_active_conn = conn
+
+        def run():
             try:
                 summary = run_bak_backup_to_blob(
                     server=server,
@@ -1221,8 +1426,17 @@ class BackupRestoreTab:
                     stripes=stripes_arg,
                     blob_auth_mode=blob_auth_mode,
                     storage_account_url=storage_account_url,
+                    cancel_event=self._bak_stop_event,
+                    on_connect=_store_conn,
+                    max_auto_stripes=max_auto_stripes,
+                    command_timeout_sec=command_timeout_sec,
                 )
-                if summary.get("status") == "success":
+                if summary.get("status") == "cancelled":
+                    self.frame.after(
+                        0,
+                        lambda: messagebox.showinfo("Cancelled", "Backup to blob was stopped."),
+                    )
+                elif summary.get("status") == "success":
                     paths = summary.get("blob_paths") or [summary.get("blob_path")]
                     for p in paths:
                         if p:
@@ -1249,53 +1463,110 @@ class BackupRestoreTab:
                     lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)),
                 )
             finally:
-                self.frame.after(0, lambda: self.bak_to_blob_btn.config(state=tk.NORMAL))
+                self.frame.after(0, lambda: self._bak_set_busy(False))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _toggle_local_blob_section(self):
-        """Show/hide Azure Blob section based on skip_upload checkbox."""
-        if self.local_skip_upload_var.get():
-            # Local-only mode: hide Azure blob section
-            self.local_step3_frame.pack_forget()
-        else:
-            # Upload mode: show Azure blob section
-            self.local_step3_frame.pack(fill=tk.X, padx=5, pady=5)
+    def _bak_set_busy(self, busy: bool) -> None:
+        st = tk.DISABLED if busy else tk.NORMAL
+        self.bak_to_blob_btn.config(state=st)
+        stop_btn = getattr(self, "bak_stop_btn", None)
+        if stop_btn is not None:
+            stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
+
+    def _stop_bak_process(self) -> None:
+        self._bak_stop_event.set()
+        self.bak_to_blob_log.insert(tk.END, "Stop requested — cancelling…\n")
+        self.bak_to_blob_log.see(tk.END)
+        conn = self._bak_active_conn
+        if conn is not None:
+            try:
+                conn.cancel()
+            except Exception:
+                pass
+
+    def _browse_local_upload_file(self):
+        """Pick an existing .bak file to upload to blob."""
+        from tkinter import filedialog
+
+        current = (self.local_upload_file_var.get() or "").strip()
+        initial_dir = ""
+        if current and current.lower().endswith(".bak"):
+            initial_dir = os.path.dirname(current)
+        if not initial_dir or not os.path.isdir(initial_dir):
+            path_field = (self.local_backup_path_var.get() or "").strip()
+            if path_field.lower().endswith(".bak"):
+                path_field = os.path.dirname(path_field)
+            initial_dir = path_field if os.path.isdir(path_field) else (
+                os.environ.get("USERPROFILE") or "C:\\"
+            )
+        f = filedialog.askopenfilename(
+            title="Select a .bak file to upload",
+            initialdir=initial_dir,
+            filetypes=[("SQL Server backup", "*.bak"), ("All files", "*.*")],
+        )
+        if f:
+            self.local_upload_file_var.set(f)
+
+    def _resolve_local_upload_paths(self) -> List[str]:
+        """Best-effort list of .bak paths for upload / open-folder."""
+        raw_field = (self.local_upload_file_var.get() or "").strip()
+        files = [p.strip() for p in raw_field.split(";") if p.strip()]
+        if files:
+            return files
+        if self._local_last_backup_files:
+            return list(self._local_last_backup_files)
+        step2_path = (self.local_backup_path_var.get() or "").strip()
+        if step2_path.lower().endswith(".bak"):
+            return [step2_path]
+        return []
+
+    def _resolve_local_backup_folder(self) -> str:
+        """Directory to open — prefer created backup file(s), then Step 2 path."""
+        for fpath in self._resolve_local_upload_paths():
+            folder = _folder_from_backup_path(fpath)
+            if folder and os.path.isdir(folder):
+                return folder
+        return _folder_from_backup_path(self.local_backup_path_var.get() or "")
 
     def _open_local_backup_folder(self):
         """Open the backup folder in Windows Explorer."""
-        folder_path = (self.local_backup_path_var.get() or "").strip()
-        if not folder_path:
-            messagebox.showwarning(
-                "No Path",
-                "Enter a backup directory or full .bak path first."
-            )
-            return
-        
-        # Expand user path if needed
-        folder_path = os.path.expanduser(folder_path)
-        if folder_path.lower().endswith(".bak"):
-            folder_path = str(Path(folder_path).parent)
-            if not folder_path or folder_path == ".":
-                messagebox.showwarning("Invalid Path", "Could not determine folder from the .bak path.")
-                return
-        
-        if not os.path.exists(folder_path):
-            response = messagebox.askyesno(
-                "Folder Not Found",
-                f"Folder doesn't exist:\n{folder_path}\n\nCreate it now?"
-            )
-            if response:
-                try:
-                    os.makedirs(folder_path, exist_ok=True)
-                except Exception as e:
-                    messagebox.showerror("Error", f"Could not create folder:\n{_compact_dialog_error(str(e))}")
-                    return
-            else:
-                return
-        
         try:
-            os.startfile(folder_path)
+            upload_paths = self._resolve_local_upload_paths()
+            for fpath in upload_paths:
+                norm = os.path.normpath(os.path.expanduser(fpath))
+                if os.path.isfile(norm):
+                    _open_folder_or_select_file(norm)
+                    return
+                folder = _folder_from_backup_path(norm)
+                if folder and os.path.isdir(folder):
+                    _open_folder_or_select_file(folder)
+                    return
+
+            folder_path = self._resolve_local_backup_folder()
+            if not folder_path:
+                messagebox.showwarning(
+                    "No Path",
+                    "Enter a backup path in Step 2, run 'Create Local Backup', "
+                    "or select a .bak file in Step 3.",
+                )
+                return
+
+            if os.path.isdir(folder_path):
+                _open_folder_or_select_file(folder_path)
+                return
+
+            # Typical when Step 2 points at the SQL Server host (e.g. D:\MSSQL\Backup).
+            hint_paths = "\n".join(f"  {p}" for p in upload_paths[:5])
+            extra = f"\n\nBackup file(s):\n{hint_paths}" if hint_paths else ""
+            messagebox.showinfo(
+                "Path on SQL Server",
+                "This backup location is on the SQL Server host and is not reachable from this PC:\n\n"
+                f"{folder_path}"
+                f"{extra}\n\n"
+                "Open that folder on the server (RDP, SSMS, or a file share), or use a UNC/local path "
+                "this PC can access for upload.",
+            )
         except Exception as e:
             messagebox.showerror("Error", f"Could not open folder:\n{_compact_dialog_error(str(e))}")
 
@@ -1495,8 +1766,31 @@ class BackupRestoreTab:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _start_local_backup_and_upload(self):
-        """Run local backup + optional upload to blob."""
+    def _local_set_busy(self, busy: bool) -> None:
+        st = tk.DISABLED if busy else tk.NORMAL
+        for attr in ("local_backup_btn", "local_upload_btn"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.config(state=st)
+        stop_btn = getattr(self, "local_stop_btn", None)
+        if stop_btn is not None:
+            stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
+
+    def _stop_local_process(self) -> None:
+        """Request cancellation of the running local backup or upload."""
+        self._local_stop_event.set()
+        self.local_backup_log.insert(tk.END, "Stop requested — cancelling…\n")
+        self.local_backup_log.see(tk.END)
+        conn = self._local_active_conn
+        if conn is not None:
+            # Cancel the in-progress BACKUP immediately (safe to call from another thread).
+            try:
+                conn.cancel()
+            except Exception:
+                pass
+
+    def _start_local_create_backup(self):
+        """Step 1: BACKUP DATABASE to the local/UNC path only (no upload)."""
         try:
             from src.backup.local_backup_and_upload import run_local_backup_and_upload
         except ImportError:
@@ -1504,60 +1798,38 @@ class BackupRestoreTab:
                 from azure_migration_tool.src.backup.local_backup_and_upload import run_local_backup_and_upload
             except ImportError:
                 run_local_backup_and_upload = None
-        
         if not run_local_backup_and_upload:
-            messagebox.showerror(
-                "Error",
-                "Local backup module not available. Ensure azure-storage-blob is installed."
-            )
+            messagebox.showerror("Error", "Local backup module not available.")
             return
-        
-        # Validate inputs
+
         server = (self.local_server_var.get() or "").strip()
         database = (self.local_db_var.get() or "").strip()
         local_path = (self.local_backup_path_var.get() or "").strip()
-        skip_upload = self.local_skip_upload_var.get()
-        
         if not server or not database:
             messagebox.showerror("Error", "Server and database are required.")
             return
-        
         if not local_path:
             messagebox.showerror("Error", "Local backup path is required.")
             return
-        
-        # Validate blob settings only if uploading
-        blob_auth_mode = self.blob_auth_mode_var.get() or "connection_string"
-        conn_str = (self.blob_conn_var.get() or "").strip()
-        storage_account_url = (self.blob_account_url_var.get() or "").strip()
-        container = (self.blob_container_var.get() or "").strip()
-        blob_folder = (self.local_blob_folder_var.get() or "").strip()
-        
-        if not skip_upload:
-            if blob_auth_mode == "managed_identity":
-                if not storage_account_url:
-                    messagebox.showerror(
-                        "Error",
-                        "Storage account URL is required for Managed Identity (or enable 'Skip cloud upload')."
-                    )
-                    return
-            elif not conn_str:
-                messagebox.showerror("Error", "Blob connection string is required (or enable 'Skip cloud upload').")
-                return
-            
-            if not container:
-                messagebox.showerror("Error", "Container name is required (or enable 'Skip cloud upload').")
-                return
-        
-        # Disable button and clear log
-        self.local_backup_btn.config(state=tk.DISABLED)
+
+        try:
+            stripes = max(1, int(self.local_stripes_var.get() or 1))
+        except (tk.TclError, ValueError):
+            stripes = 1
+
+        self._local_stop_event.clear()
+        self._local_active_conn = None
+        self._local_set_busy(True)
         self.local_backup_log.delete("1.0", tk.END)
-        
+
+        def log(msg):
+            self.frame.after(0, lambda m=msg: self.local_backup_log.insert(tk.END, m + "\n"))
+            self.frame.after(0, lambda: self.local_backup_log.see(tk.END))
+
+        def _store_conn(conn):
+            self._local_active_conn = conn
+
         def run():
-            def log(msg):
-                self.local_backup_log.insert(tk.END, msg + "\n")
-                self.local_backup_log.see(tk.END)
-            
             try:
                 result = run_local_backup_and_upload(
                     server=server,
@@ -1566,67 +1838,668 @@ class BackupRestoreTab:
                     user=self.local_user_var.get() or "",
                     password=self.local_password_var.get() or "",
                     local_backup_path=local_path,
-                    blob_auth_mode=blob_auth_mode,
-                    blob_connection_string=conn_str,
-                    blob_account_url=storage_account_url,
-                    blob_container=container,
-                    blob_folder=blob_folder,
-                    delete_local_after_upload=self.local_delete_after_upload_var.get(),
                     compression=self.local_compression_var.get(),
-                    skip_upload=skip_upload,
+                    skip_upload=True,  # backup only — upload is a separate step
+                    stripes=stripes,
+                    cancel_event=self._local_stop_event,
+                    on_connect=_store_conn,
                     log=log,
                 )
-                
-                if result.get("success"):
-                    local_file = result.get('local_file', 'N/A')
-                    is_network = local_file.startswith("\\\\") or local_file.startswith("//")
-                    
-                    if skip_upload:
-                        msg = (
-                            f"Local backup completed!\n\n"
-                            f"Time: {result.get('backup_time_sec', 0):.1f}s\n"
-                            f"File: {local_file}"
+                if result.get("cancelled"):
+                    self.frame.after(
+                        0, lambda: messagebox.showinfo("Cancelled", "Local backup was stopped.")
+                    )
+                elif result.get("success"):
+                    files = result.get("local_files") or ([result.get("local_file", "")])
+                    files = [f for f in files if f]
+                    self._local_last_backup_files = files
+                    self._local_last_backup_file = files[0] if files else ""
+                    # Pre-fill the upload field (semicolon-separated for striped sets).
+                    self.frame.after(0, lambda fs=files: self.local_upload_file_var.set("; ".join(fs)))
+                    is_network = bool(files) and (files[0].startswith("\\\\") or files[0].startswith("//"))
+                    files_txt = "\n".join(f"  {f}" for f in files)
+                    msg = (
+                        f"Local backup completed!\n\n"
+                        f"Time: {result.get('backup_time_sec', 0):.1f}s\n"
+                        f"File(s):\n{files_txt}\n\n"
+                        "Next: set the Azure Blob destination (Step 3) and click "
+                        "'2. Upload .bak to Blob'."
+                    )
+                    if is_network:
+                        msg += (
+                            "\n\nNote: this is a network (UNC) path. Upload needs the file(s) readable "
+                            "from this PC; if not, copy locally or run the app on a host that can read the share."
                         )
-                        if is_network:
-                            msg += "\n\nNote: Backup saved to network share (UNC path).\nSQL Server has access, but you may need network permissions to access it."
-                    else:
-                        upload_time = result.get('upload_time_sec', 0)
-                        if upload_time > 0:
-                            msg = (
-                                f"Backup and upload completed!\n\n"
-                                f"Backup time: {result.get('backup_time_sec', 0):.1f}s\n"
-                                f"Upload time: {upload_time:.1f}s\n"
-                                f"Total: {result.get('backup_time_sec', 0) + upload_time:.1f}s\n\n"
-                                f"Blob URL: {result.get('blob_url', 'N/A')}"
-                            )
-                        else:
-                            # Upload was skipped (network path)
-                            msg = (
-                                f"Backup completed (upload skipped)!\n\n"
-                                f"Time: {result.get('backup_time_sec', 0):.1f}s\n"
-                                f"File: {local_file}\n\n"
-                                f"Note: Network paths (UNC) cannot be uploaded by Python.\n"
-                                f"Use a local path (e.g., C:\\Temp) if cloud upload is needed."
-                            )
-                    
-                    self.frame.after(0, lambda m=msg: messagebox.showinfo("Success", m))
+                    self.frame.after(0, lambda m=msg: messagebox.showinfo("Backup complete", m))
                 else:
                     self.frame.after(
                         0,
                         lambda: messagebox.showerror(
-                            "Failed",
-                            result.get("message", "Unknown error")
-                        )
+                            "Backup failed", _compact_dialog_error(result.get("message", "Unknown error"))
+                        ),
                     )
             except Exception as e:
                 log(f"ERROR: {str(e)}")
+                self.frame.after(0, lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)))
+            finally:
+                self._local_active_conn = None
+                self.frame.after(0, lambda: self._local_set_busy(False))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_local_upload_to_blob(self):
+        """Step 2: Upload the created (or selected) .bak file to Azure Blob."""
+        try:
+            from src.backup.local_backup_and_upload import upload_existing_bak_to_blob
+        except ImportError:
+            try:
+                from azure_migration_tool.src.backup.local_backup_and_upload import upload_existing_bak_to_blob
+            except ImportError:
+                upload_existing_bak_to_blob = None
+        if not upload_existing_bak_to_blob:
+            messagebox.showerror("Error", "Local backup module not available (need azure-storage-blob).")
+            return
+
+        files = self._resolve_local_upload_paths()
+        if not files:
+            messagebox.showerror(
+                "Error",
+                "No .bak file to upload. Click '1. Create Local Backup' first, or Browse an existing .bak.",
+            )
+            return
+
+        readable: List[str] = []
+        missing: List[str] = []
+        for fpath in files:
+            norm = os.path.normpath(os.path.expanduser(fpath.strip()))
+            if os.path.isfile(norm):
+                readable.append(norm)
+            else:
+                missing.append(fpath)
+        if not readable:
+            messagebox.showerror(
+                "Cannot upload",
+                "None of the selected .bak files are readable from this PC.\n\n"
+                + "\n".join(missing[:8])
+                + ("\n..." if len(missing) > 8 else "")
+                + "\n\nUpload reads files from THIS PC. Use a path this machine can access "
+                "(local disk or UNC share), or copy the .bak here first.",
+            )
+            return
+        if missing and not messagebox.askyesno(
+            "Some files missing",
+            f"{len(missing)} file(s) are not readable from this PC and will be skipped.\n"
+            f"Continue uploading {len(readable)} file(s)?",
+        ):
+            return
+        files = readable
+
+        blob_auth_mode = self.blob_auth_mode_var.get() or "connection_string"
+        conn_str = (self.blob_conn_var.get() or "").strip()
+        storage_account_url = (self.blob_account_url_var.get() or "").strip()
+        container = (self.blob_container_var.get() or "").strip()
+        blob_folder = (self.local_blob_folder_var.get() or "").strip()
+        database = (self.local_db_var.get() or "").strip()
+        structured_blob_paths = self.local_structured_blob_paths_var.get()
+
+        try:
+            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
+        except Exception as e:
+            messagebox.showerror("Error", _compact_dialog_error(str(e)))
+            return
+
+        if blob_auth_mode == "managed_identity":
+            if not storage_account_url:
+                messagebox.showerror("Error", "Storage account URL is required for Managed Identity mode.")
+                return
+            storage_account_url = _normalize_blob_account_url_for_gui(storage_account_url)
+        elif not conn_str:
+            messagebox.showerror("Error", "Blob connection string is required (connection-string mode).")
+            return
+        if not container:
+            messagebox.showerror(
+                "Error",
+                "Container name is required. Enter it in Step 3 or include it in the storage URL path.",
+            )
+            return
+
+        self._local_stop_event.clear()
+        self._local_set_busy(True)
+
+        def log(msg):
+            self.frame.after(0, lambda m=msg: self.local_backup_log.insert(tk.END, m + "\n"))
+            self.frame.after(0, lambda: self.local_backup_log.see(tk.END))
+
+        log(f"=== Uploading {len(files)} file(s) to Blob ===")
+
+        def run():
+            uploaded = 0
+            failed = 0
+            last_url = ""
+            try:
+                for idx, fpath in enumerate(files, 1):
+                    if self._local_stop_event.is_set():
+                        log("Stop requested — remaining uploads cancelled.")
+                        break
+                    log(f"[{idx}/{len(files)}] {fpath}")
+                    result = upload_existing_bak_to_blob(
+                        local_file_path=fpath,
+                        blob_auth_mode=blob_auth_mode,
+                        blob_connection_string=conn_str,
+                        blob_account_url=storage_account_url,
+                        blob_container=container,
+                        blob_folder=blob_folder,
+                        database=database,
+                        structured_blob_paths=structured_blob_paths,
+                        delete_local_after_upload=self.local_delete_after_upload_var.get(),
+                        log=log,
+                    )
+                    if result.get("success"):
+                        uploaded += 1
+                        last_url = result.get("blob_url", "") or last_url
+                    else:
+                        failed += 1
+                        log(f"  [X] {result.get('message', 'Upload failed')}")
+
+                cancelled = self._local_stop_event.is_set()
+                if cancelled and uploaded == 0:
+                    self.frame.after(0, lambda: messagebox.showinfo("Cancelled", "Upload was stopped."))
+                elif failed == 0 and uploaded > 0:
+                    summary = (
+                        f"Upload completed!\n\n{uploaded} file(s) uploaded to container '{container}'."
+                        + (f"\n\nLast blob URL:\n{last_url}" if last_url else "")
+                    )
+                    self.frame.after(0, lambda m=summary: messagebox.showinfo("Upload complete", m))
+                else:
+                    summary = f"Upload finished with issues: {uploaded} succeeded, {failed} failed."
+                    if cancelled:
+                        summary += " (stopped)"
+                    self.frame.after(0, lambda m=summary: messagebox.showerror("Upload result", m))
+            except Exception as e:
+                log(f"ERROR: {str(e)}")
+                self.frame.after(0, lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)))
+            finally:
+                self.frame.after(0, lambda: self._local_set_busy(False))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _create_blob_local_restore_widgets(self, parent):
+        """Two-step restore: (1) download .bak from blob, (2) RESTORE FROM DISK."""
+        tk.Label(
+            parent,
+            text="Blob → Local Restore",
+            font=("Arial", 12, "bold"),
+        ).pack(pady=(0, 10))
+        tk.Label(
+            parent,
+            text="Download a .bak from Azure Blob to local/UNC disk, then restore with RESTORE FROM DISK "
+            "(useful when SQL Server cannot read blob URLs directly).",
+            wraplength=700,
+            justify=tk.LEFT,
+            fg="gray",
+        ).pack(anchor=tk.W, padx=5, pady=(0, 10))
+
+        # Step 1: Blob source
+        step1 = ttk.LabelFrame(parent, text="Step 1: Azure Blob backup", padding=10)
+        step1.pack(fill=tk.X, padx=5, pady=5)
+        self._create_blob_auth_widgets(
+            step1,
+            save_command=self._save_bak_blob_settings,
+            prefix="blob_local",
+            show_browse_azure=True,
+        )
+        tk.Label(step1, text="Database folder (backed-up name):").pack(anchor=tk.W, pady=(10, 0))
+        bl_db_row = ttk.Frame(step1)
+        bl_db_row.pack(fill=tk.X, pady=2)
+        self.blob_local_db_filter_var = tk.StringVar()
+        self.blob_local_db_filter_combo = ttk.Combobox(
+            bl_db_row, textvariable=self.blob_local_db_filter_var, width=40
+        )
+        self.blob_local_db_filter_combo.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(bl_db_row, text="List databases", command=self._blob_local_list_databases).pack(
+            side=tk.LEFT, padx=2
+        )
+
+        tk.Label(step1, text="Backups for this database:").pack(anchor=tk.W, pady=(8, 0))
+        bl_list_frame = ttk.Frame(step1)
+        bl_list_frame.pack(fill=tk.X, pady=2)
+        self.blob_local_backups_listbox = tk.Listbox(bl_list_frame, height=5, width=70, selectmode=tk.SINGLE)
+        bl_scroll = ttk.Scrollbar(bl_list_frame, orient=tk.VERTICAL, command=self.blob_local_backups_listbox.yview)
+        self.blob_local_backups_listbox.configure(yscrollcommand=bl_scroll.set)
+        self.blob_local_backups_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        bl_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.blob_local_backups_listbox.bind("<<ListboxSelect>>", self._blob_local_on_backup_selected)
+        ttk.Button(step1, text="List backups", command=self._blob_local_list_backups).pack(anchor=tk.W, pady=(4, 0))
+        self.blob_local_path_var = tk.StringVar()
+        tk.Label(step1, textvariable=self.blob_local_path_var, fg="gray").pack(anchor=tk.W, pady=(2, 0))
+
+        # Step 2: Download destination
+        step2 = ttk.LabelFrame(parent, text="Step 2: Download to local/UNC path", padding=10)
+        step2.pack(fill=tk.X, padx=5, pady=5)
+        tk.Label(
+            step2,
+            text="Folder or full .bak path on a drive/UNC the SQL Server instance can read for restore.",
+            fg="gray",
+            wraplength=650,
+        ).pack(anchor=tk.W, pady=(0, 6))
+        dl_row = ttk.Frame(step2)
+        dl_row.pack(fill=tk.X)
+        tk.Label(dl_row, text="Download path:").pack(side=tk.LEFT)
+        self.blob_local_download_path_var = tk.StringVar()
+        ttk.Entry(dl_row, textvariable=self.blob_local_download_path_var, width=55).pack(
+            side=tk.LEFT, padx=(8, 4), fill=tk.X, expand=True
+        )
+        ttk.Button(dl_row, text="Browse...", command=self._blob_local_browse_download_path, width=10).pack(
+            side=tk.LEFT
+        )
+        self.blob_local_download_file_var = tk.StringVar(value="")
+        tk.Label(step2, text="Downloaded file(s):").pack(anchor=tk.W, pady=(8, 0))
+        ttk.Entry(step2, textvariable=self.blob_local_download_file_var, width=70).pack(
+            anchor=tk.W, fill=tk.X, pady=(2, 0)
+        )
+
+        # Step 3: Target SQL Server + restore options
+        step3 = ttk.LabelFrame(parent, text="Step 3: Target SQL Server & restore options", padding=10)
+        step3.pack(fill=tk.X, padx=5, pady=5)
+        self.blob_local_server_var = self.main_window.shared_dest_server
+        self.blob_local_db_var = self.main_window.shared_dest_db
+        self.blob_local_auth_var = self.main_window.shared_dest_auth
+        self.blob_local_user_var = self.main_window.shared_dest_user
+        self.blob_local_password_var = self.main_window.shared_dest_password
+        self.blob_local_conn_widget = ConnectionWidget(
+            parent=step3,
+            server_var=self.blob_local_server_var,
+            db_var=self.blob_local_db_var,
+            auth_var=self.blob_local_auth_var,
+            user_var=self.blob_local_user_var,
+            password_var=self.blob_local_password_var,
+            label_text="Target database (auto-filled from blob folder; created if missing):",
+            row_start=0,
+        )
+        step3.columnconfigure(0, weight=0)
+        step3.columnconfigure(1, weight=1)
+        self.blob_local_replace_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            step3,
+            text="Replace existing database (WITH REPLACE)",
+            variable=self.blob_local_replace_var,
+        ).grid(
+            row=self.blob_local_conn_widget.grid_last_row + 1,
+            column=0,
+            columnspan=2,
+            sticky=tk.W,
+            pady=(8, 0),
+        )
+
+        btn_frame = ttk.Frame(parent)
+        btn_frame.pack(pady=10)
+        self.blob_local_download_btn = ttk.Button(
+            btn_frame,
+            text="1. Download from Blob",
+            command=self._start_blob_local_download,
+            width=22,
+        )
+        self.blob_local_download_btn.pack(side=tk.LEFT, padx=5)
+        self.blob_local_restore_btn = ttk.Button(
+            btn_frame,
+            text="2. Restore from Local File",
+            command=self._start_blob_local_restore,
+            width=24,
+        )
+        self.blob_local_restore_btn.pack(side=tk.LEFT, padx=5)
+        self.blob_local_stop_btn = ttk.Button(
+            btn_frame,
+            text="Stop",
+            command=self._stop_blob_local_process,
+            width=8,
+            state=tk.DISABLED,
+        )
+        self.blob_local_stop_btn.pack(side=tk.LEFT, padx=5)
+
+        prog_frame = ttk.Frame(parent)
+        prog_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
+        tk.Label(prog_frame, text="Progress:").pack(side=tk.LEFT)
+        self.blob_local_progress_var = tk.DoubleVar(value=0.0)
+        self.blob_local_progress_bar = ttk.Progressbar(
+            prog_frame,
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            maximum=100,
+            variable=self.blob_local_progress_var,
+        )
+        self.blob_local_progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6))
+        self.blob_local_progress_label = tk.Label(prog_frame, text="", width=20, anchor=tk.W)
+        self.blob_local_progress_label.pack(side=tk.LEFT)
+
+        log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.blob_local_log = scrolledtext.ScrolledText(log_frame, height=8, wrap=tk.WORD)
+        self.blob_local_log.pack(fill=tk.BOTH, expand=True)
+
+    def _blob_local_set_busy(self, busy: bool) -> None:
+        st = tk.DISABLED if busy else tk.NORMAL
+        for attr in ("blob_local_download_btn", "blob_local_restore_btn"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.config(state=st)
+        stop_btn = getattr(self, "blob_local_stop_btn", None)
+        if stop_btn is not None:
+            stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
+
+    def _stop_blob_local_process(self) -> None:
+        self._blob_local_stop_event.set()
+        self.blob_local_log.insert(tk.END, "Stop requested…\n")
+        self.blob_local_log.see(tk.END)
+        conn = self._blob_local_active_conn
+        if conn is not None:
+            try:
+                conn.cancel()
+            except Exception:
+                pass
+
+    def _set_blob_local_progress(self, pct: float, label: str = "") -> None:
+        self.blob_local_progress_var.set(max(0.0, min(100.0, pct)))
+        if label:
+            self.blob_local_progress_label.config(text=label)
+        elif pct >= 100:
+            self.blob_local_progress_label.config(text="Completed")
+        else:
+            self.blob_local_progress_label.config(text=f"{pct:.0f}%")
+
+    def _blob_local_browse_download_path(self) -> None:
+        from tkinter import filedialog
+
+        current = (self.blob_local_download_path_var.get() or "").strip()
+        initial = current if current and os.path.isdir(current) else (os.environ.get("USERPROFILE") or "C:\\")
+        folder = filedialog.askdirectory(title="Select download folder", initialdir=initial)
+        if folder:
+            self.blob_local_download_path_var.set(folder)
+
+    def _blob_local_on_backup_selected(self, event=None) -> None:
+        sel = self.blob_local_backups_listbox.curselection()
+        if not sel:
+            return
+        label = self.blob_local_backups_listbox.get(sel[0])
+        path = self._blob_local_label_to_path.get(label) or label.split("    [", 1)[0].strip()
+        self.blob_local_path_var.set(path)
+        if "/" in path:
+            db = path.split("/", 1)[0]
+            self.blob_local_db_filter_var.set(db)
+            self.blob_local_db_var.set(db)
+
+    def _blob_local_list_databases(self) -> None:
+        conn_str = (self.blob_conn_var.get() or "").strip()
+        container = (self.blob_container_var.get() or "").strip()
+        blob_auth_mode = self.blob_auth_mode_var.get()
+        storage_account_url = (self.blob_account_url_var.get() or "").strip()
+        try:
+            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
+        except Exception as e:
+            messagebox.showerror("Error", _compact_dialog_error(str(e)))
+            return
+        if blob_auth_mode != "managed_identity" and not conn_str:
+            messagebox.showerror("Error", "Enter blob connection string first (or switch to Managed Identity).")
+            return
+        if blob_auth_mode == "managed_identity" and not storage_account_url:
+            messagebox.showerror("Error", "Enter storage account URL first.")
+            return
+        self.blob_local_db_filter_var.set("Listing...")
+
+        def run():
+            try:
+                client = _get_gui_blob_service_client(
+                    blob_auth_mode=blob_auth_mode,
+                    blob_connection_string=conn_str,
+                    blob_account_url=storage_account_url,
+                    container=container,
+                )
+                catalog = _import_blob_backup_catalog()
+                all_blobs = catalog.list_all_container_blobs(client.get_container_client(container))
+                names = catalog.discover_database_names(all_blobs)
+                self.frame.after(0, lambda n=names: self._blob_local_populate_databases(n))
+            except Exception as e:
+                msg = str(e) + _blob_list_error_suffix(str(e), blob_auth_mode)
                 self.frame.after(
                     0,
-                    lambda: messagebox.showerror("Error", _compact_dialog_error(str(e)))
+                    lambda m=msg: self._blob_local_populate_databases([], m),
                 )
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _blob_local_populate_databases(self, names, error=None) -> None:
+        if error:
+            self.blob_local_db_filter_combo["values"] = []
+            self.blob_local_db_filter_var.set("")
+            messagebox.showerror("List databases failed", _compact_dialog_error(str(error)))
+            return
+        self.blob_local_db_filter_combo["values"] = names
+        if names:
+            self.blob_local_db_filter_var.set(names[0])
+            self.blob_local_db_var.set(names[0])
+
+    def _blob_local_list_backups(self) -> None:
+        conn_str = (self.blob_conn_var.get() or "").strip()
+        container = (self.blob_container_var.get() or "").strip()
+        blob_auth_mode = self.blob_auth_mode_var.get()
+        storage_account_url = (self.blob_account_url_var.get() or "").strip()
+        try:
+            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
+        except Exception as e:
+            messagebox.showerror("Error", _compact_dialog_error(str(e)))
+            return
+        db_name = (self.blob_local_db_filter_var.get() or "").strip()
+        if blob_auth_mode != "managed_identity" and not conn_str:
+            messagebox.showerror("Error", "Enter blob connection string first.")
+            return
+        if not db_name or db_name.startswith("(") or db_name == "Listing...":
+            messagebox.showerror("Error", "List databases first, then pick a database name.")
+            return
+        self.blob_local_backups_listbox.delete(0, tk.END)
+        self.blob_local_backups_listbox.insert(tk.END, "Listing...")
+        db_name = db_name.strip().rstrip("/")
+
+        def run():
+            try:
+                client = _get_gui_blob_service_client(
+                    blob_auth_mode=blob_auth_mode,
+                    blob_connection_string=conn_str,
+                    blob_account_url=storage_account_url,
+                    container=container,
+                )
+                catalog = _import_blob_backup_catalog()
+                all_blobs = catalog.list_all_container_blobs(client.get_container_client(container))
+                matched = catalog.backup_blobs_for_database(all_blobs, db_name)
+                labels, label_to_path = catalog.build_backup_list_display(matched)
+                self._blob_local_label_to_path = label_to_path
+                self.frame.after(0, lambda ls=labels: self._blob_local_populate_backups(ls))
+            except Exception as e:
+                self._blob_local_label_to_path = {}
+                msg = _compact_dialog_error(str(e) + _blob_list_error_suffix(str(e), blob_auth_mode))
+                self.frame.after(
+                    0,
+                    lambda m=msg: self._blob_local_populate_backups([], m),
+                )
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _blob_local_populate_backups(self, labels, error=None) -> None:
+        self.blob_local_backups_listbox.delete(0, tk.END)
+        if error:
+            messagebox.showerror("List backups failed", error)
+            return
+        for label in labels:
+            self.blob_local_backups_listbox.insert(tk.END, label)
+
+    def _start_blob_local_download(self) -> None:
+        blob_path = (self.blob_local_path_var.get() or "").strip()
+        if not blob_path or blob_path.startswith("("):
+            messagebox.showerror("Error", "Select a backup from Step 1 (List backups).")
+            return
+        local_dest = (self.blob_local_download_path_var.get() or "").strip()
+        if not local_dest:
+            messagebox.showerror("Error", "Enter a download folder or full .bak path in Step 2.")
+            return
+
+        blob_auth_mode = self.blob_auth_mode_var.get() or "connection_string"
+        conn_str = (self.blob_conn_var.get() or "").strip()
+        storage_account_url = (self.blob_account_url_var.get() or "").strip()
+        container = (self.blob_container_var.get() or "").strip()
+        try:
+            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
+        except Exception as e:
+            messagebox.showerror("Error", _compact_dialog_error(str(e)))
+            return
+        if blob_auth_mode == "managed_identity":
+            if not storage_account_url:
+                messagebox.showerror("Error", "Storage account URL is required for Managed Identity mode.")
+                return
+            storage_account_url = _normalize_blob_account_url_for_gui(storage_account_url)
+        elif not conn_str:
+            messagebox.showerror("Error", "Blob connection string is required.")
+            return
+
+        self._blob_local_stop_event.clear()
+        self._blob_local_set_busy(True)
+        self.blob_local_log.delete("1.0", tk.END)
+        self._set_blob_local_progress(0.0, "Downloading…")
+
+        def log(msg):
+            self.frame.after(0, lambda m=msg: self.blob_local_log.insert(tk.END, m + "\n"))
+            self.frame.after(0, lambda: self.blob_local_log.see(tk.END))
+
+        def on_progress(pct):
+            self.frame.after(0, lambda p=pct: self._set_blob_local_progress(p))
+
+        def run():
+            try:
+                try:
+                    from src.restore.download_from_blob import download_backup_from_blob
+                except ImportError:
+                    from azure_migration_tool.src.restore.download_from_blob import download_backup_from_blob
+                result = download_backup_from_blob(
+                    blob_path=blob_path,
+                    blob_auth_mode=blob_auth_mode,
+                    blob_connection_string=conn_str,
+                    blob_account_url=storage_account_url,
+                    blob_container=container,
+                    local_destination=local_dest,
+                    log=log,
+                    progress_callback=on_progress,
+                    cancel_event=self._blob_local_stop_event,
+                )
+                if result.get("success"):
+                    files = result.get("local_files") or []
+                    self._blob_local_last_download_files = files
+                    self.frame.after(
+                        0,
+                        lambda fs=files: self.blob_local_download_file_var.set("; ".join(fs)),
+                    )
+                    msg = (
+                        f"Download completed in {result.get('download_time_sec', 0):.1f}s\n\n"
+                        f"{len(files)} file(s) saved.\n\nNext: click '2. Restore from Local File'."
+                    )
+                    self.frame.after(0, lambda m=msg: messagebox.showinfo("Download complete", m))
+                else:
+                    err = result.get("message", "Download failed")
+                    self.frame.after(0, lambda e=err: messagebox.showerror("Download failed", _compact_dialog_error(e)))
+            except Exception as e:
+                log(str(e))
+                self.frame.after(0, lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)))
             finally:
-                self.frame.after(0, lambda: self.local_backup_btn.config(state=tk.NORMAL))
-        
+                self.frame.after(0, lambda: self._blob_local_set_busy(False))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_blob_local_restore(self) -> None:
+        raw_files = (self.blob_local_download_file_var.get() or "").strip()
+        files = [p.strip() for p in raw_files.split(";") if p.strip()]
+        if not files and self._blob_local_last_download_files:
+            files = list(self._blob_local_last_download_files)
+        if not files:
+            messagebox.showerror(
+                "Error",
+                "No local .bak file. Click '1. Download from Blob' first, or enter a path in Step 2.",
+            )
+            return
+
+        server = (self.blob_local_server_var.get() or "").strip()
+        if not server:
+            messagebox.showerror("Error", "Enter target SQL Server in Step 3.")
+            return
+        target_db = (self.blob_local_db_var.get() or "").strip() or None
+        replace_existing = self.blob_local_replace_var.get()
+        if replace_existing and target_db:
+            if not messagebox.askyesno(
+                "Confirm Replace",
+                f"Replace existing database '{target_db}'?",
+            ):
+                return
+
+        self._blob_local_stop_event.clear()
+        self._blob_local_active_conn = None
+        self._blob_local_set_busy(True)
+        self.blob_local_log.insert(tk.END, f"=== Restoring from {len(files)} local file(s) ===\n")
+        self._set_blob_local_progress(0.0, "Restoring…")
+
+        def log(msg):
+            self.frame.after(0, lambda m=msg: self.blob_local_log.insert(tk.END, m + "\n"))
+            self.frame.after(0, lambda: self.blob_local_log.see(tk.END))
+
+        def on_progress(pct):
+            self.frame.after(0, lambda p=pct: self._set_blob_local_progress(p))
+
+        def _store_conn(conn):
+            self._blob_local_active_conn = conn
+
+        def run():
+            try:
+                try:
+                    from src.restore.restore_from_disk import restore_database_from_disk
+                except ImportError:
+                    from azure_migration_tool.src.restore.restore_from_disk import restore_database_from_disk
+                kwargs = dict(
+                    server=server,
+                    target_database_name=target_db,
+                    auth=self.blob_local_auth_var.get() or "windows",
+                    user=self.blob_local_user_var.get() or "",
+                    password=self.blob_local_password_var.get() or "",
+                    replace_existing=replace_existing,
+                    recovery=True,
+                    log=log,
+                    progress_callback=on_progress,
+                    cancel_event=self._blob_local_stop_event,
+                    on_connect=_store_conn,
+                )
+                if len(files) == 1:
+                    kwargs["backup_file_path"] = files[0]
+                else:
+                    kwargs["backup_file_paths"] = files
+                result = restore_database_from_disk(**kwargs)
+                if result.get("cancelled"):
+                    self.frame.after(
+                        0,
+                        lambda: messagebox.showinfo("Cancelled", "Restore was stopped."),
+                    )
+                elif result.get("success"):
+                    self.frame.after(0, lambda: self._set_blob_local_progress(100.0, "Completed"))
+                    self.frame.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Restore complete",
+                            f"Database '{result.get('database_name')}' restored in "
+                            f"{result.get('restore_time_sec', 0):.1f}s",
+                        ),
+                    )
+                else:
+                    err = result.get("message", "Restore failed")
+                    self.frame.after(0, lambda: self.blob_local_progress_label.config(text="Failed"))
+                    self.frame.after(0, lambda e=err: messagebox.showerror("Restore failed", _compact_dialog_error(e)))
+            except Exception as e:
+                log(str(e))
+                self.frame.after(0, lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)))
+            finally:
+                self.frame.after(0, lambda: self._blob_local_set_busy(False))
+
         threading.Thread(target=run, daemon=True).start()
 
     def _create_restore_from_blob_widgets(self, parent):
@@ -1666,7 +2539,7 @@ class BackupRestoreTab:
         )
         tk.Label(
             step1,
-            text="(Lists top-level folders in container; pick one to see only that database's backups.)",
+            text="(Lists database folders from .bak paths — structured layout database/run_id/file.bak is supported.)",
             fg="gray",
         ).pack(anchor=tk.W, pady=(0, 4))
 
@@ -1720,6 +2593,23 @@ class BackupRestoreTab:
             text="Target is Azure SQL Managed Instance (use RESTORE without REPLACE/STATS)",
             variable=self.restore_blob_managed_instance_var,
         ).grid(row=8, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 0))
+        tk.Label(
+            step2,
+            text=(
+                "Azure SQL MI (*.database.windows.net) is auto-detected. With blob auth = Managed Identity, "
+                "RESTORE uses the MI's identity on storage — grant Storage Blob Data Reader, or use Connection String (SAS) auth."
+            ),
+            fg="gray",
+            wraplength=700,
+            justify=tk.LEFT,
+        ).grid(row=9, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(4, 0))
+
+        def _sync_restore_mi_target_flag(*_args):
+            if _is_azure_sql_managed_instance_host(self.restore_blob_server_var.get()):
+                self.restore_blob_managed_instance_var.set(True)
+
+        self.restore_blob_server_var.trace_add("write", _sync_restore_mi_target_flag)
+        _sync_restore_mi_target_flag()
 
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(pady=10)
@@ -1750,6 +2640,14 @@ class BackupRestoreTab:
             width=16,
         )
         self.restore_reauth_btn.pack(side=tk.LEFT, padx=5)
+        self.restore_blob_stop_btn = ttk.Button(
+            btn_frame,
+            text="Stop",
+            command=self._stop_restore_blob_process,
+            width=8,
+            state=tk.DISABLED,
+        )
+        self.restore_blob_stop_btn.pack(side=tk.LEFT, padx=5)
 
         prog_frame = ttk.Frame(parent)
         prog_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
@@ -1843,31 +2741,23 @@ class BackupRestoreTab:
 
         def run():
             try:
-                from azure.storage.blob import BlobServiceClient
+                client = _get_gui_blob_service_client(
+                    blob_auth_mode=blob_auth_mode,
+                    blob_connection_string=conn_str,
+                    blob_account_url=storage_account_url,
+                    container=container,
+                )
 
-                if blob_auth_mode == "managed_identity":
-                    try:
-                        from src.backup.bak_to_blob import _get_mi_blob_service_client
-                    except ImportError:
-                        from azure_migration_tool.src.backup.bak_to_blob import _get_mi_blob_service_client
-                    acct_url = _normalize_blob_account_url_for_gui(storage_account_url)
-                    client = _get_mi_blob_service_client(acct_url)
-                else:
-                    client = BlobServiceClient.from_connection_string(conn_str)
-
+                catalog = _import_blob_backup_catalog()
                 container_client = client.get_container_client(container)
-                seen = set()
-                for b in container_client.list_blobs(name_starts_with=None):
-                    if "/" in b.name:
-                        top = b.name.split("/", 1)[0]
-                        if top and top not in seen:
-                            seen.add(top)
-                names = sorted(seen)
+                all_blobs = catalog.list_all_container_blobs(container_client)
+                names = catalog.discover_database_names(all_blobs)
                 self.frame.after(0, lambda: self._populate_restore_databases_combo(names))
             except Exception as e:
+                msg = str(e) + _blob_list_error_suffix(str(e), blob_auth_mode)
                 self.frame.after(
                     0,
-                    lambda msg=str(e): self._populate_restore_databases_combo([], msg),
+                    lambda m=msg: self._populate_restore_databases_combo([], m),
                 )
 
         threading.Thread(target=run, daemon=True).start()
@@ -1913,77 +2803,28 @@ class BackupRestoreTab:
             return
         self.restore_backups_listbox.delete(0, tk.END)
         self.restore_backups_listbox.insert(tk.END, "Listing...")
-        prefix = db_name.strip().rstrip("/") + "/"
+        db_name = db_name.strip().rstrip("/")
 
         def run():
             try:
-                import re as _re
-                from azure.storage.blob import BlobServiceClient
-
-                if blob_auth_mode == "managed_identity":
-                    try:
-                        from src.backup.bak_to_blob import _get_mi_blob_service_client
-                    except ImportError:
-                        from azure_migration_tool.src.backup.bak_to_blob import _get_mi_blob_service_client
-                    _acct = _normalize_blob_account_url_for_gui(storage_account_url)
-                    client = _get_mi_blob_service_client(_acct)
-                else:
-                    client = BlobServiceClient.from_connection_string(conn_str)
-                container_client = client.get_container_client(container)
-                # Pull each blob's size so we can show MB/GB next to the run.
-                blob_iter = list(container_client.list_blobs(name_starts_with=prefix))
-                all_baks = [b for b in blob_iter if b.name.endswith(".bak")]
-
-                # Group striped sets: key = (folder, filename_prefix_before_part, total).
-                # The regex MUST be matched against the file name (not the full path),
-                # otherwise m.start() is an offset into the path and `fname[: m.start()]`
-                # silently returns the entire filename.
-                stripe_re = _re.compile(r"_part(\d+)of(\d+)\.bak$", _re.IGNORECASE)
-                groups: dict = {}
-                singles: list = []
-                for b in all_baks:
-                    name = b.name
-                    folder, fname = name.rsplit("/", 1) if "/" in name else ("", name)
-                    m = stripe_re.search(fname)
-                    if not m:
-                        singles.append((name, b.size or 0))
-                        continue
-                    pref = fname[: m.start()]
-                    key = (folder, pref, int(m.group(2)))
-                    groups.setdefault(key, []).append((int(m.group(1)), name, b.size or 0))
-
-                def _fmt_size(n: int) -> str:
-                    gb = n / (1024 ** 3)
-                    if gb >= 1.0:
-                        return f"{gb:,.1f} GB"
-                    mb = n / (1024 ** 2)
-                    return f"{mb:,.1f} MB"
-
-                # `display` items are (sort_key, label, payload_path)
-                display: list = []
-                for name, size in singles:
-                    label = f"{name}    [single, {_fmt_size(size)}]"
-                    display.append((name, label, name))
-
-                for (folder, pref, total), parts in groups.items():
-                    parts.sort()
-                    first_name = parts[0][1]
-                    total_size = sum(p[2] for p in parts)
-                    have = len(parts)
-                    status = f"{have}/{total} stripe(s)" + ("" if have == total else "  MISSING!")
-                    label = f"{first_name}    [{status}, total {_fmt_size(total_size)}]"
-                    # Sort by folder so newest run_id (highest timestamp) sorts last
-                    display.append((first_name, label, first_name))
-
-                display.sort(key=lambda t: t[0], reverse=True)
-                labels = [t[1] for t in display]
-                self._restore_label_to_path = {t[1]: t[2] for t in display}
+                client = _get_gui_blob_service_client(
+                    blob_auth_mode=blob_auth_mode,
+                    blob_connection_string=conn_str,
+                    blob_account_url=storage_account_url,
+                    container=container,
+                )
+                catalog = _import_blob_backup_catalog()
+                all_blobs = catalog.list_all_container_blobs(client.get_container_client(container))
+                matched = catalog.backup_blobs_for_database(all_blobs, db_name)
+                labels, label_to_path = catalog.build_backup_list_display(matched)
+                self._restore_label_to_path = label_to_path
                 self.frame.after(0, lambda: self._populate_restore_backups_list(labels))
             except Exception as e:
                 self._restore_label_to_path = {}
+                msg = _compact_dialog_error(str(e) + _blob_list_error_suffix(str(e), blob_auth_mode))
                 self.frame.after(
                     0,
-                    lambda msg=_compact_dialog_error(str(e)): self._populate_restore_backups_list([], msg),
+                    lambda m=msg: self._populate_restore_backups_list([], m),
                 )
 
         threading.Thread(target=run, daemon=True).start()
@@ -2050,7 +2891,21 @@ class BackupRestoreTab:
         self.restore_from_blob_btn.config(state=st)
         self.test_restore_blob_sdk_btn.config(state=st)
         self.test_restore_blob_sql_headeronly_btn.config(state=st)
+        stop_btn = getattr(self, "restore_blob_stop_btn", None)
+        if stop_btn is not None:
+            stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
         # restore_reauth_btn is intentionally left enabled so the user can always sign in again.
+
+    def _stop_restore_blob_process(self) -> None:
+        self._restore_blob_stop_event.set()
+        self.restore_from_blob_log.insert(tk.END, "Stop requested — cancelling…\n")
+        self.restore_from_blob_log.see(tk.END)
+        conn = self._restore_blob_active_conn
+        if conn is not None:
+            try:
+                conn.cancel()
+            except Exception:
+                pass
 
     def _set_restore_progress(self, pct: float, text: Optional[str] = None) -> None:
         """Update the restore progress bar (0-100) and its label. Call on the UI thread."""
@@ -2176,7 +3031,18 @@ class BackupRestoreTab:
                 if get_token_via_azure_cli and get_token_via_azure_cli():
                     log("[OK] Azure CLI session is valid; retrying.")
                     return True
-                log("Azure CLI session missing/expired — run 'az login' in a terminal, then retry.")
+                # No az session — fall back to the SSMS-style WAM broker sign-in.
+                try:
+                    from azure_token_cache import get_sql_token_via_broker
+                    if get_sql_token_via_broker(username=user or None, log=log):
+                        log("[OK] Signed in via the Windows broker (SSMS-style); retrying.")
+                        return True
+                except Exception as e:
+                    log(f"(broker sign-in unavailable: {e})")
+                log(
+                    "Azure CLI not signed in and broker sign-in unavailable. Run 'az login', or "
+                    "switch Authentication to 'Microsoft account (with MFA)' or 'SQL Server login'."
+                )
                 return False
 
             if auth == "device_code":
@@ -2455,6 +3321,21 @@ class BackupRestoreTab:
         if not p:
             return
 
+        if p["blob_auth_mode"] == "managed_identity" and _is_azure_sql_managed_instance_host(p["server"]):
+            if not messagebox.askyesno(
+                "Azure SQL MI + Managed Identity",
+                "You are restoring to Azure SQL Managed Instance with blob auth = Managed Identity.\n\n"
+                "SQL Server reads the blob using the **Managed Instance's Azure identity**, "
+                "not your PC login. That identity needs **Storage Blob Data Reader** on the storage account.\n\n"
+                "If you see OS error 5 (Access denied):\n"
+                "  • Ask cloud team to grant Storage Blob Data Reader to the SQL MI identity, OR\n"
+                "  • Switch Step 1 to **Connection String (storage account key)** and retry (uses SAS).\n\n"
+                "Continue restore now?",
+            ):
+                return
+
+        self._restore_blob_stop_event.clear()
+        self._restore_blob_active_conn = None
         self._restore_blob_tab_set_busy(True)
         self.restore_from_blob_log.delete("1.0", tk.END)
         self._reset_restore_progress("waiting for progress…")
@@ -2466,6 +3347,9 @@ class BackupRestoreTab:
         def on_progress(pct):
             # Called from the restore monitor thread; marshal to the UI thread.
             self.frame.after(0, lambda pv=pct: self._set_restore_progress(pv))
+
+        def _store_conn(conn):
+            self._restore_blob_active_conn = conn
 
         def run():
             try:
@@ -2484,12 +3368,19 @@ class BackupRestoreTab:
                         blob_auth_mode=p["blob_auth_mode"],
                         storage_account_url=p["storage_account_url"],
                         progress_callback=on_progress,
+                        cancel_event=self._restore_blob_stop_event,
+                        on_connect=_store_conn,
                     ),
                     auth=self.restore_blob_auth_var.get() or "windows",
                     user=self.restore_blob_user_var.get() or "",
                     log=log,
                 )
-                if summary.get("status") == "success":
+                if summary.get("status") == "cancelled":
+                    self.frame.after(0, lambda: self.restore_progress_label.config(text="Stopped"))
+                    self.frame.after(
+                        0, lambda: messagebox.showinfo("Cancelled", "Restore from blob was stopped.")
+                    )
+                elif summary.get("status") == "success":
                     self.frame.after(0, lambda: self._set_restore_progress(100.0, "Completed"))
                     self.frame.after(
                         0, lambda: messagebox.showinfo("Success", "Restore from blob completed successfully.")
@@ -2658,7 +3549,9 @@ class BackupRestoreTab:
                 return
         
         self.restore_disk_log.delete('1.0', tk.END)
-        self.restore_disk_btn.config(state=tk.DISABLED)
+        self._restore_disk_stop_event.clear()
+        self._restore_disk_active_conn = None
+        self._restore_disk_set_busy(True)
         self.restore_disk_progress_var.set(0.0)
         self.restore_disk_progress_label.config(text="waiting for progress…")
         
@@ -2669,6 +3562,9 @@ class BackupRestoreTab:
         def on_progress(pct):
             # Called from the restore monitor thread; marshal to the UI thread.
             self.frame.after(0, lambda pv=pct: self._set_restore_disk_progress(pv))
+
+        def _store_conn(conn):
+            self._restore_disk_active_conn = conn
         
         def run():
             try:
@@ -2687,9 +3583,16 @@ class BackupRestoreTab:
                     recovery=True,
                     log=log,
                     progress_callback=on_progress,
+                    cancel_event=self._restore_disk_stop_event,
+                    on_connect=_store_conn,
                 )
                 
-                if result.get("success"):
+                if result.get("cancelled"):
+                    self.frame.after(0, lambda: self.restore_disk_progress_label.config(text="Stopped"))
+                    self.frame.after(
+                        0, lambda: messagebox.showinfo("Cancelled", "Restore was stopped.")
+                    )
+                elif result.get("success"):
                     self.frame.after(0, lambda: self._set_restore_disk_progress(100.0, "Completed"))
                     self.frame.after(
                         0, lambda: messagebox.showinfo(
@@ -2713,6 +3616,24 @@ class BackupRestoreTab:
                     lambda: messagebox.showerror("Error", _compact_dialog_error(error_msg))
                 )
             finally:
-                self.frame.after(0, lambda: self.restore_disk_btn.config(state=tk.NORMAL))
+                self.frame.after(0, lambda: self._restore_disk_set_busy(False))
         
         threading.Thread(target=run, daemon=True).start()
+
+    def _restore_disk_set_busy(self, busy: bool) -> None:
+        st = tk.DISABLED if busy else tk.NORMAL
+        self.restore_disk_btn.config(state=st)
+        stop_btn = getattr(self, "restore_disk_stop_btn", None)
+        if stop_btn is not None:
+            stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
+
+    def _stop_restore_disk_process(self) -> None:
+        self._restore_disk_stop_event.set()
+        self.restore_disk_log.insert(tk.END, "Stop requested — cancelling…\n")
+        self.restore_disk_log.see(tk.END)
+        conn = self._restore_disk_active_conn
+        if conn is not None:
+            try:
+                conn.cancel()
+            except Exception:
+                pass

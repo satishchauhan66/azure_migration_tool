@@ -93,29 +93,26 @@ def get_sql_token_via_broker(
         return None
 
     hwnd = _foreground_window_handle()
-    # Prefer the SQL-tools app id (SSMS-style); if its broker redirect isn't accepted,
-    # retry with the library default client id (still via the broker / registered device).
-    attempts = [
-        {"client_id": SQL_TOOLS_CLIENT_ID},
-        {},
-    ]
-    for extra in attempts:
-        try:
-            kwargs: Dict[str, Any] = {
-                "parent_window_handle": hwnd,
-                "additionally_allowed_tenants": ["*"],
-                "use_default_broker_account": True,
-            }
-            if tenant_id:
-                kwargs["tenant_id"] = tenant_id
-            kwargs.update(extra)
-            cred = InteractiveBrowserBrokerCredential(**kwargs)
-            token = cred.get_token(SQL_DATABASE_SCOPE)
-            if token and token.token:
-                return token.token
-        except Exception as e:
-            log(f"(broker sign-in attempt failed: {e})")
-            continue
+    # IMPORTANT: only ever use the SQL tooling app id (like SSMS/ODBC). We must NOT fall back
+    # to the library default client id, which is the "Microsoft Azure CLI" app that
+    # Conditional Access commonly blocks (AADSTS53003).
+    try:
+        kwargs: Dict[str, Any] = {
+            "client_id": SQL_TOOLS_CLIENT_ID,
+            "parent_window_handle": hwnd,
+            "additionally_allowed_tenants": ["*"],
+            "use_default_broker_account": True,
+        }
+        if tenant_id:
+            kwargs["tenant_id"] = tenant_id
+        cred = InteractiveBrowserBrokerCredential(**kwargs)
+        token = cred.get_token(SQL_DATABASE_SCOPE)
+        if token and token.token:
+            return token.token
+    except Exception as e:
+        # Fail quietly so callers fall back to the ODBC driver's ActiveDirectoryInteractive
+        # (which also uses the SQL tooling app id) rather than the blocked Azure CLI app.
+        log(f"(broker sign-in unavailable: {e})")
     return None
 
 

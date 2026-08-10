@@ -126,7 +126,8 @@ def get_recent_backups_from_history(
 def restore_database_from_disk(
     *,
     server: str,
-    backup_file_path: str,
+    backup_file_path: str = "",
+    backup_file_paths: Optional[List[str]] = None,
     target_database_name: str = None,
     auth: str = "windows",
     user: str = "",
@@ -138,13 +139,16 @@ def restore_database_from_disk(
     recovery: bool = True,
     log: Optional[Callable[[str], None]] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
+    cancel_event: Optional[Any] = None,
+    on_connect: Optional[Callable[[Any], None]] = None,
 ) -> Dict[str, Any]:
     """
     Restore SQL Server database from a local or network .bak file.
     
     Args:
         server: SQL Server instance
-        backup_file_path: Full path to .bak file (local or UNC)
+        backup_file_path: Full path to .bak file (local or UNC), or first stripe when using backup_file_paths
+        backup_file_paths: Optional list of .bak paths (striped backup set)
         target_database_name: Database name to restore as (defaults to original name)
         auth: 'windows' or 'sql'
         user: SQL auth username
@@ -179,6 +183,15 @@ def restore_database_from_disk(
         return result
     
     try:
+        paths: List[str] = []
+        if backup_file_paths:
+            paths = [p.strip() for p in backup_file_paths if (p or "").strip()]
+        elif backup_file_path:
+            paths = [backup_file_path.strip()]
+        if not paths:
+            raise ValueError("No backup file path(s) provided.")
+        primary_path = paths[0]
+
         log(f"Connecting to SQL Server: {server}")
         conn = connect_to_database(
             server=server,
@@ -194,16 +207,39 @@ def restore_database_from_disk(
         # Enable autocommit - RESTORE cannot run in a transaction
         conn.autocommit = True
         cur = conn.cursor()
+
+        if on_connect:
+            try:
+                on_connect(conn)
+            except Exception:
+                pass
+        _watcher_stop = False
+        if cancel_event is not None:
+            def _watch_cancel() -> None:
+                while not _watcher_stop:
+                    if cancel_event.wait(0.5):
+                        try:
+                            conn.cancel()
+                            log("Cancellation requested — aborting RESTORE…")
+                        except Exception:
+                            pass
+                        return
+
+            threading.Thread(target=_watch_cancel, daemon=True).start()
         
         # Step 1: Read backup file header to get original database name and file list
-        log(f"Reading backup file header from: {backup_file_path}")
+        log(f"Reading backup file header from: {primary_path}")
+        if len(paths) > 1:
+            log(f"Striped restore: {len(paths)} file(s)")
+            for p in paths:
+                log(f"  - {p}")
         log("This may take a moment for network paths...")
         
-        # Get backup set info
-        cur.execute(f"RESTORE HEADERONLY FROM DISK = ?", (backup_file_path,))
+        # Get backup set info (first stripe is sufficient for metadata)
+        cur.execute("RESTORE HEADERONLY FROM DISK = ?", (primary_path,))
         header = cur.fetchone()
         if not header:
-            raise ValueError(f"Cannot read backup file: {backup_file_path}")
+            raise ValueError(f"Cannot read backup file: {primary_path}")
         
         original_db_name = header[0]  # DatabaseName is first column
         log(f"Original database name: {original_db_name}")
@@ -215,16 +251,22 @@ def restore_database_from_disk(
         log(f"Target database name: {target_database_name}")
         
         # Get file list from backup
-        cur.execute(f"RESTORE FILELISTONLY FROM DISK = ?", (backup_file_path,))
+        cur.execute("RESTORE FILELISTONLY FROM DISK = ?", (primary_path,))
         file_list = cur.fetchall()
         
         if not file_list:
-            raise ValueError(f"No files found in backup: {backup_file_path}")
+            raise ValueError(f"No files found in backup: {primary_path}")
         
         log(f"Backup contains {len(file_list)} file(s)")
         
-        # Build RESTORE command
-        restore_sql = f"RESTORE DATABASE {_q(target_database_name)} FROM DISK = ?"
+        # Build RESTORE command (one DISK per stripe when needed)
+        if len(paths) == 1:
+            restore_sql = f"RESTORE DATABASE {_q(target_database_name)} FROM DISK = ?"
+            restore_params: tuple = (paths[0],)
+        else:
+            disk_clause = ", ".join("DISK = ?" for _ in paths)
+            restore_sql = f"RESTORE DATABASE {_q(target_database_name)} FROM {disk_clause}"
+            restore_params = tuple(paths)
         
         # Build WITH clause
         with_clauses = []
@@ -334,7 +376,7 @@ def restore_database_from_disk(
 
         try:
             try:
-                cur.execute(restore_sql, (backup_file_path,))
+                cur.execute(restore_sql, restore_params)
 
                 # Fetch progress messages
                 while cur.nextset():
@@ -354,9 +396,21 @@ def restore_database_from_disk(
             result["database_name"] = target_database_name
             result["restore_time_sec"] = round(restore_elapsed, 2)
             result["message"] = f"Successfully restored {target_database_name}"
+            _watcher_stop = True
             
         except Exception as restore_error:
             restore_elapsed = time.time() - restore_start
+            _watcher_stop = True
+            if cancel_event is not None and cancel_event.is_set():
+                result["cancelled"] = True
+                result["message"] = "Restore cancelled by user."
+                log("Restore cancelled by user.")
+                try:
+                    cur.close()
+                    conn.close()
+                except Exception:
+                    pass
+                return result
             error_str = str(restore_error)
             
             # Check for common errors

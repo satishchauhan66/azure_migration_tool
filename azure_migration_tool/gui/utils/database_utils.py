@@ -389,13 +389,19 @@ def connect_with_msal_cache(
         access_token = None
         if auth == "azure_cli":
             try:
-                from azure_migration_tool.azure_token_cache import get_token_via_azure_cli
+                from azure_migration_tool.azure_token_cache import (
+                    get_token_via_azure_cli,
+                    get_sql_token_via_broker,
+                )
             except ImportError:
-                from azure_token_cache import get_token_via_azure_cli
+                from azure_token_cache import get_token_via_azure_cli, get_sql_token_via_broker
             access_token = get_token_via_azure_cli()
             if not access_token:
+                access_token = get_sql_token_via_broker(username=user or None)
+            if not access_token:
                 raise RuntimeError(
-                    "Could not get a token from Azure CLI. Run 'az login' in a terminal, then retry."
+                    "Could not sign in via Azure CLI or the Windows broker. Run 'az login', or use "
+                    "'Microsoft account (with MFA)' or 'SQL Server login'."
                 )
         else:
             try:

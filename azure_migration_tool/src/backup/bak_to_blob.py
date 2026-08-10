@@ -44,6 +44,7 @@ import time
 import uuid
 import logging
 import math
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import urlparse
@@ -577,7 +578,11 @@ def _diagnose_backup_error(
                 + (f" `{container_name}`" if container_name else "")
                 + ". Wait several minutes for RBAC to propagate, then retry RESTORE.\n\n"
                 "Also verify on the SQL host VM: **Identity** blade shows the managed identity you granted; "
-                "and storage firewall allows trusted Azure services / the host’s access as required."
+                "and storage firewall allows trusted Azure services / the host’s access as required.\n\n"
+                "Fast workaround (no SQL MI / VM identity IAM change):\n"
+                "  Switch blob auth on Step 1 to **Connection String (storage account key)**, paste the "
+                "full connection string (Browse Azure), then retry RESTORE. SQL Server will use a SAS "
+                "credential (IDENTITY = 'SHARED ACCESS SIGNATURE') instead of Managed Identity."
             )
         else:
             hints.append(
@@ -735,6 +740,10 @@ def run_bak_backup_to_blob(
     block_size: int = DEFAULT_BLOCK_SIZE,
     blob_auth_mode: str = "connection_string",
     storage_account_url: str = "",
+    cancel_event: Optional[Any] = None,
+    on_connect: Optional[Any] = None,
+    max_auto_stripes: Optional[int] = None,
+    command_timeout_sec: int = 7200,
 ) -> Dict[str, Any]:
     """
     Backup on-prem SQL Server database to Azure Blob as one or more .bak stripes.
@@ -850,9 +859,31 @@ def run_bak_backup_to_blob(
             timeout=120,
             logger=logger,
         )
-        conn.timeout = 7200
+        try:
+            conn.timeout = int(command_timeout_sec) if command_timeout_sec and int(command_timeout_sec) > 0 else 7200
+        except (TypeError, ValueError):
+            conn.timeout = 7200
         conn.autocommit = True
         cur = conn.cursor()
+
+        if on_connect:
+            try:
+                on_connect(conn)
+            except Exception:
+                pass
+        _watcher_stop = False
+        if cancel_event is not None:
+            def _watch_cancel() -> None:
+                while not _watcher_stop:
+                    if cancel_event.wait(0.5):
+                        try:
+                            conn.cancel()
+                            log("Cancellation requested — aborting BACKUP…")
+                        except Exception:
+                            pass
+                        return
+
+            threading.Thread(target=_watch_cancel, daemon=True).start()
 
         if blob_auth_mode == "managed_identity":
             mi_err = _check_mi_backup_supported(cur, log)
@@ -869,6 +900,12 @@ def run_bak_backup_to_blob(
         if not stripes or stripes <= 0:
             size_mb = _get_database_size_mb(cur, database)
             stripes = _recommend_stripes(size_mb)
+            if max_auto_stripes and max_auto_stripes > 0 and stripes > max_auto_stripes:
+                log(
+                    f"Auto stripe count {stripes} capped to {max_auto_stripes} "
+                    "(limits parallel WAN streams for on-prem source to blob)."
+                )
+                stripes = max_auto_stripes
             if size_mb is not None:
                 log(f"Database size ~ {size_mb / 1024.0:.1f} GB -> using {stripes} stripe(s)")
             else:
@@ -949,15 +986,30 @@ def run_bak_backup_to_blob(
             f"STATS = 5"
         )
         t0 = time.perf_counter()
-        cur.execute(backup_sql)
-        while True:
-            try:
-                for _ in cur.fetchall():
+        try:
+            cur.execute(backup_sql)
+            while True:
+                try:
+                    for _ in cur.fetchall():
+                        pass
+                except Exception:
                     pass
-            except Exception:
-                pass
-            if not cur.nextset():
-                break
+                if not cur.nextset():
+                    break
+        except Exception as backup_error:
+            _watcher_stop = True
+            if cancel_event is not None and cancel_event.is_set():
+                result["status"] = "cancelled"
+                result["error"] = "Backup cancelled by user."
+                log("Backup cancelled by user.")
+                try:
+                    cur.close()
+                    conn.close()
+                except Exception:
+                    pass
+                return result
+            raise backup_error
+        _watcher_stop = True
         elapsed = time.perf_counter() - t0
         log(f"BACKUP command completed in {elapsed:.1f} s")
 
@@ -1043,6 +1095,11 @@ def run_bak_backup_to_blob(
         result["status"] = "success"
         return result
     except Exception as e:
+        if cancel_event is not None and cancel_event.is_set():
+            result["status"] = "cancelled"
+            result["error"] = "Backup cancelled by user."
+            log("Backup cancelled by user.")
+            return result
         err_text = str(e)
         diagnostic = _diagnose_backup_error(
             err_text,

@@ -478,12 +478,26 @@ def connect_to_database(
                 raise RuntimeError(f"azure-identity not available for Azure CLI auth: {e}")
             access_token = get_token_via_azure_cli()
             if not access_token:
+                # No az login session — fall back to the SSMS-style WAM broker so the user
+                # isn't forced to open a terminal.
+                try:
+                    from azure_token_cache import get_sql_token_via_broker
+
+                    access_token = get_sql_token_via_broker(
+                        username=user or None, log=(logger.info if logger else None)
+                    )
+                    if access_token and logger:
+                        logger.info("Azure CLI not signed in; used the Windows broker (SSMS-style) instead")
+                except Exception:
+                    access_token = None
+            if not access_token:
                 raise RuntimeError(
-                    "Could not get a token from Azure CLI. Open a terminal and run 'az login' "
-                    "(and 'az account set --subscription <id>' if needed), then retry."
+                    "Could not sign in. Either run 'az login' in a terminal for Azure CLI auth, "
+                    "or switch the Authentication to 'Microsoft account (with MFA)' (recommended) "
+                    "or 'SQL Server login'."
                 )
             if logger:
-                logger.info("Using Azure CLI (az login) token via SQL_COPT_SS_ACCESS_TOKEN")
+                logger.info("Using Azure CLI / broker token via SQL_COPT_SS_ACCESS_TOKEN")
         else:  # device_code
             try:
                 from azure_token_cache import get_token_device_code

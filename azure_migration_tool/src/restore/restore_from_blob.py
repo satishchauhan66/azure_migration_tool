@@ -137,6 +137,7 @@ def _log_sql_engine_context_for_mi_blob(cur, server: str, log) -> None:
     """Log SQL Server version and Windows service account — helps explain MI vs laptop identity."""
     log("--- SQL Server host (identity used for Managed Identity blob access) ---")
     log(f"  Connected instance: {server}")
+    edition = ""
     try:
         cur.execute(
             """
@@ -149,10 +150,20 @@ def _log_sql_engine_context_for_mi_blob(cur, server: str, log) -> None:
         row = cur.fetchone()
         if row:
             maj, ver, ed, mach = row[0], row[1], row[2], row[3]
+            edition = str(ed or "")
             log(f"  ProductMajorVersion: {maj} (SQL Server 2022 = 16)")
             log(f"  ProductVersion / Edition: {ver} / {ed}")
             if mach:
                 log(f"  MachineName (SERVERPROPERTY): {mach}")
+            if "SQL Azure" in edition:
+                log(
+                    "  Azure SQL detected: RESTORE FROM URL with IDENTITY = 'Managed Identity' uses the "
+                    "**Managed Instance's Azure AD identity** — not your PC user and not the VM service account."
+                )
+                log(
+                    "  Portal → your SQL managed instance → Security → Identity → grant that identity "
+                    "**Storage Blob Data Reader** on the storage account (or use Connection String / SAS auth in Step 1)."
+                )
     except Exception as ex:
         log(f"  (Could not read SERVERPROPERTY: {ex})")
     try:
@@ -342,14 +353,24 @@ def _prepare_blob_restore_urls(
 
     if blob_auth_mode == "managed_identity":
         log(
-            "Next: listing blobs / stripe detection uses **this PC’s** DefaultAzureCredential "
-            "(your Azure AD user or this machine’s managed identity) — not SQL Server."
+            "Next: listing blobs / stripe detection uses **this PC’s** Azure AD credential "
+            "(same chain as Browse Azure) — not SQL Server."
         )
 
     if blob_auth_mode == "managed_identity":
-        _mi_client = _get_mi_blob_service_client(acct_url)
+        try:
+            from ..backup.local_backup_and_upload import _get_tool_blob_service_client
+        except ImportError:
+            from src.backup.local_backup_and_upload import _get_tool_blob_service_client
+        list_client = _get_tool_blob_service_client(
+            blob_auth_mode=blob_auth_mode,
+            blob_connection_string="",
+            blob_account_url=storage_account_url,
+            container=container,
+            log=log,
+        )
         stripe_paths = _discover_stripe_set(
-            "", container, blob_path, log=log, blob_service_client=_mi_client
+            "", container, blob_path, log=log, blob_service_client=list_client
         )
     else:
         stripe_paths = _discover_stripe_set(
@@ -635,6 +656,8 @@ def run_restore_from_blob(
     blob_auth_mode: str = "connection_string",
     storage_account_url: str = "",
     progress_callback: Optional[Any] = None,
+    cancel_event: Optional[Any] = None,
+    on_connect: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Restore a SQL Server database from one or more .bak stripes in Azure Blob.
@@ -721,6 +744,25 @@ def run_restore_from_blob(
         conn.timeout = 7200
         conn.autocommit = True
         cur = conn.cursor()
+
+        if on_connect:
+            try:
+                on_connect(conn)
+            except Exception:
+                pass
+        _watcher_stop = False
+        if cancel_event is not None:
+            def _watch_cancel() -> None:
+                while not _watcher_stop:
+                    if cancel_event.wait(0.5):
+                        try:
+                            conn.cancel()
+                            log("Cancellation requested — aborting RESTORE…")
+                        except Exception:
+                            pass
+                        return
+
+            threading.Thread(target=_watch_cancel, daemon=True).start()
 
         if blob_auth_mode == "managed_identity":
             _log_sql_engine_context_for_mi_blob(cur, server, log)
@@ -814,10 +856,24 @@ def run_restore_from_blob(
                     pass
                 if not cur.nextset():
                     break
+        except Exception as restore_error:
+            _watcher_stop = True
+            if cancel_event is not None and cancel_event.is_set():
+                result["status"] = "cancelled"
+                result["error"] = "Restore cancelled by user."
+                log("Restore cancelled by user.")
+                try:
+                    cur.close()
+                    conn.close()
+                except Exception:
+                    pass
+                return result
+            raise restore_error
         finally:
             stop_event.set()
             if monitor is not None:
                 monitor.join(timeout=6)
+        _watcher_stop = True
         elapsed = time.perf_counter() - t0
         log(f"RESTORE command completed in {elapsed:.1f} s")
 
@@ -827,6 +883,11 @@ def run_restore_from_blob(
         log(f"Restore completed. Database: {database}")
         return result
     except Exception as e:
+        if cancel_event is not None and cancel_event.is_set():
+            result["status"] = "cancelled"
+            result["error"] = "Restore cancelled by user."
+            log("Restore cancelled by user.")
+            return result
         err_text = str(e)
         try:
             if getattr(e, "args", None):

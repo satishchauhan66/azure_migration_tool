@@ -208,7 +208,7 @@ a = Analysis(
         "src.backup.bak_to_blob", "src.backup.local_backup_and_upload",
         "src.backup.db2_schema_backup", "src.backup.db2_backup_exporters",
         "src.restore", "src.restore.schema_restore", "src.restore.nullability_fix",
-        "src.restore.restore_from_blob", "src.restore.restore_from_disk",
+        "src.restore.restore_from_blob", "src.restore.restore_from_disk", "src.restore.download_from_blob",
         "src.migration", "src.migration.data_migration", "src.migration.bcp_preflight",
         "src.utils.bcp_tools",
         "src.orchestration", "src.orchestration.full_migration",
