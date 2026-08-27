@@ -92,7 +92,7 @@ class MainWindow:
         # menu as separate windows. IDENTITY (CDC) is under Tools > Experiments (POC).
         self._project_path = None
         self._poc_experiment_tabs = []  # tab instances opened from Experiments menu (for set_project_path)
-        self._num_main_tabs = 7
+        self._num_main_tabs = 8
         self._tab_created = {i: False for i in range(self._num_main_tabs)}
         self._tab_instances = {}
         self._tab_labels = [
@@ -102,6 +102,7 @@ class MainWindow:
             "Schema Backup/Migration",
             "Schema Validation",
             "Data Validation",
+            "BCP Migration",
             "MI PITR Bulk Restore",
         ]
         
@@ -174,6 +175,7 @@ class MainWindow:
             ("azure_migration_tool.gui.tabs.schema_tab", "SchemaTab"),
             ("azure_migration_tool.gui.tabs.schema_validation_tab", "SchemaValidationTab"),
             ("azure_migration_tool.gui.tabs.data_validation_tab", "DataValidationTab"),
+            ("azure_migration_tool.gui.tabs.bcp_tab", "BcpTab"),
             ("azure_migration_tool.gui.tabs.mi_pitr_bulk_restore_tab", "MiPitrBulkRestoreTab"),
         ]
         mod_name, class_name = tab_specs[idx]

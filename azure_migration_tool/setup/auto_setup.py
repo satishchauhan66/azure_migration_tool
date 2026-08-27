@@ -553,7 +553,8 @@ class DependencyChecker:
         if jdbc_ok:
             messages.append(f"JDBC Drivers: {jdbc_msg}")
         else:
-            messages.append("NOTE: DB2 JDBC driver not found. Place db2jcc4.jar in the drivers folder")
+            messages.append("NOTE: DB2 JDBC driver not found in the bundled drivers folder")
+            messages.append("Rebuild the exe/setup so drivers/db2jcc4.jar is embedded (no runtime download)")
             messages.append(f"Drivers folder: {self.app_data / 'drivers'}")
         
         # 4. Create config marker

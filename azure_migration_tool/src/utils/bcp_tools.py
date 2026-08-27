@@ -198,14 +198,31 @@ def _bcp_work_root_candidates(preferred: Optional[str] = None) -> List[Path]:
     return roots
 
 
-def verify_bcp_work_dir(path: Path) -> Tuple[bool, str]:
-    """Create dir if needed and confirm the current process can write files there."""
+def verify_bcp_work_dir(path: Path | str) -> Tuple[bool, str]:
+    """Create dir if needed and confirm the current process can write files there.
+
+    Supports local paths and UNC network shares (``\\\\server\\share\\folder``),
+    including Azure Files mounted as SMB. Raw ``https://…blob…`` URLs are not
+    valid for bcp.exe and will fail this check.
+    """
+    raw_in = str(path).strip()
+    if raw_in.lower().startswith(("http://", "https://")):
+        return (
+            False,
+            "bcp.exe cannot write to HTTP(S) blob URLs. Use a UNC path "
+            r"(e.g. \\server\share\bcp or \\account.file.core.windows.net\share\bcp) "
+            "or a mapped drive letter.",
+        )
     try:
-        path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".bcp_write_probe"
+        p = Path(raw_in)
+        p.mkdir(parents=True, exist_ok=True)
+        probe = p / ".bcp_write_probe"
         probe.write_bytes(b"ok")
         probe.unlink(missing_ok=True)
-        return True, str(path.resolve())
+        # Keep UNC form; Path.resolve() can break some network paths.
+        if raw_in.startswith("\\\\") or raw_in.startswith("//"):
+            return True, os.path.normpath(raw_in)
+        return True, str(p.resolve())
     except OSError as exc:
         return False, str(exc)
 
@@ -237,8 +254,14 @@ def create_bcp_migration_dir(preferred_root: Optional[str] = None) -> str:
 
 
 def format_bcp_data_path(path: str) -> str:
-    """Absolute normalized path for bcp.exe; use 8.3 short path on Windows when possible."""
-    path = os.path.normpath(os.path.abspath(path))
+    """Absolute normalized path for bcp.exe; use 8.3 short path on Windows when possible.
+
+    UNC / Azure Files SMB paths are returned normalized without forcing a drive letter.
+    """
+    path = os.path.normpath(path)
+    if path.startswith("\\\\") or path.startswith("//"):
+        return path
+    path = os.path.abspath(path)
     if not sys.platform.startswith("win"):
         return path
     try:

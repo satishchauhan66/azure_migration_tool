@@ -557,32 +557,11 @@ def _diagnose_backup_error(
     elif is_3201 and ("OPERATING SYSTEM ERROR 5(" in upper or " ERROR 5 " in upper):
         if blob_auth_mode == "managed_identity":
             hints.append(
-                "OS error 5 (Access denied) on RESTORE/FROM URL almost always means the **identity used by "
-                "SQL Server on the database host** is not allowed to read the blob — not a SQL 2022 version bug.\n\n"
-                "Important: two different principals are involved:\n"
-                "  1) **This app / your PC** — used DefaultAzureCredential to list blobs and discover stripes. "
-                "That can succeed even when RESTORE fails.\n"
-                "  2) **The machine running SQL Server** — when the credential uses IDENTITY = 'Managed Identity', "
-                "SQL Server 2022+ reads Azure Storage using the **Azure Managed Identity attached to that host** "
-                "(system-assigned or user-assigned on the Azure VM, or the identity Azure SQL MI / Arc uses).\n\n"
-                "What to fix in Azure (ask cloud / identity team if needed):\n"
-                "  • Portal → your **storage account**"
-                + (f" (`{acct_hint}`)" if acct_hint else "")
-                + " → **Access control (IAM)**.\n"
-                "  • **Add role assignment** → role **Storage Blob Data Reader** (minimum for RESTORE; use "
-                "**Contributor** if you also need backup writes).\n"
-                "  • **Assign access to** → **Managed identity** → pick the **subscription** and the identity "
-                "that belongs to the **same VM (or MI) where this SQL instance runs** — not your user, not the "
-                "laptop running this tool.\n"
-                "  • Scope can be the storage account or the container"
-                + (f" `{container_name}`" if container_name else "")
-                + ". Wait several minutes for RBAC to propagate, then retry RESTORE.\n\n"
-                "Also verify on the SQL host VM: **Identity** blade shows the managed identity you granted; "
-                "and storage firewall allows trusted Azure services / the host’s access as required.\n\n"
-                "Fast workaround (no SQL MI / VM identity IAM change):\n"
-                "  Switch blob auth on Step 1 to **Connection String (storage account key)**, paste the "
-                "full connection string (Browse Azure), then retry RESTORE. SQL Server will use a SAS "
-                "credential (IDENTITY = 'SHARED ACCESS SIGNATURE') instead of Managed Identity."
+                "OS error 5 (Access denied): the SQL Managed Instance's Azure AD identity cannot read the blob. "
+                "Grant it 'Storage Blob Data Reader' on storage account"
+                + (f" '{acct_hint}'" if acct_hint else "")
+                + (f" (container '{container_name}')" if container_name else "")
+                + ", or switch Step 1 blob auth to Connection String (SAS)."
             )
         else:
             hints.append(

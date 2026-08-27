@@ -80,6 +80,22 @@ if (-not (Test-Path $BcpMsi)) {
     Write-Host "BCP MSI already present: $BcpMsi"
 }
 
+# 1c. Ensure DB2 JDBC jar is present for exe embed (no runtime download on target PCs)
+$Db2Jar = Join-Path $AppDir "drivers\db2jcc4.jar"
+if (-not (Test-Path $Db2Jar) -or ((Get-Item $Db2Jar).Length -lt 1000000)) {
+    Write-Host "Fetching DB2 JDBC driver for embed (build-time)..."
+    & (Join-Path $ScriptDir "download_db2_jdbc.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: download_db2_jdbc.ps1 failed" -ForegroundColor Red
+        Pause-IfError; exit 1
+    }
+}
+if (-not (Test-Path $Db2Jar) -or ((Get-Item $Db2Jar).Length -lt 1000000)) {
+    Write-Host "ERROR: drivers\db2jcc4.jar is required for build (DB2 JDBC). Place the jar or fix network access." -ForegroundColor Red
+    Pause-IfError; exit 1
+}
+Write-Host "DB2 JDBC present for embed: $Db2Jar"
+
 # 2. Optional: ensure Java is bundled for DB2/JDBC
 $JavaExe = Join-Path $ScriptDir "java\bin\java.exe"
 if ($IncludeJava -and -not (Test-Path $JavaExe)) {

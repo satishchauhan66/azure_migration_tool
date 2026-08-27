@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
@@ -120,6 +120,164 @@ def normalize_restore_point_in_time(value: str) -> Tuple[Optional[str], Optional
         return iso, None
     except Exception as ex:
         return None, f"Invalid date/time: {ex}"
+
+
+# A "latest" restore point is held slightly behind now: MI log backups land every few
+# minutes, so a timestamp at the very edge of the window is often rejected.
+LATEST_RESTORE_POINT_LAG_SECONDS = 360
+
+# Values in the restore-point field that mean "work it out from the source database".
+AUTO_RESTORE_POINT_KEYWORDS = frozenset({"", "latest", "auto", "now", "newest"})
+
+
+def _to_arm_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+
+
+def _parse_arm_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ARM timestamp to aware UTC, tolerating Z and >6 fractional digits."""
+    s = (value or "").strip()
+    if not s:
+        return None
+    s = s.replace("Z", "+00:00")
+    if "." in s:
+        head, _, tail = s.partition(".")
+        digits = ""
+        rest = ""
+        for i, ch in enumerate(tail):
+            if ch.isdigit():
+                digits += ch
+            else:
+                rest = tail[i:]
+                break
+        s = f"{head}.{digits[:6]}{rest}" if digits else head + rest
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def parse_managed_database_arm_id(arm_id: str) -> Optional[Dict[str, str]]:
+    """Split a managed database ARM id into subscription / resource group / instance / database."""
+    parts = [p for p in (arm_id or "").strip().split("/") if p]
+    lowered = [p.lower() for p in parts]
+    try:
+        return {
+            "subscription_id": parts[lowered.index("subscriptions") + 1],
+            "resource_group": parts[lowered.index("resourcegroups") + 1],
+            "managed_instance": parts[lowered.index("managedinstances") + 1],
+            "database": parts[lowered.index("databases") + 1],
+        }
+    except (ValueError, IndexError):
+        return None
+
+
+@dataclass
+class RestoreWindow:
+    """Bounds Azure will accept for a point-in-time restore of one managed database."""
+
+    earliest: Optional[datetime] = None
+    creation_date: Optional[datetime] = None
+    error: Optional[str] = None
+
+    @property
+    def lower_bound(self) -> Optional[datetime]:
+        return self.earliest or self.creation_date
+
+
+def get_managed_database_restore_window(
+    credential: Any,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    managed_instance: str,
+    database: str,
+) -> RestoreWindow:
+    """GET the managed database to read ``earliestRestorePoint`` and ``creationDate``."""
+    try:
+        token = get_access_token(credential)
+        url = (
+            f"{BASE}{managed_database_id(subscription_id, resource_group, managed_instance, database)}"
+            f"?api-version={API_VERSION_DATABASE}"
+        )
+        r = requests.get(url, headers=_headers(token), timeout=120)
+        if r.status_code != 200:
+            return RestoreWindow(error=_format_http_error("GET managed database", r))
+        props = (r.json() or {}).get("properties") or {}
+        return RestoreWindow(
+            earliest=_parse_arm_datetime(props.get("earliestRestorePoint")),
+            creation_date=_parse_arm_datetime(props.get("creationDate")),
+        )
+    except Exception as ex:
+        return RestoreWindow(error=str(ex))
+
+
+def resolve_restore_point_in_time(
+    credential: Any,
+    *,
+    source_database_arm_id: str,
+    requested: str = "",
+    log: Optional[Callable[[str], None]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Return a restore point Azure will accept, as ISO8601 UTC ending in Z.
+
+    ``requested`` may be blank or ``latest``/``auto``/``now`` to take the most recent
+    restorable point. An explicit timestamp is clamped into the database's real window,
+    which is what Azure otherwise rejects with "The point in time ... is not valid.
+    Valid point in time range from 7 days early to now and not before source server
+    creation time."
+
+    Returns (restore_point, error_message).
+    """
+    log = log or (lambda _m: None)
+    latest = datetime.now(timezone.utc) - timedelta(seconds=LATEST_RESTORE_POINT_LAG_SECONDS)
+
+    window = RestoreWindow()
+    parts = parse_managed_database_arm_id(source_database_arm_id)
+    if parts is None:
+        log("(could not parse source database ARM id; skipping restore-window check)")
+    else:
+        window = get_managed_database_restore_window(credential, **parts)
+        if window.error:
+            log(f"(could not read restore window: {window.error})")
+
+    wanted = (requested or "").strip()
+    if wanted.lower() in AUTO_RESTORE_POINT_KEYWORDS:
+        target = latest
+        log(f"Restore point: latest available -> {_to_arm_utc(target)}")
+    else:
+        iso, err = normalize_restore_point_in_time(wanted)
+        if err or not iso:
+            return None, err or "Invalid restore time."
+        parsed = _parse_arm_datetime(iso)
+        if parsed is None:
+            return None, f"Invalid date/time: {wanted}"
+        target = parsed
+
+    if target > latest:
+        log(f"Restore point {_to_arm_utc(target)} is too recent; using {_to_arm_utc(latest)}")
+        target = latest
+
+    lower = window.lower_bound
+    if lower is not None and target < lower:
+        adjusted = min(lower + timedelta(minutes=1), latest)
+        log(
+            f"Restore point {_to_arm_utc(target)} is before this database's earliest restorable "
+            f"point ({_to_arm_utc(lower)}); using {_to_arm_utc(adjusted)}"
+        )
+        target = adjusted
+
+    if lower is not None and target < lower:
+        return None, (
+            f"No valid restore point available: earliest restorable point is {_to_arm_utc(lower)}, "
+            f"which is later than the newest allowed point {_to_arm_utc(latest)}. "
+            "The source database was created too recently — wait a few minutes and retry."
+        )
+    if window.earliest is not None:
+        log(f"Source restore window: {_to_arm_utc(window.earliest)} .. {_to_arm_utc(latest)}")
+    return _to_arm_utc(target), None
 
 
 def _format_http_error(action: str, r: requests.Response) -> str:
@@ -384,8 +542,14 @@ def poll_async_operation(
     Returns (success, message, last_json).
     """
     log = log or (lambda _m: None)
-    deadline = time.monotonic() + timeout_sec
+    started = time.monotonic()
+    deadline = started + timeout_sec
     last_body: Any = None
+
+    def _elapsed() -> str:
+        secs = int(time.monotonic() - started)
+        return f"{secs // 3600}h {(secs % 3600) // 60:02d}m" if secs >= 3600 else f"{secs // 60}m {secs % 60:02d}s"
+
     while time.monotonic() < deadline:
         try:
             token = get_access_token(credential)
@@ -400,7 +564,7 @@ def poll_async_operation(
                 # Some payloads nest provisioning state
                 status = (last_body or {}).get("properties", {}).get("status")
             status_str = str(status) if status is not None else ""
-            log(f"Async status: {status_str}")
+            log(f"Async status: {status_str} (elapsed {_elapsed()})")
             sl = status_str.lower()
             if sl in ("succeeded", "completed"):
                 return True, status_str or "Succeeded", last_body
@@ -411,4 +575,4 @@ def poll_async_operation(
         except Exception as ex:
             log(f"Poll error (will retry): {ex}")
         time.sleep(poll_interval_sec)
-    return False, "Timed out waiting for restore operation.", last_body
+    return False, f"Timed out waiting for restore operation after {_elapsed()}.", last_body

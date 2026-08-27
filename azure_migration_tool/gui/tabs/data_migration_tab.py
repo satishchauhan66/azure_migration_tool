@@ -705,6 +705,27 @@ class DataMigrationTab:
         self.migration_log.insert(tk.END, "\n--- BCP pre-flight validation ---\n")
         self.migration_log.see(tk.END)
 
+        src_db_type = (
+            getattr(getattr(self, "src_connection_widget", None), "db_type_var", None)
+            and self.src_connection_widget.db_type_var.get()
+            or "sqlserver"
+        ).strip().lower()
+        if src_db_type == "db2":
+            msg = (
+                "BCP data migration requires a SQL Server / Azure SQL source. "
+                "Your source Database Type is IBM DB2 (host like PS-FUS-DB21Q). "
+                "Switch Source Database Type to SQL Server / Azure SQL and point at a SQL "
+                "database that already has the table (e.g. gpitd-shir01...\\i2022 / "
+                "FUSION_ps_fus_db21q), or use a DB2→SQL path — do not run BCP against DB2."
+            )
+            self.migration_log.insert(tk.END, f"[FAIL] {msg}\n")
+            self.migration_log.see(tk.END)
+            self.bcp_preflight_status_var.set("FAILED — source is DB2")
+            self.bcp_preflight_btn.config(state=tk.NORMAL)
+            self.bcp_validate_btn.config(state=tk.NORMAL)
+            messagebox.showerror("BCP pre-flight", msg)
+            return
+
         cfg = self._build_migration_cfg()
 
         def worker():
@@ -2646,6 +2667,21 @@ Alternative: Install SQL Server Management Studio (SSMS) which includes BCP.
     def _start_migration(self):
         """Start data migration in a separate thread."""
         migration_method = self.migration_method_var.get()
+
+        src_db_type = (
+            getattr(getattr(self, "src_connection_widget", None), "db_type_var", None)
+            and self.src_connection_widget.db_type_var.get()
+            or "sqlserver"
+        ).strip().lower()
+        if migration_method == "bcp" and src_db_type == "db2":
+            messagebox.showerror(
+                "BCP migration",
+                "BCP requires a SQL Server / Azure SQL source.\n\n"
+                "Source is set to IBM DB2. Switch Database Type to SQL Server and use a SQL "
+                "database that has the table (for example gpitd-shir01...\\i2022 / "
+                "FUSION_ps_fus_db21q), or use another migration method for DB2.",
+            )
+            return
         
         if migration_method == "bcp":
             if not self._ensure_bcp_ready_for_migration():

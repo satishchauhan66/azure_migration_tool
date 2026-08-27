@@ -121,27 +121,28 @@ class SchemaTab:
         self.scrollable_frame = scrollable_frame
         
         # Create notebook: Backup | Restore | Bulk (Excel) | Compare
-        notebook = ttk.Notebook(scrollable_frame)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Flow: Backup = full mirror of source schema to disk → Restore applies that mirror to dest.
+        self.schema_notebook = ttk.Notebook(scrollable_frame)
+        self.schema_notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # 1. Backup sub-tab (step-based, single DB only)
-        backup_frame = ttk.Frame(notebook)
-        notebook.add(backup_frame, text="Backup")
+        backup_frame = ttk.Frame(self.schema_notebook)
+        self.schema_notebook.add(backup_frame, text="Backup")
         self._create_backup_widgets(backup_frame)
         
         # 2. Restore sub-tab (step-based, single DB only; preview off by default)
-        restore_frame = ttk.Frame(notebook)
-        notebook.add(restore_frame, text="Restore")
+        restore_frame = ttk.Frame(self.schema_notebook)
+        self.schema_notebook.add(restore_frame, text="Restore")
         self._create_restore_widgets(restore_frame)
         
         # 3. Bulk (Excel) sub-tab - one view, bulk backup + bulk restore + one log
-        bulk_frame = ttk.Frame(notebook)
-        notebook.add(bulk_frame, text="Bulk (Excel)")
+        bulk_frame = ttk.Frame(self.schema_notebook)
+        self.schema_notebook.add(bulk_frame, text="Bulk (Excel)")
         self._create_bulk_tab_widgets(bulk_frame)
         
         # 4. Compare sub-tab (schema comparison)
-        comparison_frame = ttk.Frame(notebook)
-        notebook.add(comparison_frame, text="Compare")
+        comparison_frame = ttk.Frame(self.schema_notebook)
+        self.schema_notebook.add(comparison_frame, text="Compare")
         self._create_comparison_widgets(comparison_frame)
         
         # Store latest backup path for auto-fill
@@ -800,8 +801,17 @@ class SchemaTab:
         threading.Thread(target=execute, daemon=True).start()
     
     def _create_backup_widgets(self, parent):
-        """Backup sub-tab: Step 1 Source, Step 2 What to backup, Step 3 Where to save, Start Backup, Log."""
-        tk.Label(parent, text="Schema Backup", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        """Backup sub-tab: source → disk as a full schema mirror of the source DB."""
+        tk.Label(parent, text="Schema Backup — mirror source to disk", font=("Arial", 12, "bold")).pack(
+            pady=(0, 4)
+        )
+        tk.Label(
+            parent,
+            text="Step A: export a full schema hard-copy of the source. Step B: open Restore and apply it to a destination.",
+            fg="gray",
+            wraplength=720,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, padx=5, pady=(0, 8))
         
         # Step 1: Source database
         conn_frame = ttk.LabelFrame(parent, text="Step 1: Source database", padding=10)
@@ -825,16 +835,16 @@ class SchemaTab:
         )
         
         # Step 2: Mirror backup scope (full SSMS-style schema hard copy)
-        options_frame = ttk.LabelFrame(parent, text="Step 2: Mirror backup (full schema hard copy)", padding=10)
+        options_frame = ttk.LabelFrame(parent, text="Step 2: Mirror of source (what gets exported)", padding=10)
         options_frame.pack(fill=tk.X, padx=5, pady=5)
         mirror_help = (
-            "Full mirror schema backup: exports user tables, programmables, constraints, indexes, "
-            "security, filegroups, credentials, partitioning, Service Broker, CDC, change tracking, "
-            "full-text, statistics, XML schemas, assemblies, external tables, diagrams, and more.\n\n"
+            "Full mirror schema backup of the source: user tables (CREATE TABLE with inline PK and "
+            "column defaults), programmables, constraints, indexes, security, filegroups, credentials, "
+            "partitioning, Service Broker, CDC, change tracking, full-text, statistics, XML schemas, "
+            "assemblies, external tables, diagrams, and more.\n\n"
             "Secrets (login passwords, credential SECRETs, symmetric key passwords) use placeholders — "
-            "set on the target before restore. Encrypted modules are listed in meta/encrypted_modules.sql.\n"
-            "After backup, open meta/export_gap_report.json for anything still missing.\n"
-            "See meta/restore_order.json for restore sequence."
+            "set those on the target before or after restore. Encrypted modules are listed in "
+            "meta/encrypted_modules.sql. See meta/restore_order.json for the restore sequence."
         )
         tk.Label(options_frame, text=mirror_help, justify=tk.LEFT, wraplength=720).pack(anchor=tk.W)
         # Kept for backward compatibility with bulk Excel flows
@@ -859,8 +869,11 @@ class SchemaTab:
         # Start Backup
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(pady=10)
-        self.backup_btn = ttk.Button(btn_frame, text="Start Backup", command=self._start_backup, width=20)
+        self.backup_btn = ttk.Button(btn_frame, text="Start Mirror Backup", command=self._start_backup, width=22)
         self.backup_btn.pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Go to Restore →", command=self._goto_restore_tab, width=16).pack(
+            side=tk.LEFT, padx=5
+        )
         
         # Log
         log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
@@ -869,19 +882,32 @@ class SchemaTab:
         self.backup_log.pack(fill=tk.BOTH, expand=True)
         
     def _create_restore_widgets(self, parent):
-        """Restore sub-tab: Step 1 Backup path, Step 2 Destination, Step 3 Options (preview off by default), Start Restore, Log."""
-        tk.Label(parent, text="Schema Restore", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        """Restore sub-tab: apply a mirror backup folder to a destination database."""
+        tk.Label(parent, text="Schema Restore — apply mirror to destination", font=("Arial", 12, "bold")).pack(
+            pady=(0, 4)
+        )
+        tk.Label(
+            parent,
+            text="Pick the backup folder from a completed mirror backup, set the destination, then Start Restore.",
+            fg="gray",
+            wraplength=720,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, padx=5, pady=(0, 8))
         
         # Step 1: Backup to restore
-        backup_path_frame = ttk.LabelFrame(parent, text="Step 1: Backup to restore", padding=10)
+        backup_path_frame = ttk.LabelFrame(parent, text="Step 1: Mirror backup to restore", padding=10)
         backup_path_frame.pack(fill=tk.X, padx=5, pady=5)
-        tk.Label(backup_path_frame, text="Backup folder (run folder from a completed backup):").pack(anchor=tk.W)
+        tk.Label(backup_path_frame, text="Backup folder (run folder from a completed Backup):").pack(anchor=tk.W)
         path_frame = ttk.Frame(backup_path_frame)
         path_frame.pack(fill=tk.X, pady=5)
         self.restore_backup_path_var = tk.StringVar()
         ttk.Entry(path_frame, textvariable=self.restore_backup_path_var, width=50).pack(side=tk.LEFT, padx=5)
         ttk.Button(path_frame, text="Browse...", command=self._browse_restore_backup).pack(side=tk.LEFT, padx=5)
-        tk.Label(backup_path_frame, text="Tip: Use the path shown in Backup log after a successful run.", fg="gray").pack(anchor=tk.W)
+        tk.Label(
+            backup_path_frame,
+            text="Tip: filled automatically after a successful Backup on this tab.",
+            fg="gray",
+        ).pack(anchor=tk.W)
         
         # Step 2: Destination database
         dest_frame = ttk.LabelFrame(parent, text="Step 2: Destination database", padding=10)
@@ -903,6 +929,18 @@ class SchemaTab:
             label_text="",
             row_start=0
         )
+        dest_helper = ttk.Frame(dest_frame)
+        dest_helper.grid(row=20, column=0, columnspan=3, sticky=tk.W, pady=(6, 0))
+        ttk.Button(
+            dest_helper,
+            text="Copy source connection from Backup",
+            command=self._copy_backup_source_to_restore_dest,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            dest_helper,
+            text="  (then change server/database to your Azure target)",
+            fg="gray",
+        ).pack(side=tk.LEFT)
         
         # Step 3: What to restore + options
         restore_options_frame = ttk.LabelFrame(parent, text="Step 3: What to restore", padding=10)
@@ -989,6 +1027,39 @@ class SchemaTab:
         if folder:
             self.restore_backup_path_var.set(folder)
 
+    def _goto_restore_tab(self) -> None:
+        """Switch to the Restore sub-tab (index 1)."""
+        try:
+            self.schema_notebook.select(1)
+        except Exception:
+            pass
+
+    def _copy_backup_source_to_restore_dest(self) -> None:
+        """Copy Backup source connection fields into Restore destination (user edits target as needed)."""
+        self.restore_server_var.set(self.backup_server_var.get())
+        self.restore_db_var.set(self.backup_db_var.get())
+        self.restore_auth_var.set(self.backup_auth_var.get())
+        self.restore_user_var.set(self.backup_user_var.get())
+        self.restore_password_var.set(self.backup_password_var.get())
+        src_widget = getattr(self, "backup_connection_widget", None)
+        dst_widget = getattr(self, "restore_connection_widget", None)
+        if src_widget and dst_widget:
+            for attr in ("db_type_var", "port_var", "schema_var"):
+                src_var = getattr(src_widget, attr, None)
+                dst_var = getattr(dst_widget, attr, None)
+                if src_var is not None and dst_var is not None:
+                    try:
+                        dst_var.set(src_var.get())
+                    except Exception:
+                        pass
+        if hasattr(self, "restore_log"):
+            self.restore_log.insert(
+                tk.END,
+                "[Note] Copied Backup source connection into destination fields — "
+                "change server/database to your restore target before Start Restore.\n",
+            )
+            self.restore_log.see(tk.END)
+
     def _on_full_mirror_toggle(self):
         """When full mirror is on, enable all restore sub-options and mirror mode."""
         full = self.restore_full_mirror_var.get()
@@ -1038,25 +1109,36 @@ class SchemaTab:
 
     def _sync_widget_extras_to_validation(self, widget, role):
         """Copy db_type/port/schema from a ConnectionWidget to Schema Validation tab if loaded."""
-        val_tab = self.main_window._tab_instances.get(6)
+        # Schema Validation is notebook index 4 (see main_window tab_specs). Prefer type match
+        # so a tab reorder cannot sync into the wrong tab and crash restore.
+        val_tab = self.main_window._tab_instances.get(4)
+        if val_tab is None or not hasattr(val_tab, "dest_db_type_var"):
+            val_tab = next(
+                (
+                    t
+                    for t in self.main_window._tab_instances.values()
+                    if hasattr(t, "dest_db_type_var") and hasattr(t, "src_db_type_var")
+                ),
+                None,
+            )
         if not val_tab:
             return
         db_type_var = getattr(widget, "db_type_var", None)
         port_var = getattr(widget, "port_var", None)
         schema_var = getattr(widget, "schema_var", None)
         if role == "src":
-            if db_type_var:
+            if db_type_var and hasattr(val_tab, "src_db_type_var"):
                 val_tab.src_db_type_var.set(db_type_var.get())
-            if port_var:
+            if port_var and hasattr(val_tab, "src_port_var"):
                 val_tab.src_port_var.set(port_var.get())
-            if schema_var:
+            if schema_var and hasattr(val_tab, "src_schema_var"):
                 val_tab.src_schema_var.set(schema_var.get())
         else:
-            if db_type_var:
+            if db_type_var and hasattr(val_tab, "dest_db_type_var"):
                 val_tab.dest_db_type_var.set(db_type_var.get())
-            if port_var:
+            if port_var and hasattr(val_tab, "dest_port_var"):
                 val_tab.dest_port_var.set(port_var.get())
-            if schema_var:
+            if schema_var and hasattr(val_tab, "dest_schema_var"):
                 val_tab.dest_schema_var.set(schema_var.get())
             
     def _start_backup(self):
@@ -1128,22 +1210,28 @@ class SchemaTab:
                         "password": self.backup_password_var.get() or None,
                         "backup_root": backup_root,
                         "log_table_sample": 20,
-                        "export_defaults_separately": True
+                        # True mirror of source: inline PK + column defaults in CREATE TABLE
+                        "raw_table_ddl": False,
+                        "export_defaults_separately": False,
+                        "mirror_backup": True,
                     }
                     self.backup_log.insert(tk.END, f"Connecting to {cfg['server']}...\n")
+                    self.backup_log.insert(
+                        tk.END,
+                        "Mirror mode: CREATE TABLE includes inline PRIMARY KEY and column DEFAULTs.\n",
+                    )
                     self.backup_log.see(tk.END)
                     summary = sechma_backup.run_backup(cfg)
 
                 if summary["status"] == "success":
-                    self.backup_log.insert(tk.END, f"\n[OK] Backup completed successfully!\n")
+                    self.backup_log.insert(tk.END, f"\n[OK] Mirror backup completed successfully!\n")
                     self.backup_log.insert(tk.END, f"Run ID: {summary.get('run_id', 'N/A')}\n")
                     if not is_db2:
                         self.backup_log.insert(
                             tk.END,
-                            "Mirror backup written under schema/00_foundation, 01_tables, 02_programmables, "
-                            "03_constraints_indexes, and 04_security. See meta/restore_order.json.\n"
-                            "Note: CREATE TABLE omits inline PK/defaults by default; restore primary_keys.sql "
-                            "and constraints after data load for a full mirror.\n",
+                            "Mirror of source written under schema/00_foundation, 01_tables, "
+                            "02_programmables, 03_constraints_indexes, and 04_security.\n"
+                            "CREATE TABLE includes inline PK and defaults. See meta/restore_order.json.\n",
                         )
                     
                     # Auto-fill restore backup path with the backup that was just created
@@ -1178,8 +1266,17 @@ class SchemaTab:
                         self.backup_log.insert(tk.END, f"   Path: {backup_path}\n")
 
                     self._sync_connection_to_shared(source=True)
-                    
-                    self.frame.after(0, lambda: messagebox.showinfo("Success", "Backup completed successfully!\n\nSwitch to the Restore tab to restore to a destination."))
+
+                    def _handoff_to_restore():
+                        self._goto_restore_tab()
+                        messagebox.showinfo(
+                            "Mirror backup complete",
+                            "Source schema mirror saved to disk.\n\n"
+                            "Restore tab is open with the backup path filled.\n"
+                            "Enter the destination server/database, then Start Restore.",
+                        )
+
+                    self.frame.after(0, _handoff_to_restore)
                 else:
                     self.backup_log.insert(tk.END, f"\n[FAIL] Backup failed!\n")
                     self.backup_log.insert(tk.END, f"Errors: {summary.get('errors', [])}\n")

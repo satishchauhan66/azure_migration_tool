@@ -14,16 +14,54 @@ from typing import Any, List, Optional, Tuple
 
 # (canvas, scrollable_inner_frame)
 _registrations: List[Tuple[tk.Canvas, tk.Misc]] = []
+_root: Optional[tk.Misc] = None
+
+
+def _resolution_base() -> Optional[tk.Misc]:
+    if _root is not None:
+        try:
+            if _root.winfo_exists():
+                return _root
+        except tk.TclError:
+            pass
+    for canvas, _frame in reversed(_registrations):
+        try:
+            if canvas.winfo_exists():
+                return canvas
+        except tk.TclError:
+            continue
+    return None
+
+
+def _as_widget(target: Any) -> Optional[tk.Misc]:
+    """
+    Tk reports a bare widget path string for windows with no Python counterpart
+    (ttk combobox popdowns and other Tcl-created windows). Resolve those to a
+    widget, or None when the window is unknown to this interpreter.
+    """
+    if isinstance(target, tk.Misc):
+        return target
+    if not isinstance(target, str) or not target:
+        return None
+    base = _resolution_base()
+    if base is None:
+        return None
+    try:
+        return base.nametowidget(target)
+    except (KeyError, tk.TclError):
+        return None
 
 
 def _widget_under_pointer(event: Any) -> Optional[tk.Misc]:
-    w = event.widget
+    w = _as_widget(getattr(event, "widget", None))
+    if w is None:
+        return None
     try:
         top = w.winfo_toplevel()
-        at = top.winfo_containing(event.x_root, event.y_root)
+        at = _as_widget(top.winfo_containing(event.x_root, event.y_root))
         if at is not None:
             return at
-    except tk.TclError:
+    except (KeyError, tk.TclError):
         pass
     return w
 
@@ -41,7 +79,7 @@ def _wheel_should_scroll_outer_canvas(widget: tk.Misc) -> bool:
     """False = let the widget handle wheel (or default) instead of outer canvas."""
     try:
         cls = widget.winfo_class()
-    except tk.TclError:
+    except (AttributeError, tk.TclError):
         return False
 
     if cls == "Text":
@@ -105,6 +143,10 @@ def _dispatch_linux(event: Any, direction: int) -> Optional[str]:
 
 
 def _install_on_root(root: tk.Misc) -> None:
+    global _root
+
+    if _root is None:
+        _root = root
     if getattr(root, "_amt_canvas_wheel_dispatch", False):
         return
     root._amt_canvas_wheel_dispatch = True

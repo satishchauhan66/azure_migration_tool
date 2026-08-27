@@ -9,6 +9,14 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
+try:
+    from azure.core.credentials import AccessTokenInfo
+except ImportError:  # only needed to adapt azure-identity versions without SupportsTokenInfo
+    AccessTokenInfo = None  # type: ignore[assignment, misc]
+
+# Serve cached tokens until this many seconds before expiry.
+_TOKEN_EXPIRY_BUFFER_SECONDS = 300
+
 _lock = threading.Lock()
 _credential: Optional[Any] = None
 _silent_subprocess_patched = False
@@ -77,6 +85,12 @@ class _LockedCredential:
         with self._token_lock:
             return self._inner.get_token(*scopes, **kwargs)
 
+    def get_token_info(self, *scopes: str, options: Optional[Any] = None) -> Any:
+        # azure-core calls this in preference to get_token whenever it exists, so it must be
+        # serialized too or concurrent callers each start their own interactive sign-in.
+        with self._token_lock:
+            return self._inner.get_token_info(*scopes, options=options)
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
@@ -84,12 +98,15 @@ class _LockedCredential:
 class _CachingTokenCredential:
     """Reuse access tokens in-process so CLI / PowerShell subprocesses are not spawned on every ARM call."""
 
-    __slots__ = ("_inner", "_lock", "_entries")
+    __slots__ = ("_inner", "_lock", "_entries", "_info_entries")
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
         self._lock = threading.Lock()
         self._entries: Dict[Tuple[Tuple[str, ...], Optional[str]], Tuple[float, Any]] = {}
+        self._info_entries: Dict[
+            Tuple[Tuple[str, ...], Optional[str], bool], Tuple[float, Any]
+        ] = {}
 
     def get_token(self, *scopes: str, **kwargs: Any) -> Any:
         tenant_id = kwargs.get("tenant_id")
@@ -99,12 +116,50 @@ class _CachingTokenCredential:
             hit = self._entries.get(key)
             if hit is not None:
                 expires_on, tok = hit
-                if now < expires_on - 300:
+                if now < expires_on - _TOKEN_EXPIRY_BUFFER_SECONDS:
                     return tok
             tok = self._inner.get_token(*scopes, **kwargs)
             exp = float(tok.expires_on)
             self._entries[key] = (exp, tok)
             return tok
+
+    def get_token_info(self, *scopes: str, options: Optional[Any] = None) -> Any:
+        """Cache this as well as get_token: azure-core prefers it, so leaving it uncached
+        makes every storage/ARM request re-run the whole credential chain."""
+        opts = options if isinstance(options, dict) else {}
+        if opts.get("claims"):
+            # A claims challenge must be answered with a newly minted token, never a cached one.
+            return self._request_token_info(scopes, options)
+
+        tenant_id = opts.get("tenant_id")
+        key = (
+            tuple(scopes),
+            tenant_id if isinstance(tenant_id, str) else None,
+            bool(opts.get("enable_cae")),
+        )
+        now = time.time()
+        with self._lock:
+            hit = self._info_entries.get(key)
+            if hit is not None:
+                expires_on, info = hit
+                if now < expires_on - _TOKEN_EXPIRY_BUFFER_SECONDS:
+                    return info
+            info = self._request_token_info(scopes, options)
+            self._info_entries[key] = (float(info.expires_on), info)
+            return info
+
+    def _request_token_info(self, scopes: Tuple[str, ...], options: Optional[Any]) -> Any:
+        inner_get_token_info = getattr(self._inner, "get_token_info", None)
+        if inner_get_token_info is not None:
+            return inner_get_token_info(*scopes, options=options)
+        if AccessTokenInfo is None:
+            raise AttributeError("get_token_info is unavailable: azure-core is not installed")
+        opts = options if isinstance(options, dict) else {}
+        kwargs: Dict[str, Any] = {}
+        if isinstance(opts.get("tenant_id"), str):
+            kwargs["tenant_id"] = opts["tenant_id"]
+        token = self._inner.get_token(*scopes, **kwargs)
+        return AccessTokenInfo(token.token, token.expires_on)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)

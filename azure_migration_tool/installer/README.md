@@ -70,7 +70,7 @@ This checks that the exe exists and then runs `makensis` for you.
 
 You must have **NSIS** installed (e.g. from https://nsis.sourceforge.io/ or `choco install nsis -y` as Administrator) to produce `AzureMigrationTool_Setup.exe`.
 
-**DB2 JDBC:** Place `db2jcc4.jar` in `azure_migration_tool/drivers/` before running `python build_exe.py`. The exe will then contain the JDBC driver; no separate step in the installer is needed.
+**DB2 JDBC:** Bundled inside the exe. `build_exe.py` and `build_installer.ps1` fetch `db2jcc4.jar` into `drivers/` at **build time** and PyInstaller embeds it. Target PCs do **not** download the driver. Optional helper: `.\installer\download_db2_jdbc.ps1`. Also use `-IncludeJava` so Java is in the setup for JDBC.
 
 ## Notes
 

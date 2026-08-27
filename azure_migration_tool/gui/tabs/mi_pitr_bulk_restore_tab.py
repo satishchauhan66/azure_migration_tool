@@ -8,7 +8,6 @@ Select multiple databases on one source MI and restore them sequentially to one 
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from pathlib import Path
@@ -44,7 +43,9 @@ try:
         managed_database_id,
         normalize_restore_point_in_time,
         poll_async_operation,
+        resolve_restore_point_in_time,
         start_point_in_time_restore,
+        AUTO_RESTORE_POINT_KEYWORDS,
     )
 except ImportError:
     from azure_migration_tool.src.azure_mgmt.mi_pitr_restore import (
@@ -57,7 +58,9 @@ except ImportError:
         managed_database_id,
         normalize_restore_point_in_time,
         poll_async_operation,
+        resolve_restore_point_in_time,
         start_point_in_time_restore,
+        AUTO_RESTORE_POINT_KEYWORDS,
     )
 
 try:
@@ -282,13 +285,16 @@ class MiPitrBulkRestoreTab:
 
         opts = ttk.LabelFrame(scrollable, text="Restore options", padding=10)
         opts.pack(fill=tk.X, padx=10, pady=8)
-        self.restore_time_var = tk.StringVar(
-            value=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:00")
-        )
+        self.restore_time_var = tk.StringVar(value="latest")
         self.poll_sec_var = tk.StringVar(value="15")
         self.timeout_sec_var = tk.StringVar(value="7200")
         self.continue_on_error_var = tk.BooleanVar(value=True)
-        self._grid_entry_row(opts, 0, "Restore point (UTC if no offset)", self.restore_time_var)
+        self._grid_entry_row(
+            opts,
+            0,
+            "Restore point ('latest', or UTC if no offset)",
+            self.restore_time_var,
+        )
         self._grid_entry_row(opts, 1, "Poll interval (seconds)", self.poll_sec_var)
         self._grid_entry_row(opts, 2, "Max wait per database (seconds)", self.timeout_sec_var)
         ttk.Checkbutton(
@@ -754,6 +760,16 @@ class MiPitrBulkRestoreTab:
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _on_tgt_mi_changed(self) -> None:
+        """Target managed instance is the last field in the chain: nothing downstream to load."""
+        self.tgt_mi_cb.restore_full_suggestions()
+        mi_i = self._tgt_mi_index_from_label(self.tgt_mi_cb.get())
+        if mi_i < 0 or mi_i >= len(self._tgt_mis):
+            return
+        mi = self._tgt_mis[mi_i]
+        loc = (mi.get("location") or "").strip()
+        self._log(f"Target managed instance: {mi.get('name', '')}" + (f" ({loc})" if loc else ""))
+
     def _copy_source_to_target(self) -> None:
         if self._busy:
             return
@@ -994,10 +1010,14 @@ class MiPitrBulkRestoreTab:
             messagebox.showerror("Invalid number", "Poll interval and max wait must be numbers.")
             return
 
-        rp, rp_err = normalize_restore_point_in_time(rp_raw)
-        if rp_err or not rp:
-            messagebox.showerror("Restore time", rp_err or "Invalid restore time.")
-            return
+        # An explicit timestamp is validated now so typos surface before any Azure work;
+        # the point actually used is resolved per database once the restore window is known.
+        rp_is_auto = rp_raw.lower() in AUTO_RESTORE_POINT_KEYWORDS
+        if not rp_is_auto:
+            _, rp_err = normalize_restore_point_in_time(rp_raw)
+            if rp_err:
+                messagebox.showerror("Restore time", rp_err)
+                return
 
         continue_on_error = self.continue_on_error_var.get()
 
@@ -1041,7 +1061,14 @@ class MiPitrBulkRestoreTab:
             self.frame.after(0, lambda: self._set_busy(True))
             self.frame.after(0, lambda: self._log("=" * 60))
             self.frame.after(0, lambda: self._log(f"Starting bulk MI PITR restore for {len(pairs)} database(s)…"))
-            self.frame.after(0, lambda: self._log(f"Restore point (UTC): {rp}"))
+            self.frame.after(
+                0,
+                lambda: self._log(
+                    "Restore point: latest available (resolved per database)"
+                    if rp_is_auto
+                    else f"Restore point requested (UTC): {rp_raw}"
+                ),
+            )
 
             success_count = 0
             fail_count = 0
@@ -1062,6 +1089,20 @@ class MiPitrBulkRestoreTab:
                 for idx, (src_db, tgt_db) in enumerate(pairs, 1):
                     self.frame.after(0, lambda i=idx, s=src_db, t=tgt_db: self._log(f"\n[{i}/{len(pairs)}] {s} → {t}"))
                     self.frame.after(0, lambda: self._log("-" * 40))
+
+                    rp, rp_resolve_err = resolve_restore_point_in_time(
+                        cred,
+                        source_database_arm_id=managed_database_id(src_sub, src_rg, src_mi, src_db),
+                        requested=rp_raw,
+                        log=plog,
+                    )
+                    if rp_resolve_err or not rp:
+                        plog(f"[X] {rp_resolve_err or 'Could not determine a restore point.'}")
+                        fail_count += 1
+                        if not continue_on_error:
+                            self.frame.after(0, lambda: self._log("[X] Stopping bulk restore (continue on error is off)."))
+                            break
+                        continue
 
                     ok = self._restore_one_database(
                         cred,

@@ -11,6 +11,7 @@ from gui.tabs.data_validation_tab import DataValidationTab
 from gui.tabs.schema_validation_tab import SchemaValidationTab
 from gui.tabs.adf_trigger_tab import ADFTriggerTab
 from gui.tabs.mi_pitr_restore_tab import MiPitrRestoreTab
+from gui.tabs.bcp_tab import BcpTab
 from gui.tabs.legacy_data_validation_tab import LegacyDataValidationTab
 from gui.tabs.legacy_schema_validation_tab import LegacySchemaValidationTab
 
@@ -24,6 +25,7 @@ __all__ = [
     "SchemaValidationTab",
     "ADFTriggerTab",
     "MiPitrRestoreTab",
+    "BcpTab",
     "LegacyDataValidationTab",
     "LegacySchemaValidationTab",
 ]

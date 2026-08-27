@@ -25,6 +25,41 @@ def print_header(text):
     print("=" * 60)
 
 
+def ensure_bundled_db2_jdbc(drivers_dir: Path) -> bool:
+    """
+    Ensure drivers/db2jcc4.jar exists for PyInstaller bundling.
+    Downloads once at build time into drivers/ (never at end-user runtime).
+    """
+    drivers_dir.mkdir(parents=True, exist_ok=True)
+    jar_path = drivers_dir / "db2jcc4.jar"
+    if jar_path.is_file() and jar_path.stat().st_size > 1_000_000:
+        return True
+
+    url = "https://repo1.maven.org/maven2/com/ibm/db2/jcc/11.5.9.0/jcc-11.5.9.0.jar"
+    print(f"  Fetching DB2 JDBC driver for embed (build-time only)...")
+    print(f"  {url}")
+    try:
+        import ssl
+        import urllib.request
+
+        ssl_context = ssl.create_default_context()
+        # Corporate proxies sometimes break cert chains during build
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(url, context=ssl_context, timeout=120) as response:
+            data = response.read()
+        jar_path.write_bytes(data)
+        if jar_path.is_file() and jar_path.stat().st_size > 1_000_000:
+            print(f"  [OK] Embedded driver ready: {jar_path} ({jar_path.stat().st_size / 1024 / 1024:.1f} MB)")
+            return True
+        print("  [FAIL] Downloaded jar looks too small")
+        return False
+    except Exception as ex:
+        print(f"  [FAIL] Could not fetch db2jcc4.jar: {ex}")
+        print(f"  Place db2jcc4.jar manually in: {drivers_dir}")
+        return False
+
+
 def _write_ico_from_png(png_path: Path, ico_path: Path, app_dir: Path) -> bool:
     """Create a multi-resolution Windows .ico from a PNG (needs Pillow)."""
     try:
@@ -109,6 +144,10 @@ def build_pyinstaller(app_dir: Path, console: bool = False) -> bool:
     datas_list = []
     
     # Add drivers folder (includes db2jcc4.jar for DB2 connections)
+    db2_jar = drivers_dir / 'db2jcc4.jar'
+    if not db2_jar.is_file() or db2_jar.stat().st_size < 1_000_000:
+        print("  [FAIL] drivers/db2jcc4.jar missing — cannot bundle DB2 JDBC driver")
+        return False
     if drivers_dir.exists():
         datas_list.append((str(drivers_dir), 'drivers'))
 
@@ -355,18 +394,24 @@ def main():
             spec_file.unlink()
             print("  Removed AzureMigrationTool.spec")
     
-    # Check drivers
+    # Check / embed drivers (build-time only — runtime never downloads)
     print("\nChecking bundled drivers...")
     drivers_dir.mkdir(exist_ok=True)
-    
+
     db2_jar = drivers_dir / 'db2jcc4.jar'
-    if db2_jar.exists():
+    if not db2_jar.exists() or db2_jar.stat().st_size < 1_000_000:
+        if not ensure_bundled_db2_jdbc(drivers_dir):
+            print("\n[FAIL] db2jcc4.jar is required to build the exe.")
+            print(f"  Place it in: {drivers_dir}")
+            print("  Or run: .\\installer\\download_db2_jdbc.ps1")
+            return 1
+    if db2_jar.exists() and db2_jar.stat().st_size >= 1_000_000:
         size = db2_jar.stat().st_size / (1024 * 1024)
-        print(f"  [OK] db2jcc4.jar ({size:.1f} MB)")
+        print(f"  [OK] db2jcc4.jar ({size:.1f} MB) — will be embedded in exe")
     else:
-        print(f"  [MISSING] db2jcc4.jar - DB2 connections won't work")
-        print(f"  Place it in: {drivers_dir}")
-    
+        print("\n[FAIL] db2jcc4.jar missing or too small after fetch attempt.")
+        print(f"  Expected: {db2_jar}")
+        return 1
     # Build
     print_header("Building Executable")
     if not build_pyinstaller(app_dir, args.debug):

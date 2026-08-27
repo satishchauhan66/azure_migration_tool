@@ -8,7 +8,6 @@ Subscription / resource group / MI / database are picked from Azure ARM list API
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from pathlib import Path
@@ -31,7 +30,9 @@ try:
         managed_database_id,
         normalize_restore_point_in_time,
         poll_async_operation,
+        resolve_restore_point_in_time,
         start_point_in_time_restore,
+        AUTO_RESTORE_POINT_KEYWORDS,
     )
 except ImportError:
     from azure_migration_tool.src.azure_mgmt.mi_pitr_restore import (
@@ -44,7 +45,9 @@ except ImportError:
         managed_database_id,
         normalize_restore_point_in_time,
         poll_async_operation,
+        resolve_restore_point_in_time,
         start_point_in_time_restore,
+        AUTO_RESTORE_POINT_KEYWORDS,
     )
 
 try:
@@ -452,12 +455,15 @@ class MiPitrRestoreTab:
 
         opts = ttk.LabelFrame(scrollable, text="Restore options", padding=10)
         opts.pack(fill=tk.X, padx=10, pady=8)
-        self.restore_time_var = tk.StringVar(
-            value=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:00")
-        )
+        self.restore_time_var = tk.StringVar(value="latest")
         self.poll_sec_var = tk.StringVar(value="15")
         self.timeout_sec_var = tk.StringVar(value="7200")
-        self._grid_entry_row(opts, 0, "Restore point (UTC if no offset)", self.restore_time_var)
+        self._grid_entry_row(
+            opts,
+            0,
+            "Restore point ('latest', or UTC if no offset)",
+            self.restore_time_var,
+        )
         self._grid_entry_row(opts, 1, "Poll interval (seconds)", self.poll_sec_var)
         self._grid_entry_row(opts, 2, "Max wait (seconds)", self.timeout_sec_var)
         opts.columnconfigure(1, weight=1)
@@ -939,10 +945,13 @@ class MiPitrRestoreTab:
             messagebox.showerror("Invalid number", "Poll interval and max wait must be numbers.")
             return
 
-        rp, rp_err = normalize_restore_point_in_time(rp_raw)
-        if rp_err or not rp:
-            messagebox.showerror("Restore time", rp_err or "Invalid restore time.")
-            return
+        # An explicit timestamp is validated now so typos surface before any Azure work;
+        # the point actually used is resolved once the source restore window is known.
+        if rp_raw.lower() not in AUTO_RESTORE_POINT_KEYWORDS:
+            _, rp_err = normalize_restore_point_in_time(rp_raw)
+            if rp_err:
+                messagebox.showerror("Restore time", rp_err)
+                return
 
         source_arm = managed_database_id(src_sub, src_rg, src_mi, src_db)
 
@@ -983,13 +992,26 @@ class MiPitrRestoreTab:
             self.frame.after(0, lambda: self._log("=" * 60))
             self.frame.after(0, lambda: self._log("Starting MI PITR restore (ARM)…"))
             self.frame.after(0, lambda: self._log(f"Source database ARM ID:\n{source_arm}"))
-            self.frame.after(0, lambda: self._log(f"Restore point (UTC): {rp}"))
+            self.frame.after(0, lambda: self._log(f"Restore point requested: {rp_raw or 'latest'}"))
 
             def plog(m: str) -> None:
                 self.frame.after(0, lambda p=m: self._log(p))
 
             try:
                 cred = get_shared_azure_credential(self._cred_log)
+                rp, rp_resolve_err = resolve_restore_point_in_time(
+                    cred,
+                    source_database_arm_id=source_arm,
+                    requested=rp_raw,
+                    log=plog,
+                )
+                if rp_resolve_err or not rp:
+                    msg = rp_resolve_err or "Could not determine a restore point."
+                    self.frame.after(0, lambda: self._log(f"[X] {msg}"))
+                    self.frame.after(0, lambda: messagebox.showerror("Restore time", msg))
+                    return
+                self.frame.after(0, lambda: self._log(f"Restore point (UTC): {rp}"))
+
                 loc, err = get_managed_instance_location(cred, tgt_sub, tgt_rg, tgt_mi)
                 if err or not loc:
                     self.frame.after(0, lambda: self._log(f"[X] Could not read target MI: {err}"))

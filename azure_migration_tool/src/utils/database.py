@@ -6,7 +6,8 @@ import os
 import sys
 import logging
 import struct
-from typing import Optional, Tuple, Dict, Any
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any, List
 
 import pyodbc
 
@@ -433,6 +434,28 @@ def connect_to_database(
                 logger.warning(f"Could not get cached MSAL token for {user}: {e}, falling back to interactive auth")
                 logger.debug(f"Token fetch exception details: {type(e).__name__}: {e}", exc_info=True)
         
+        # An existing `az login` session is fully silent and survives restarts, so prefer it
+        # over any interactive flow. Skipped automatically when the CLI is absent.
+        try:
+            from azure_token_cache import get_token_via_azure_cli
+
+            cli_token = get_token_via_azure_cli()
+        except Exception as cli_err:
+            cli_token = None
+            if logger:
+                logger.debug(f"Azure CLI token unavailable: {cli_err}")
+        if cli_token:
+            token_bytes = cli_token.encode("utf-16-le")
+            token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+            try:
+                conn = pyodbc.connect(base, timeout=timeout, attrs_before={1256: token_struct})
+                if logger:
+                    logger.info("Connected using Azure CLI session token via SQL_COPT_SS_ACCESS_TOKEN")
+                return conn
+            except Exception as cli_conn_err:
+                if logger:
+                    logger.debug(f"Azure CLI token rejected by SQL, continuing: {cli_conn_err}")
+
         # SSMS-style sign-in: try the Windows WAM broker first (registered/compliant device +
         # SQL tooling app id) so Conditional Access policies that block a plain browser sign-in
         # (AADSTS53003) are satisfied. Pass the resulting token via SQL_COPT_SS_ACCESS_TOKEN.
@@ -626,76 +649,80 @@ def build_conn_str_and_token(
     raise ValueError(f"Unknown auth type '{auth}'. Use: entra_mfa | entra_password | sql | windows")
 
 
+def _db2_jdbc_search_roots() -> List[Path]:
+    """Locations that may contain a bundled db2jcc4.jar (no network download)."""
+    roots: List[Path] = []
+    env = (os.environ.get("DB2_JDBC_DRIVER_PATH") or "").strip()
+    if env:
+        p = Path(env)
+        roots.append(p if p.suffix.lower() == ".jar" else p)
+
+    # PyInstaller onefile/onedir bundle
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.append(Path(meipass) / "drivers")
+        roots.append(Path(meipass) / "jdbc_drivers")
+
+    # Next to frozen exe
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        roots.append(exe_dir / "drivers")
+        roots.append(exe_dir)
+
+    # Package / source layouts
+    pkg_root = Path(__file__).resolve().parent.parent.parent  # azure_migration_tool/
+    roots.extend(
+        [
+            pkg_root / "drivers",
+            pkg_root / "jdbc_drivers",
+            Path.cwd() / "drivers",
+            Path.cwd() / "jdbc_drivers",
+            Path(r"C:\Program Files\IBM\SQLLIB\java"),
+            Path(r"C:\IBM\SQLLIB\java"),
+        ]
+    )
+    # Dedupe while preserving order
+    seen = set()
+    out: List[Path] = []
+    for r in roots:
+        key = str(r).lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
 def ensure_db2_jdbc_driver(logger: Optional[logging.Logger] = None) -> Optional[str]:
     """
-    Ensure DB2 JDBC driver is available, downloading if necessary.
-    
-    Returns:
-        Path to the JDBC jar file, or None if not available
+    Locate the bundled DB2 JDBC driver (db2jcc4.jar / jcc.jar).
+
+    The jar must be embedded at build time under ``drivers/`` (exe / setup).
+    This function does **not** download anything at runtime.
     """
-    from pathlib import Path
-    
-    # Look for JDBC driver in common locations
-    jdbc_jars = ["db2jcc4.jar", "db2jcc.jar", "jcc.jar"]
-    search_paths = [
-        Path(__file__).parent.parent.parent / "jdbc_drivers",  # Project jdbc_drivers folder
-        Path.cwd() / "jdbc_drivers",
-        Path.home() / ".db2" / "java",
-        Path(r"C:\Program Files\IBM\SQLLIB\java"),
-        Path(r"C:\IBM\SQLLIB\java"),
-    ]
-    
-    # Check existing paths
-    for search_path in search_paths:
-        for jar in jdbc_jars:
-            candidate = search_path / jar
-            if candidate.exists():
+    jdbc_jars = ("db2jcc4.jar", "db2jcc.jar", "jcc.jar")
+
+    for root in _db2_jdbc_search_roots():
+        try:
+            if root.is_file() and root.suffix.lower() == ".jar":
                 if logger:
-                    logger.debug(f"Found JDBC driver: {candidate}")
-                return str(candidate)
-    
-    # Not found - try to download
-    jdbc_dir = search_paths[0]  # Use project jdbc_drivers folder
-    jdbc_dir.mkdir(parents=True, exist_ok=True)
-    jar_path = jdbc_dir / "db2jcc4.jar"
-    
+                    logger.debug(f"Found JDBC driver: {root}")
+                return str(root)
+            if not root.is_dir():
+                continue
+            for jar in jdbc_jars:
+                candidate = root / jar
+                if candidate.is_file():
+                    if logger:
+                        logger.debug(f"Found JDBC driver: {candidate}")
+                    return str(candidate)
+        except Exception:
+            continue
+
     if logger:
-        logger.info(f"DB2 JDBC driver not found. Downloading to {jar_path}...")
-    else:
-        print(f"DB2 JDBC driver not found. Downloading to {jar_path}...")
-    
-    # Download from Maven Central
-    url = "https://repo1.maven.org/maven2/com/ibm/db2/jcc/11.5.9.0/jcc-11.5.9.0.jar"
-    
-    try:
-        import ssl
-        import urllib.request
-        
-        # Create context that doesn't verify SSL (some corporate networks have issues)
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        
-        if logger:
-            logger.debug(f"Downloading from {url}...")
-        
-        with urllib.request.urlopen(url, context=ssl_context, timeout=60) as response:
-            data = response.read()
-            with open(jar_path, 'wb') as f:
-                f.write(data)
-        
-        if jar_path.exists():
-            if logger:
-                logger.info(f"Successfully downloaded DB2 JDBC driver: {jar_path}")
-            else:
-                print(f"Successfully downloaded DB2 JDBC driver: {jar_path}")
-            return str(jar_path)
-    except Exception as e:
-        if logger:
-            logger.error(f"Failed to download DB2 JDBC driver: {e}")
-        else:
-            print(f"Failed to download DB2 JDBC driver: {e}")
-    
+        logger.error(
+            "DB2 JDBC driver not found. Rebuild the exe/setup with drivers/db2jcc4.jar bundled "
+            "(run build_exe.py — it embeds the jar at build time)."
+        )
     return None
 
 
@@ -710,11 +737,10 @@ def connect_to_db2_jdbc(
 ):
     """
     Connect to DB2 database using JDBC (JayDeBeApi).
-    
-    This is an alternative to ODBC that works better when ODBC driver is not available.
-    Requires: jaydebeapi, jpype1 packages and Java JRE installed.
-    Auto-downloads the JDBC driver if not found.
-    
+
+    Requires: jaydebeapi, jpype1, Java JRE, and a bundled ``drivers/db2jcc4.jar``
+    (no runtime download).
+
     Args:
         host: DB2 server hostname
         port: DB2 server port (typically 50000)
@@ -723,10 +749,10 @@ def connect_to_db2_jdbc(
         password: Password
         timeout: Connection timeout in seconds
         logger: Optional logger for debug messages
-    
+
     Returns:
         JayDeBeApi connection object (DB-API 2.0 compatible)
-    
+
     Raises:
         ImportError: If jaydebeapi or jpype1 not installed
         RuntimeError: If JDBC driver not found or connection fails
@@ -739,33 +765,36 @@ def connect_to_db2_jdbc(
         if logger:
             logger.error(error_msg)
         raise ImportError(error_msg)
-    
-    # Ensure JDBC driver is available (auto-download if needed)
+
     jar_path = ensure_db2_jdbc_driver(logger)
-    
+
     if not jar_path:
-        error_msg = "DB2 JDBC driver not found and could not be downloaded."
+        error_msg = (
+            "DB2 JDBC driver (db2jcc4.jar) is not bundled with this build. "
+            "Use an installer/exe built with drivers/db2jcc4.jar embedded, "
+            "or set DB2_JDBC_DRIVER_PATH to the jar path."
+        )
         if logger:
             logger.error(error_msg)
         raise RuntimeError(error_msg)
-    
+
     if logger:
         logger.debug(f"Using JDBC driver: {jar_path}")
-    
+
     # JDBC connection URL
     jdbc_url = f"jdbc:db2://{host}:{port}/{database}"
-    
+
     if logger:
         logger.debug(f"JDBC URL: {jdbc_url}")
         logger.debug(f"Connecting as user: {user}")
-    
+
     try:
         # Start JVM if not already started
         if not jpype.isJVMStarted():
             if logger:
                 logger.debug("Starting JVM...")
             jpype.startJVM(classpath=[jar_path])
-        
+
         # Connect
         if logger:
             logger.debug("Attempting JDBC connection...")
@@ -775,12 +804,14 @@ def connect_to_db2_jdbc(
             [user, password],
             jar_path
         )
-        
+        # Leave autocommit ON by default so short connect/probe/close paths work.
+        # Long extracts call _prepare_db2_jdbc_conn() to disable autocommit when needed.
+
         if logger:
             logger.info(f"Successfully connected to DB2: {host}:{port}/{database}")
-        
+
         return conn
-        
+
     except Exception as e:
         error_details = str(e)
         if logger:

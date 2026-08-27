@@ -211,14 +211,11 @@ tmp/
 Thumbs.db
 desktop.ini
 
-# JDBC drivers (large binary files - keep in drivers/ but don't track)
-# Uncomment if you don't want to track the jar file:
-# drivers/*.jar
-
-# Keep drivers folder but ignore contents except README
-# !drivers/
-# drivers/*
-# !drivers/README.txt
+# JDBC drivers — not committed; build fetches into drivers/ before compile (see build_exe.py)
+# Local dev: run installer/download_db2_jdbc.ps1 once, or python build_exe.py (auto-fetch).
+**/drivers/*.jar
+!**/drivers/README.txt
+!**/drivers/.gitkeep
 
 # App output / migration runs (tool creates these at runtime)
 /azure_migration_tool/migration_runs
@@ -227,6 +224,16 @@ azure_migration_tool/migration_runs
 azure_migration_tool/migrations
 migration_runs/
 migrations/
+
+# BCP runtime work dirs (pipe files, format files, smoke reports, temp samples)
+**/bcp_work/
+bcp_work/
+
+# BCP / DB2 extract artifacts (when written outside bcp_work)
+*.bcp.txt
+*.bcp.err
+*.bcp.txt.err
+*.del
 
 # IDENTITY (CDC) generated SQL/state (per project or cwd)
 identity_cdc_runs/

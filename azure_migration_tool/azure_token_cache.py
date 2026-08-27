@@ -9,9 +9,10 @@ It authenticates once and caches the token locally for reuse across all database
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional, Dict
+from typing import Any, Callable, Optional, Dict, Tuple
 from datetime import datetime, timezone
 
 try:
@@ -35,22 +36,45 @@ DEFAULT_AZURE_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"  # Microsoft Az
 AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", DEFAULT_AZURE_CLIENT_ID)
 
 
+# Tokens are reused in-process until 5 minutes before expiry so a migration that opens
+# many connections does not re-enter MSAL (or re-spawn `az`) for every one of them.
+_TOKEN_EXPIRY_BUFFER_SECONDS = 300
+
+_cli_lock = threading.Lock()
+_cli_credential: Optional[Any] = None
+_cli_token_cache: Dict[str, Tuple[float, str]] = {}
+
+
 def get_token_via_azure_cli(scope: str = SQL_DATABASE_SCOPE) -> Optional[str]:
     """Get a SQL access token from an existing ``az login`` session (no prompt).
 
     Returns the access token string, or None if Azure CLI is not installed / not signed in.
     This is the most reliable way to avoid repeated MFA prompts: sign in once with
     ``az login`` and every connection reuses (and silently refreshes) that session.
+
+    The credential and its tokens are cached, so ``az`` is not spawned per connection.
     """
-    try:
-        from azure.identity import AzureCliCredential
-    except ImportError:
-        return None
-    try:
-        cred = AzureCliCredential()
-        return cred.get_token(scope).token
-    except Exception:
-        return None
+    global _cli_credential
+
+    now = time.time()
+    with _cli_lock:
+        hit = _cli_token_cache.get(scope)
+        if hit is not None and now < hit[0] - _TOKEN_EXPIRY_BUFFER_SECONDS:
+            return hit[1]
+        try:
+            from azure.identity import AzureCliCredential
+        except ImportError:
+            return None
+        try:
+            if _cli_credential is None:
+                _cli_credential = AzureCliCredential()
+            token = _cli_credential.get_token(scope)
+        except Exception:
+            return None
+        if token and token.token:
+            _cli_token_cache[scope] = (float(token.expires_on), token.token)
+            return token.token
+    return None
 
 
 # Public client id used by the SQL Server tooling / drivers (SSMS, ODBC, ADO.NET) for
@@ -72,6 +96,74 @@ def _foreground_window_handle() -> int:
         return 0
 
 
+# Persistent MSAL cache name for SQL tokens. Kept separate from the management-plane
+# cache ("azure_migration_tool") because this uses the SQL tooling app id and scope.
+_SQL_TOKEN_CACHE_NAME = "azure_migration_tool_sql"
+
+# Bound the interactive wait so a sign-in the user never completes cannot hang the app
+# forever (the library default is 300s).
+_BROKER_INTERACTIVE_TIMEOUT_SECONDS = 180
+
+_broker_lock = threading.Lock()
+_broker_credentials: Dict[Tuple[Optional[str], Optional[str]], Any] = {}
+_broker_token_cache: Dict[Tuple[Optional[str], Optional[str]], Tuple[float, str]] = {}
+
+
+def _sql_cache_persistence_options() -> Optional[Any]:
+    """Persistent, encrypted token cache so sign-in survives restarts (None if unsupported)."""
+    try:
+        from azure.identity import TokenCachePersistenceOptions
+    except ImportError:
+        return None
+    try:
+        return TokenCachePersistenceOptions(name=_SQL_TOKEN_CACHE_NAME)
+    except TypeError:
+        return None
+
+
+def _get_broker_credential(username: Optional[str], tenant_id: Optional[str]) -> Any:
+    """Build (once per account) a broker credential backed by the persistent token cache."""
+    key = (username or None, tenant_id or None)
+    existing = _broker_credentials.get(key)
+    if existing is not None:
+        return existing
+
+    from azure.identity.broker import InteractiveBrowserBrokerCredential
+
+    # IMPORTANT: only ever use the SQL tooling app id (like SSMS/ODBC). We must NOT fall back
+    # to the library default client id, which is the "Microsoft Azure CLI" app that
+    # Conditional Access commonly blocks (AADSTS53003).
+    kwargs: Dict[str, Any] = {
+        "client_id": SQL_TOOLS_CLIENT_ID,
+        "parent_window_handle": _foreground_window_handle(),
+        "additionally_allowed_tenants": ["*"],
+        "use_default_broker_account": True,
+        "timeout": _BROKER_INTERACTIVE_TIMEOUT_SECONDS,
+    }
+    options = _sql_cache_persistence_options()
+    if options is not None:
+        kwargs["cache_persistence_options"] = options
+    if username:
+        kwargs["login_hint"] = username
+    if tenant_id:
+        kwargs["tenant_id"] = tenant_id
+
+    try:
+        credential = InteractiveBrowserBrokerCredential(**kwargs)
+    except TypeError:
+        for optional_kwarg in (
+            "timeout",
+            "cache_persistence_options",
+            "login_hint",
+            "use_default_broker_account",
+        ):
+            kwargs.pop(optional_kwarg, None)
+        credential = InteractiveBrowserBrokerCredential(**kwargs)
+
+    _broker_credentials[key] = credential
+    return credential
+
+
 def get_sql_token_via_broker(
     username: Optional[str] = None,
     tenant_id: Optional[str] = None,
@@ -85,34 +177,38 @@ def get_sql_token_via_broker(
     that require a managed device are satisfied. We also use the SQL tooling app id so the
     application identity matches SSMS. Returns None (silently) if the broker isn't available;
     callers should then fall back to the ODBC driver's ActiveDirectoryInteractive.
+
+    The credential is reused and its cache persisted, so the user is prompted once rather
+    than once per connection. The lock also stops concurrent threads from each raising their
+    own sign-in window.
     """
     log = log or (lambda _m: None)
-    try:
-        from azure.identity.broker import InteractiveBrowserBrokerCredential
-    except ImportError:
-        return None
+    key = (username or None, tenant_id or None)
+    now = time.time()
 
-    hwnd = _foreground_window_handle()
-    # IMPORTANT: only ever use the SQL tooling app id (like SSMS/ODBC). We must NOT fall back
-    # to the library default client id, which is the "Microsoft Azure CLI" app that
-    # Conditional Access commonly blocks (AADSTS53003).
-    try:
-        kwargs: Dict[str, Any] = {
-            "client_id": SQL_TOOLS_CLIENT_ID,
-            "parent_window_handle": hwnd,
-            "additionally_allowed_tenants": ["*"],
-            "use_default_broker_account": True,
-        }
-        if tenant_id:
-            kwargs["tenant_id"] = tenant_id
-        cred = InteractiveBrowserBrokerCredential(**kwargs)
-        token = cred.get_token(SQL_DATABASE_SCOPE)
+    with _broker_lock:
+        hit = _broker_token_cache.get(key)
+        if hit is not None and now < hit[0] - _TOKEN_EXPIRY_BUFFER_SECONDS:
+            return hit[1]
+        try:
+            credential = _get_broker_credential(username, tenant_id)
+        except ImportError:
+            return None
+        except Exception as e:
+            log(f"(broker sign-in unavailable: {e})")
+            return None
+        try:
+            token = credential.get_token(SQL_DATABASE_SCOPE)
+        except Exception as e:
+            # Drop the credential so the next attempt rebuilds it with a current window handle.
+            _broker_credentials.pop(key, None)
+            # Fail quietly so callers fall back to the ODBC driver's ActiveDirectoryInteractive
+            # (which also uses the SQL tooling app id) rather than the blocked Azure CLI app.
+            log(f"(broker sign-in unavailable: {e})")
+            return None
         if token and token.token:
+            _broker_token_cache[key] = (float(token.expires_on), token.token)
             return token.token
-    except Exception as e:
-        # Fail quietly so callers fall back to the ODBC driver's ActiveDirectoryInteractive
-        # (which also uses the SQL tooling app id) rather than the blocked Azure CLI app.
-        log(f"(broker sign-in unavailable: {e})")
     return None
 
 
