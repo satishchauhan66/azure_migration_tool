@@ -82,3 +82,77 @@ def physical_dest_schema_table(
     if ss.upper() == rf:
         return rt, tn
     return ss, tn
+
+
+def resolve_src_dest_table(
+    table_spec: str,
+    *,
+    src_is_db2: bool = False,
+    default_src_schema: str = "",
+    remap_enabled: bool = False,
+    remap_from: str = "",
+    remap_to: str = "dbo",
+) -> Tuple[str, str, str, str]:
+    """
+    Resolve (src_schema, table_name, dest_schema, dest_table) from a user table spec.
+
+    Fixes DB2 validation errors like SQLCODE=-204 on dbo.TABLE when the user enters
+    a bare table name or an Azure-style dbo.TABLE while the object lives under a
+    DB2 schema (often the userid / configured source schema).
+    """
+    spec = (table_spec or "").strip()
+    if not spec:
+        raise ValueError("table_spec is required")
+
+    if "." in spec:
+        entered_schema, name = spec.split(".", 1)
+        entered_schema = (entered_schema or "").strip()
+        name = (name or "").strip()
+        schema_explicit = bool(entered_schema)
+    else:
+        entered_schema = ""
+        name = spec
+        schema_explicit = False
+
+    if not name:
+        raise ValueError(f"Invalid table spec: {table_spec!r}")
+
+    rf = (remap_from or "").strip()
+    rt = ((remap_to or "").strip() or "dbo")
+    default_src = (default_src_schema or "").strip()
+    remap_on = bool(remap_enabled and rf and rt)
+
+    # User entered destination-style name (e.g. dbo.COMMENT_DATA) with remap enabled.
+    if schema_explicit and remap_on and entered_schema.upper() == rt.upper():
+        return rf, name, rt, name
+
+    # Bare name: never default DB2 source to dbo (SQL Server convention).
+    if not schema_explicit:
+        if src_is_db2:
+            src_schema = default_src or rf
+            if not src_schema:
+                raise ValueError(
+                    "DB2 table name requires a schema. Enter SCHEMA.TABLE, set Source Schema, "
+                    "or enable schema remap (source schema -> dbo)."
+                )
+        else:
+            src_schema = default_src or "dbo"
+    # Explicit dbo on a DB2 source is almost always Azure naming — reverse to real schema.
+    elif (
+        src_is_db2
+        and entered_schema.upper() == "DBO"
+        and (default_src or (remap_on and rf))
+    ):
+        src_schema = default_src or rf
+        return src_schema, name, "dbo", name
+    else:
+        src_schema = entered_schema
+
+    dest_schema, dest_name = physical_dest_schema_table(
+        src_schema,
+        name,
+        remap_enabled=remap_on,
+        remap_from=rf,
+        remap_to=rt,
+    )
+    return src_schema, name, dest_schema, dest_name

@@ -31,12 +31,27 @@ class TableInfo:
     schema: str
     name: str
     src_rows: int = 0
+    src_size_bytes: int = 0  # approximate on-disk / catalog size on source
     dest_exists: bool = False
     dest_rows: int = 0
 
     @property
     def fqn(self) -> str:
         return f"{self.schema}.{self.name}"
+
+
+def format_size_bytes(n: int) -> str:
+    """Human-readable size for UI (B / KB / MB / GB / TB)."""
+    try:
+        v = float(int(n or 0))
+    except (TypeError, ValueError):
+        return "—"
+    if v <= 0:
+        return "—"
+    for unit, div in (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if v >= div:
+            return f"{v / div:.1f} {unit}"
+    return f"{int(v)} B"
 
 
 @dataclass
@@ -136,25 +151,33 @@ def list_tables(
     *,
     logger: Optional[logging.Logger] = None,
 ) -> List[TableInfo]:
-    """List user tables with approximate row counts from a SQL Server database."""
+    """List user tables with row counts and approximate used size (SQL Server)."""
     with connect(cfg_role, logger) as conn:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT s.name, t.name,
-                   ISNULL((
-                       SELECT SUM(p.rows)
-                       FROM sys.partitions p
-                       WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)
-                   ), 0)
+            SELECT
+                s.name,
+                t.name,
+                ISNULL(SUM(CASE WHEN ps.index_id IN (0, 1)
+                                THEN CAST(ps.row_count AS BIGINT) END), 0),
+                ISNULL(SUM(CAST(ps.used_page_count AS BIGINT)), 0) * 8 * 1024
             FROM sys.tables t
             JOIN sys.schemas s ON s.schema_id = t.schema_id
+            LEFT JOIN sys.dm_db_partition_stats ps ON ps.object_id = t.object_id
             WHERE t.is_ms_shipped = 0
+            GROUP BY s.name, t.name
             ORDER BY s.name, t.name
             """
         )
         return [
-            TableInfo(schema=r[0], name=r[1], src_rows=int(r[2] or 0)) for r in cur.fetchall()
+            TableInfo(
+                schema=r[0],
+                name=r[1],
+                src_rows=int(r[2] or 0),
+                src_size_bytes=int(r[3] or 0),
+            )
+            for r in cur.fetchall()
         ]
 
 
@@ -193,6 +216,7 @@ def enrich_with_dest(
                         schema=t.schema,
                         name=t.name,
                         src_rows=t.src_rows,
+                        src_size_bytes=int(getattr(t, "src_size_bytes", 0) or 0),
                         dest_exists=True,
                         dest_rows=dest_map[key],
                     )
@@ -203,6 +227,7 @@ def enrich_with_dest(
                         schema=t.schema,
                         name=t.name,
                         src_rows=t.src_rows,
+                        src_size_bytes=int(getattr(t, "src_size_bytes", 0) or 0),
                         dest_exists=False,
                         dest_rows=0,
                     )

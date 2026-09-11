@@ -18,6 +18,7 @@ try:
     from src.migration.bcp_migration import (
         default_work_dir,
         enrich_with_dest,
+        format_size_bytes,
         list_tables,
         run_bcp_migration,
     )
@@ -38,6 +39,7 @@ except ImportError:
     from azure_migration_tool.src.migration.bcp_migration import (
         default_work_dir,
         enrich_with_dest,
+        format_size_bytes,
         list_tables,
         run_bcp_migration,
     )
@@ -293,28 +295,42 @@ class BcpTab:
 
         tree_frame = ttk.Frame(picker)
         tree_frame.pack(fill=tk.BOTH, expand=True)
-        cols = ("check", "schema", "table", "src_rows", "dest_exists", "dest_rows", "status")
+        cols = ("check", "schema", "table", "src_rows", "src_size", "dest_exists", "dest_rows", "status")
+        self._tree_col_labels = {
+            "check": "✓",
+            "schema": "Schema",
+            "table": "Table",
+            "src_rows": "Src rows",
+            "src_size": "Src size",
+            "dest_exists": "On dest?",
+            "dest_rows": "Dest rows",
+            "status": "Status",
+        }
+        self._table_sort_col: Optional[str] = "table"
+        self._table_sort_reverse = False
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=11, selectmode="browse")
-        self.tree.heading("check", text="✓")
-        self.tree.heading("schema", text="Schema")
-        self.tree.heading("table", text="Table")
-        self.tree.heading("src_rows", text="Src rows")
-        self.tree.heading("dest_exists", text="On dest?")
-        self.tree.heading("dest_rows", text="Dest rows")
-        self.tree.heading("status", text="Status")
+        for col_id, label in self._tree_col_labels.items():
+            self.tree.heading(
+                col_id,
+                text=label,
+                command=lambda c=col_id: self._sort_tables_by(c),
+            )
         self.tree.column("check", width=36, anchor=tk.CENTER, stretch=False)
-        self.tree.column("schema", width=100)
-        self.tree.column("table", width=220)
+        self.tree.column("schema", width=90)
+        self.tree.column("table", width=200)
         self.tree.column("src_rows", width=90, anchor=tk.E)
+        self.tree.column("src_size", width=80, anchor=tk.E)
         self.tree.column("dest_exists", width=70, anchor=tk.CENTER)
         self.tree.column("dest_rows", width=90, anchor=tk.E)
-        self.tree.column("status", width=140)
+        self.tree.column("status", width=120)
         ysb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=ysb.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ysb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<Button-1>", self._on_tree_click)
         self._checked: Dict[str, bool] = {}
+        self._table_status: Dict[str, str] = {}
+        self._refresh_sort_headings()
 
         # Defaults for options (advanced panel may hide most of these)
         self.create_missing_var = tk.BooleanVar(value=True)
@@ -788,8 +804,55 @@ class BcpTab:
     def _populate_tables(self, tables: List[Any]) -> None:
         self._tables = tables
         self._checked = {t.fqn: False for t in tables}
+        self._table_status = {}
         self._apply_filter()
         self._append_log(f"[OK] Loaded {len(tables)} table(s).")
+
+    def _refresh_sort_headings(self) -> None:
+        active = self._table_sort_col or ""
+        arrow = " ▼" if self._table_sort_reverse else " ▲"
+        for col_id, label in self._tree_col_labels.items():
+            text = label + (arrow if col_id == active else "")
+            self.tree.heading(
+                col_id,
+                text=text,
+                command=lambda c=col_id: self._sort_tables_by(c),
+            )
+
+    def _sort_tables_by(self, col: str) -> None:
+        if self._table_sort_col == col:
+            self._table_sort_reverse = not self._table_sort_reverse
+        else:
+            self._table_sort_col = col
+            # Numeric / size / rows: largest first feels natural; text: A→Z
+            self._table_sort_reverse = col in (
+                "src_rows",
+                "src_size",
+                "dest_rows",
+                "check",
+            )
+        self._refresh_sort_headings()
+        self._apply_filter()
+
+    def _table_sort_key(self, t: Any) -> Any:
+        col = self._table_sort_col or "table"
+        if col == "check":
+            return 1 if self._checked.get(t.fqn) else 0
+        if col == "schema":
+            return (t.schema or "").lower()
+        if col == "table":
+            return (t.name or "").lower()
+        if col == "src_rows":
+            return int(getattr(t, "src_rows", 0) or 0)
+        if col == "src_size":
+            return int(getattr(t, "src_size_bytes", 0) or 0)
+        if col == "dest_exists":
+            return 1 if t.dest_exists else 0
+        if col == "dest_rows":
+            return int(getattr(t, "dest_rows", 0) or 0) if t.dest_exists else -1
+        if col == "status":
+            return (self._table_status.get(t.fqn) or "").lower()
+        return (t.name or "").lower()
 
     def _apply_filter(self) -> None:
         for iid in self.tree.get_children():
@@ -797,6 +860,7 @@ class BcpTab:
         q = (self.filter_var.get() or "").strip().lower()
         only_missing = self.filter_missing_var.get()
         only_mismatch = self.filter_mismatch_var.get()
+        rows = []
         for t in self._tables:
             fqn = t.fqn
             if q and q not in fqn.lower():
@@ -805,7 +869,13 @@ class BcpTab:
                 continue
             if only_mismatch and not (t.dest_exists and t.src_rows != t.dest_rows):
                 continue
+            rows.append(t)
+        rows.sort(key=self._table_sort_key, reverse=self._table_sort_reverse)
+        for t in rows:
+            fqn = t.fqn
             mark = "☑" if self._checked.get(fqn) else "☐"
+            size_txt = format_size_bytes(int(getattr(t, "src_size_bytes", 0) or 0))
+            status = self._table_status.get(fqn, "")
             self.tree.insert(
                 "",
                 tk.END,
@@ -815,9 +885,10 @@ class BcpTab:
                     t.schema,
                     t.name,
                     f"{t.src_rows:,}",
+                    size_txt,
                     "Yes" if t.dest_exists else "No",
                     f"{t.dest_rows:,}" if t.dest_exists else "—",
-                    "",
+                    status,
                 ),
             )
 
@@ -1003,8 +1074,9 @@ class BcpTab:
                         messagebox.showinfo(
                             "Pre-flight",
                             "DB2 path ready.\n"
-                            "Large tables: CLP EXPORT if installed, else client extract + BCP.\n"
-                            "Small tables: JDBC extract + BCP.",
+                            "Large tables: CLP EXPORT if db2.exe is installed, else client JDBC extract + BCP.\n"
+                            "Small tables: JDBC extract + BCP.\n\n"
+                            "If CLP is missing, run installer\\check_db2_clp.ps1 for install steps.",
                         )
                     else:
                         messagebox.showerror("Pre-flight", "Blocking checks failed — see log.")
@@ -1159,10 +1231,11 @@ class BcpTab:
             def upd():
                 self.progress["value"] = done
                 self.progress_label.set(f"{done} / {total}: {table}")
+                self._table_status[table] = "running/done"
                 if table in self.tree.get_children():
                     vals = list(self.tree.item(table, "values"))
-                    if len(vals) >= 7:
-                        vals[6] = "running/done"
+                    if len(vals) >= 8:
+                        vals[7] = "running/done"
                         self.tree.item(table, values=vals)
 
             self.frame.after(0, upd)
@@ -1201,9 +1274,12 @@ class BcpTab:
                         )
                         if tr.table in self.tree.get_children():
                             vals = list(self.tree.item(tr.table, "values"))
-                            if len(vals) >= 7:
-                                vals[6] = tr.status
+                            if len(vals) >= 8:
+                                vals[7] = tr.status
                                 self.tree.item(tr.table, values=vals)
+                            self._table_status[tr.table] = tr.status
+                        else:
+                            self._table_status[tr.table] = tr.status
                     self.status_var.set("SUCCEEDED" if report.ok else "FAILED")
                     title = "DB2 -> SQL complete" if use_db2 else "BCP complete"
                     if report.ok:

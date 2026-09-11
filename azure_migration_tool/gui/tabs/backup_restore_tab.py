@@ -241,12 +241,6 @@ class BackupRestoreTab:
         # Restore from Blob
         self._restore_blob_stop_event = threading.Event()
         self._restore_blob_active_conn = None
-        # Blob → Local Restore
-        self._blob_local_label_to_path: dict = {}
-        self._blob_local_last_download_files: list = []
-        self._blob_local_stop_event = threading.Event()
-        self._blob_local_active_conn = None
-
         self._create_widgets()
 
     def set_project_path(self, project_path):
@@ -295,10 +289,6 @@ class BackupRestoreTab:
         restore_disk_frame = ttk.Frame(notebook)
         notebook.add(restore_disk_frame, text="Restore from Disk")
         self._create_restore_from_disk_widgets(restore_disk_frame)
-
-        blob_local_frame = ttk.Frame(notebook)
-        notebook.add(blob_local_frame, text="Blob → Local Restore")
-        self._create_blob_local_restore_widgets(blob_local_frame)
 
         restore_frame = ttk.Frame(notebook)
         notebook.add(restore_frame, text="Restore from Blob")
@@ -405,7 +395,7 @@ class BackupRestoreTab:
         self.bak_stripes_combo = ttk.Combobox(
             stripes_row,
             textvariable=self.bak_stripes_var,
-            values=["Auto", "1", "2", "4", "8", "16", "32"],
+            values=["Auto", "1", "2", "4", "8", "16", "32", "64"],
             width=8,
             state="readonly",
         )
@@ -493,6 +483,9 @@ class BackupRestoreTab:
             label_text="",
             row_start=0,
         )
+        self._local_stripe_refresh_after_id = None
+        self.local_server_var.trace_add("write", self._schedule_local_stripe_refresh)
+        self.local_db_var.trace_add("write", self._schedule_local_stripe_refresh)
 
         # Step 2: Backup folder on the SQL Server host (not necessarily this PC)
         step2 = ttk.LabelFrame(parent, text="Step 2: Backup folder or full .bak path (SQL Server / UNC)", padding=10)
@@ -501,6 +494,8 @@ class BackupRestoreTab:
             step2,
             text="Enter a folder the SQL Server instance can write to, or a full path ending in .bak for a fixed filename "
             "(e.g. \\\\fileserver\\share\\MyDb.bak — matches BACKUP ... TO DISK). "
+            "With structured folders enabled, backups are written as "
+            "\\\\share\\sqlbackups\\DatabaseName\\YYYYMMDD_HHMMSS\\DatabaseName_YYYYMMDD_HHMMSS.bak. "
             "Use \"Use SQL Server Default\" for the server's backup folder.",
             fg="gray",
             wraplength=650,
@@ -567,17 +562,33 @@ class BackupRestoreTab:
         ).pack(side=tk.LEFT, padx=(0, 16))
 
         tk.Label(options_row, text="Stripes (files):").pack(side=tk.LEFT)
-        self.local_stripes_var = tk.IntVar(value=1)
-        ttk.Spinbox(
+        self.local_stripes_var = tk.StringVar(value="Auto")
+        self.local_stripes_combo = ttk.Combobox(
             options_row,
-            from_=1,
-            to=64,
-            width=5,
             textvariable=self.local_stripes_var,
-        ).pack(side=tk.LEFT, padx=(4, 4))
-        tk.Label(options_row, text="(split large DB into N .bak files)", fg="gray").pack(
-            side=tk.LEFT, padx=(0, 16)
+            values=["Auto", "1", "2", "4", "8", "16", "32", "64"],
+            width=8,
+            state="readonly",
         )
+        self.local_stripes_combo.pack(side=tk.LEFT, padx=(4, 4))
+        self.local_stripes_combo.bind("<<ComboboxSelected>>", self._on_local_stripes_changed)
+        self.local_stripes_hint_var = tk.StringVar(
+            value="Auto: ~150 GB per stripe (up to 64 files for multi-TB databases). Preference is remembered per database."
+        )
+        tk.Label(
+            step2,
+            textvariable=self.local_stripes_hint_var,
+            fg="gray",
+            wraplength=650,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(4, 0))
+
+        self.local_structured_paths_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            options_row,
+            text="Structured folders (database / run_id / .bak files)",
+            variable=self.local_structured_paths_var,
+        ).pack(side=tk.LEFT, padx=(0, 16))
 
         self.local_delete_after_upload_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -598,6 +609,61 @@ class BackupRestoreTab:
             prefix="local",
             show_browse_azure=True,
         )
+
+        # AzCopy + Azure CLI (required for large uploads / Azure AD blob auth on CDC host)
+        az_tools = ttk.LabelFrame(
+            self.local_step3_frame,
+            text="Azure tools (AzCopy upload + sign-in)",
+            padding=6,
+        )
+        az_tools.pack(fill=tk.X, pady=(8, 0))
+        self.local_use_azcopy_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            az_tools,
+            text="Use AzCopy for upload (recommended for large .bak files; falls back to SDK if missing)",
+            variable=self.local_use_azcopy_var,
+        ).pack(anchor=tk.W)
+        self.local_azure_tools_status_var = tk.StringVar(value="Checking Azure CLI / AzCopy...")
+        tk.Label(
+            az_tools,
+            textvariable=self.local_azure_tools_status_var,
+            fg="gray",
+            wraplength=650,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(4, 0))
+        az_btn_row = ttk.Frame(az_tools)
+        az_btn_row.pack(anchor=tk.W, pady=(6, 0))
+        ttk.Button(
+            az_btn_row,
+            text="Check Azure tools",
+            command=self._refresh_local_azure_tools_status,
+            width=18,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        self.local_az_signin_btn = ttk.Button(
+            az_btn_row,
+            text="Sign in to Azure (az login)",
+            command=self._sign_in_azure_for_upload,
+            width=26,
+        )
+        self.local_az_signin_btn.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            az_btn_row,
+            text="Install instructions",
+            command=self._show_azure_tools_install_help,
+            width=18,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            az_tools,
+            text=(
+                "Managed Identity / Azure AD uploads need Azure CLI signed in on THIS host "
+                "(the CDC / app server). Install: winget install Microsoft.AzureCLI "
+                "and winget install Microsoft.Azure.AzCopy"
+            ),
+            fg="gray",
+            wraplength=650,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(6, 0))
+        self.frame.after(500, self._refresh_local_azure_tools_status)
         
         folder_row = ttk.Frame(self.local_step3_frame)
         folder_row.pack(fill=tk.X, pady=(8, 0))
@@ -677,33 +743,203 @@ class BackupRestoreTab:
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.local_backup_log = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
         self.local_backup_log.pack(fill=tk.BOTH, expand=True)
+        self.frame.after(800, self._schedule_local_stripe_refresh)
+
+    def _schedule_local_stripe_refresh(self, *_args) -> None:
+        """Debounce stripe recommendation when server/database changes."""
+        if self._local_stripe_refresh_after_id is not None:
+            try:
+                self.frame.after_cancel(self._local_stripe_refresh_after_id)
+            except Exception:
+                pass
+        self._local_stripe_refresh_after_id = self.frame.after(
+            600, self._refresh_local_stripe_recommendation
+        )
+
+    def _on_local_stripes_changed(self, _event=None) -> None:
+        """Remember manual stripe choice per database."""
+        server = (self.local_server_var.get() or "").strip()
+        database = (self.local_db_var.get() or "").strip()
+        if not server or not database:
+            return
+        val = (self.local_stripes_var.get() or "Auto").strip()
+        mode = "auto" if val.lower() == "auto" else "manual"
+        try:
+            from gui.utils.local_backup_settings import save_stripe_preference
+        except ImportError:
+            from azure_migration_tool.gui.utils.local_backup_settings import save_stripe_preference
+        save_stripe_preference(server, database, mode=mode, stripes_value=val)
+        if mode == "auto":
+            self._schedule_local_stripe_refresh()
+
+    def _refresh_local_stripe_recommendation(self) -> None:
+        """Query DB size and update Auto stripe hint; restore saved preference."""
+        self._local_stripe_refresh_after_id = None
+        server = (self.local_server_var.get() or "").strip()
+        database = (self.local_db_var.get() or "").strip()
+        if not database:
+            self.local_stripes_hint_var.set(
+                "Enter a database name to auto-calculate stripes (~150 GB per file, max 64)."
+            )
+            return
+
+        try:
+            from gui.utils.local_backup_settings import resolve_saved_stripes_ui, save_stripe_preference
+        except ImportError:
+            from azure_migration_tool.gui.utils.local_backup_settings import (
+                resolve_saved_stripes_ui,
+                save_stripe_preference,
+            )
+
+        mode, saved_val = resolve_saved_stripes_ui(server, database)
+        current = (self.local_stripes_var.get() or "").strip()
+        if current.lower() != saved_val.lower():
+            self.local_stripes_var.set(saved_val)
+
+        if not server:
+            self.local_stripes_hint_var.set(
+                f"Saved stripes for {database}: {saved_val}. Enter server to refresh size-based Auto."
+            )
+            return
+
+        def run() -> None:
+            size_mb = None
+            stripes = 1
+            err = None
+            try:
+                try:
+                    from src.backup.stripe_utils import (
+                        format_stripe_hint,
+                        get_database_size_mb,
+                        recommend_backup_stripes,
+                    )
+                    from src.utils.database import connect_to_database
+                except ImportError:
+                    from azure_migration_tool.src.backup.stripe_utils import (
+                        format_stripe_hint,
+                        get_database_size_mb,
+                        recommend_backup_stripes,
+                    )
+                    from azure_migration_tool.src.utils.database import connect_to_database
+
+                conn = connect_to_database(
+                    server=server,
+                    db="master",
+                    user=self.local_user_var.get() or "",
+                    auth=self.local_auth_var.get() or "windows",
+                    password=self.local_password_var.get() or "",
+                    timeout=30,
+                    logger=logger,
+                )
+                conn.autocommit = True
+                cur = conn.cursor()
+                size_mb = get_database_size_mb(cur, database)
+                stripes = recommend_backup_stripes(size_mb)
+                cur.close()
+                conn.close()
+            except Exception as exc:
+                err = str(exc)
+
+            def finish() -> None:
+                if err:
+                    self.local_stripes_hint_var.set(
+                        f"Could not read size for {database}: {err[:200]}"
+                    )
+                    return
+                hint = format_stripe_hint(size_mb, stripes)
+                self.local_stripes_hint_var.set(hint)
+                save_stripe_preference(
+                    server,
+                    database,
+                    mode=mode,
+                    stripes_value=(self.local_stripes_var.get() or "Auto"),
+                    last_size_gb=(size_mb / 1024.0) if size_mb else None,
+                    last_auto_stripes=stripes,
+                )
+
+            self.frame.after(0, finish)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _resolve_local_backup_stripes(self) -> Optional[int]:
+        """Return None for Auto, else 1..64."""
+        raw = (self.local_stripes_var.get() or "Auto").strip()
+        if raw.lower() == "auto":
+            return None
+        try:
+            return max(1, min(64, int(raw)))
+        except ValueError:
+            return None
 
     def _create_restore_from_disk_widgets(self, parent):
         """Restore database from local or network .bak file."""
         tk.Label(parent, text="Restore from Local/Network Disk", font=("Arial", 12, "bold")).pack(
-            pady=(0, 10)
+            pady=(0, 6)
         )
         tk.Label(
             parent,
-            text="Restore a SQL Server database from a .bak file on local disk or network share.\n"
-                 "Works with files from 'Local Backup' tab or SQL Server's default backup location.",
+            text=(
+                "For on-prem SQL Server or SQL Server on Azure VM: pick the .bak path, then the destination. "
+                "Azure SQL Managed Instance / Azure SQL Database cannot use this tab — use Restore from Blob."
+            ),
+            fg="gray",
             wraplength=700,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, padx=5, pady=(0, 10))
 
-        # Step 1: Target SQL Server
-        step1 = ttk.LabelFrame(parent, text="Step 1: Target SQL Server", padding=10)
+        # Step 1: Backup file (source)
+        step1 = ttk.LabelFrame(parent, text="Step 1: Backup file", padding=10)
         step1.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Create connection variables
-        self.restore_disk_server_var = tk.StringVar()
-        self.restore_disk_db_var = tk.StringVar()  # Not used for database selection, but required
-        self.restore_disk_auth_var = tk.StringVar(value="windows")
-        self.restore_disk_user_var = tk.StringVar()
-        self.restore_disk_password_var = tk.StringVar()
-        
+
+        browse_frame = ttk.Frame(step1)
+        browse_frame.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(browse_frame, text="Backup path:").pack(side=tk.LEFT)
+        self.restore_disk_file_var = tk.StringVar()
+        self.restore_disk_file_entry = ttk.Entry(
+            browse_frame, textvariable=self.restore_disk_file_var, width=62
+        )
+        self.restore_disk_file_entry.pack(side=tk.LEFT, padx=(8, 4), fill=tk.X, expand=True)
+        self.restore_disk_file_entry.bind(
+            "<FocusOut>", lambda _e: self._on_restore_disk_file_focus_out()
+        )
+        ttk.Button(
+            browse_frame, text="Browse...", command=self._browse_restore_disk_file, width=10
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            step1,
+            text=(
+                "Use a path the target SQL Server can read (e.g. \\\\fileserver\\sqlbackups\\MyDb.bak). "
+                "Striped backups (_part01of04.bak, …) are detected from any one stripe file."
+            ),
+            fg="gray",
+            wraplength=680,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
+        self.restore_disk_stripe_hint_var = tk.StringVar(value="")
+        tk.Label(
+            step1,
+            textvariable=self.restore_disk_stripe_hint_var,
+            fg="blue",
+            wraplength=680,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(6, 0))
+
+        # Step 2: Destination (target server + database)
+        step2 = ttk.LabelFrame(parent, text="Step 2: Destination", padding=10)
+        step2.pack(fill=tk.X, padx=5, pady=5)
+
+        self.restore_disk_server_var = self.main_window.shared_dest_server
+        self.restore_disk_db_var = self.main_window.shared_dest_db
+        self.restore_disk_auth_var = self.main_window.shared_dest_auth
+        self.restore_disk_user_var = self.main_window.shared_dest_user
+        self.restore_disk_password_var = self.main_window.shared_dest_password
+        self.restore_disk_target_db_var = self.restore_disk_db_var
+
+        conn_frame = ttk.Frame(step2)
+        conn_frame.pack(fill=tk.X)
         self.restore_disk_conn_widget = ConnectionWidget(
-            parent=step1,
+            parent=conn_frame,
             server_var=self.restore_disk_server_var,
             db_var=self.restore_disk_db_var,
             auth_var=self.restore_disk_auth_var,
@@ -711,142 +947,67 @@ class BackupRestoreTab:
             password_var=self.restore_disk_password_var,
             label_text="",
             row_start=0,
+            server_only=True,
         )
-
-        # Step 2: Backup File Source
-        step2 = ttk.LabelFrame(parent, text="Step 2: Backup File", padding=10)
-        step2.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Option 1: Browse for file
-        browse_frame = ttk.Frame(step2)
-        browse_frame.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(browse_frame, text="Backup file:").pack(side=tk.LEFT)
-        self.restore_disk_file_var = tk.StringVar()
-        ttk.Entry(browse_frame, textvariable=self.restore_disk_file_var, width=60).pack(
-            side=tk.LEFT, padx=(8, 4)
-        )
-        ttk.Button(browse_frame, text="Browse...", command=self._browse_restore_disk_file, width=10).pack(side=tk.LEFT)
-        
+        self.restore_disk_azure_warning_var = tk.StringVar(value="")
         tk.Label(
             step2,
-            text="💡 Tip: SQL Server can access network paths like \\\\server\\share\\backup.bak",
-            fg="blue",
-            wraplength=650,
-        ).pack(anchor=tk.W)
-        
-        # Option 2: Load from SQL Server backup history
-        ttk.Separator(step2, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
-        
-        history_source_frame = ttk.Frame(step2)
-        history_source_frame.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(history_source_frame, text="History source server:").pack(side=tk.LEFT)
-        self.restore_disk_history_server_var = tk.StringVar()
-        ttk.Entry(
-            history_source_frame,
-            textvariable=self.restore_disk_history_server_var,
-            width=42
-        ).pack(side=tk.LEFT, padx=(8, 8))
-        tk.Label(history_source_frame, text="(optional; defaults to target server)", fg="gray").pack(side=tk.LEFT)
-
-        history_filter_frame = ttk.Frame(step2)
-        history_filter_frame.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(history_filter_frame, text="History DB filter:").pack(side=tk.LEFT)
-        self.restore_disk_history_db_filter_var = tk.StringVar()
-        ttk.Entry(
-            history_filter_frame,
-            textvariable=self.restore_disk_history_db_filter_var,
-            width=42
-        ).pack(side=tk.LEFT, padx=(8, 8))
-        tk.Label(history_filter_frame, text="(optional, e.g. MassEditHangFire_UAT)", fg="gray").pack(side=tk.LEFT)
-
-        history_frame = ttk.Frame(step2)
-        history_frame.pack(fill=tk.X)
-        tk.Label(history_frame, text="Or load from SQL Server backup history:").pack(side=tk.LEFT)
-        ttk.Button(
-            history_frame,
-            text="Load Recent Backups",
-            command=self._load_backup_history,
-            width=20
-        ).pack(side=tk.LEFT, padx=(8, 0))
-        
-        # Backup history listbox
-        history_list_frame = ttk.Frame(step2)
-        history_list_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-        
-        tk.Label(history_list_frame, text="Recent backups:").pack(anchor=tk.W)
-        
-        list_scroll_frame = ttk.Frame(history_list_frame)
-        list_scroll_frame.pack(fill=tk.BOTH, expand=True)
-        
-        scrollbar = ttk.Scrollbar(list_scroll_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.restore_disk_history_list = tk.Listbox(
-            list_scroll_frame,
-            height=6,
-            yscrollcommand=scrollbar.set
+            textvariable=self.restore_disk_azure_warning_var,
+            fg="red",
+            wraplength=680,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(6, 0))
+        self.restore_disk_server_var.trace_add(
+            "write", lambda *_: self._update_restore_disk_destination_hint()
         )
-        self.restore_disk_history_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.restore_disk_history_list.yview)
-        
-        self.restore_disk_history_list.bind('<<ListboxSelect>>', self._on_backup_history_select)
-        
-        # Store backup history data (list index -> full path)
-        self.restore_disk_history_data = {}
+        self._update_restore_disk_destination_hint()
 
-        # Step 3: Restore Options
-        step3 = ttk.LabelFrame(parent, text="Step 3: Restore Options", padding=10)
-        step3.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Target database name
-        name_row = ttk.Frame(step3)
-        name_row.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(name_row, text="Target database name:").pack(side=tk.LEFT)
-        self.restore_disk_target_db_var = tk.StringVar()
-        ttk.Entry(name_row, textvariable=self.restore_disk_target_db_var, width=30).pack(
+        name_row = ttk.Frame(step2)
+        name_row.pack(fill=tk.X, pady=(10, 4))
+        tk.Label(name_row, text="Restore as database:").pack(side=tk.LEFT)
+        ttk.Entry(name_row, textvariable=self.restore_disk_target_db_var, width=36).pack(
             side=tk.LEFT, padx=(8, 0)
         )
         tk.Label(
             name_row,
-            text="(Leave empty to use original name from backup)",
-            fg="gray"
+            text="(auto-filled from backup filename; edit if needed)",
+            fg="gray",
         ).pack(side=tk.LEFT, padx=(8, 0))
-        
-        # Replace existing checkbox
+
         self.restore_disk_replace_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            step3,
-            text="Replace existing database (if target exists)",
-            variable=self.restore_disk_replace_var
-        ).pack(anchor=tk.W, pady=(0, 8))
-        
-        # Custom file locations (advanced)
-        advanced_frame = ttk.LabelFrame(step3, text="Advanced: Custom File Locations (optional)", padding=5)
-        advanced_frame.pack(fill=tk.X, pady=(8, 0))
-        
-        tk.Label(
-            advanced_frame,
-            text="Leave empty to use SQL Server's default data directory",
-            fg="gray"
-        ).pack(anchor=tk.W, pady=(0, 5))
-        
-        # Data file path
-        data_row = ttk.Frame(advanced_frame)
+            step2,
+            text="Replace existing database if it already exists",
+            variable=self.restore_disk_replace_var,
+        ).pack(anchor=tk.W, pady=(4, 0))
+
+        self.restore_disk_show_advanced_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            step2,
+            text="Show advanced: custom .mdf / .ldf paths",
+            variable=self.restore_disk_show_advanced_var,
+            command=self._toggle_restore_disk_advanced,
+        ).pack(anchor=tk.W, pady=(8, 0))
+
+        self.restore_disk_advanced_frame = ttk.Frame(step2)
+        self.restore_disk_advanced_frame.pack(fill=tk.X, pady=(6, 0))
+
+        data_row = ttk.Frame(self.restore_disk_advanced_frame)
         data_row.pack(fill=tk.X, pady=(0, 4))
         tk.Label(data_row, text="Data file (.mdf):").pack(side=tk.LEFT)
         self.restore_disk_data_file_var = tk.StringVar()
-        ttk.Entry(data_row, textvariable=self.restore_disk_data_file_var, width=50).pack(
+        ttk.Entry(data_row, textvariable=self.restore_disk_data_file_var, width=52).pack(
             side=tk.LEFT, padx=(8, 0)
         )
-        
-        # Log file path
-        log_row = ttk.Frame(advanced_frame)
+
+        log_row = ttk.Frame(self.restore_disk_advanced_frame)
         log_row.pack(fill=tk.X)
         tk.Label(log_row, text="Log file (.ldf):").pack(side=tk.LEFT)
         self.restore_disk_log_file_var = tk.StringVar()
-        ttk.Entry(log_row, textvariable=self.restore_disk_log_file_var, width=50).pack(
+        ttk.Entry(log_row, textvariable=self.restore_disk_log_file_var, width=52).pack(
             side=tk.LEFT, padx=(8, 0)
         )
+        self._toggle_restore_disk_advanced()
 
         # Start restore button
         btn_frame = ttk.Frame(parent)
@@ -1065,7 +1226,7 @@ class BackupRestoreTab:
 
     def _on_blob_auth_mode_change(self, *_):
         """Show/hide credential fields in every blob-auth section (backup + restore)."""
-        for prefix in ("bak", "local", "restore", "blob_local"):
+        for prefix in ("bak", "local", "restore"):
             self._apply_blob_auth_visibility(prefix)
 
     def _apply_bak_blob_auth_locks(self, *, mi_allowed: bool) -> None:
@@ -1812,10 +1973,7 @@ class BackupRestoreTab:
             messagebox.showerror("Error", "Local backup path is required.")
             return
 
-        try:
-            stripes = max(1, int(self.local_stripes_var.get() or 1))
-        except (tk.TclError, ValueError):
-            stripes = 1
+        stripes = self._resolve_local_backup_stripes()
 
         self._local_stop_event.clear()
         self._local_active_conn = None
@@ -1840,6 +1998,7 @@ class BackupRestoreTab:
                     local_backup_path=local_path,
                     compression=self.local_compression_var.get(),
                     skip_upload=True,  # backup only — upload is a separate step
+                    structured_local_paths=self.local_structured_paths_var.get(),
                     stripes=stripes,
                     cancel_event=self._local_stop_event,
                     on_connect=_store_conn,
@@ -1854,6 +2013,20 @@ class BackupRestoreTab:
                     files = [f for f in files if f]
                     self._local_last_backup_files = files
                     self._local_last_backup_file = files[0] if files else ""
+                    used_stripes = int(result.get("stripes") or 1)
+                    try:
+                        from gui.utils.local_backup_settings import save_stripe_preference
+                    except ImportError:
+                        from azure_migration_tool.gui.utils.local_backup_settings import save_stripe_preference
+                    val = (self.local_stripes_var.get() or "Auto").strip()
+                    mode = "auto" if val.lower() == "auto" else "manual"
+                    save_stripe_preference(
+                        server,
+                        database,
+                        mode=mode,
+                        stripes_value=val,
+                        last_auto_stripes=used_stripes,
+                    )
                     # Pre-fill the upload field (semicolon-separated for striped sets).
                     self.frame.after(0, lambda fs=files: self.local_upload_file_var.set("; ".join(fs)))
                     is_network = bool(files) and (files[0].startswith("\\\\") or files[0].startswith("//"))
@@ -1861,6 +2034,7 @@ class BackupRestoreTab:
                     msg = (
                         f"Local backup completed!\n\n"
                         f"Time: {result.get('backup_time_sec', 0):.1f}s\n"
+                        f"Stripes: {used_stripes}\n"
                         f"File(s):\n{files_txt}\n\n"
                         "Next: set the Azure Blob destination (Step 3) and click "
                         "'2. Upload .bak to Blob'."
@@ -1964,12 +2138,21 @@ class BackupRestoreTab:
             return
 
         self._local_stop_event.clear()
-        self._local_set_busy(True)
 
         def log(msg):
             self.frame.after(0, lambda m=msg: self.local_backup_log.insert(tk.END, m + "\n"))
             self.frame.after(0, lambda: self.local_backup_log.see(tk.END))
 
+        preflight_err = self._preflight_azcopy_upload(blob_auth_mode, log)
+        if preflight_err:
+            if not messagebox.askyesno(
+                "Azure tools not ready",
+                preflight_err
+                + "\n\nContinue with Python SDK upload instead (slower for large files)?",
+            ):
+                return
+
+        self._local_set_busy(True)
         log(f"=== Uploading {len(files)} file(s) to Blob ===")
 
         def run():
@@ -1992,6 +2175,10 @@ class BackupRestoreTab:
                         database=database,
                         structured_blob_paths=structured_blob_paths,
                         delete_local_after_upload=self.local_delete_after_upload_var.get(),
+                        prefer_azcopy=bool(
+                            getattr(self, "local_use_azcopy_var", None)
+                            and self.local_use_azcopy_var.get()
+                        ),
                         log=log,
                     )
                     if result.get("success"):
@@ -2023,484 +2210,97 @@ class BackupRestoreTab:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _create_blob_local_restore_widgets(self, parent):
-        """Two-step restore: (1) download .bak from blob, (2) RESTORE FROM DISK."""
-        tk.Label(
-            parent,
-            text="Blob → Local Restore",
-            font=("Arial", 12, "bold"),
-        ).pack(pady=(0, 10))
-        tk.Label(
-            parent,
-            text="Download a .bak from Azure Blob to local/UNC disk, then restore with RESTORE FROM DISK "
-            "(useful when SQL Server cannot read blob URLs directly).",
-            wraplength=700,
-            justify=tk.LEFT,
-            fg="gray",
-        ).pack(anchor=tk.W, padx=5, pady=(0, 10))
-
-        # Step 1: Blob source
-        step1 = ttk.LabelFrame(parent, text="Step 1: Azure Blob backup", padding=10)
-        step1.pack(fill=tk.X, padx=5, pady=5)
-        self._create_blob_auth_widgets(
-            step1,
-            save_command=self._save_bak_blob_settings,
-            prefix="blob_local",
-            show_browse_azure=True,
-        )
-        tk.Label(step1, text="Database folder (backed-up name):").pack(anchor=tk.W, pady=(10, 0))
-        bl_db_row = ttk.Frame(step1)
-        bl_db_row.pack(fill=tk.X, pady=2)
-        self.blob_local_db_filter_var = tk.StringVar()
-        self.blob_local_db_filter_combo = ttk.Combobox(
-            bl_db_row, textvariable=self.blob_local_db_filter_var, width=40
-        )
-        self.blob_local_db_filter_combo.pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(bl_db_row, text="List databases", command=self._blob_local_list_databases).pack(
-            side=tk.LEFT, padx=2
-        )
-
-        tk.Label(step1, text="Backups for this database:").pack(anchor=tk.W, pady=(8, 0))
-        bl_list_frame = ttk.Frame(step1)
-        bl_list_frame.pack(fill=tk.X, pady=2)
-        self.blob_local_backups_listbox = tk.Listbox(bl_list_frame, height=5, width=70, selectmode=tk.SINGLE)
-        bl_scroll = ttk.Scrollbar(bl_list_frame, orient=tk.VERTICAL, command=self.blob_local_backups_listbox.yview)
-        self.blob_local_backups_listbox.configure(yscrollcommand=bl_scroll.set)
-        self.blob_local_backups_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        bl_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.blob_local_backups_listbox.bind("<<ListboxSelect>>", self._blob_local_on_backup_selected)
-        ttk.Button(step1, text="List backups", command=self._blob_local_list_backups).pack(anchor=tk.W, pady=(4, 0))
-        self.blob_local_path_var = tk.StringVar()
-        tk.Label(step1, textvariable=self.blob_local_path_var, fg="gray").pack(anchor=tk.W, pady=(2, 0))
-
-        # Step 2: Download destination
-        step2 = ttk.LabelFrame(parent, text="Step 2: Download to local/UNC path", padding=10)
-        step2.pack(fill=tk.X, padx=5, pady=5)
-        tk.Label(
-            step2,
-            text="Folder or full .bak path on a drive/UNC the SQL Server instance can read for restore.",
-            fg="gray",
-            wraplength=650,
-        ).pack(anchor=tk.W, pady=(0, 6))
-        dl_row = ttk.Frame(step2)
-        dl_row.pack(fill=tk.X)
-        tk.Label(dl_row, text="Download path:").pack(side=tk.LEFT)
-        self.blob_local_download_path_var = tk.StringVar()
-        ttk.Entry(dl_row, textvariable=self.blob_local_download_path_var, width=55).pack(
-            side=tk.LEFT, padx=(8, 4), fill=tk.X, expand=True
-        )
-        ttk.Button(dl_row, text="Browse...", command=self._blob_local_browse_download_path, width=10).pack(
-            side=tk.LEFT
-        )
-        self.blob_local_download_file_var = tk.StringVar(value="")
-        tk.Label(step2, text="Downloaded file(s):").pack(anchor=tk.W, pady=(8, 0))
-        ttk.Entry(step2, textvariable=self.blob_local_download_file_var, width=70).pack(
-            anchor=tk.W, fill=tk.X, pady=(2, 0)
-        )
-
-        # Step 3: Target SQL Server + restore options
-        step3 = ttk.LabelFrame(parent, text="Step 3: Target SQL Server & restore options", padding=10)
-        step3.pack(fill=tk.X, padx=5, pady=5)
-        self.blob_local_server_var = self.main_window.shared_dest_server
-        self.blob_local_db_var = self.main_window.shared_dest_db
-        self.blob_local_auth_var = self.main_window.shared_dest_auth
-        self.blob_local_user_var = self.main_window.shared_dest_user
-        self.blob_local_password_var = self.main_window.shared_dest_password
-        self.blob_local_conn_widget = ConnectionWidget(
-            parent=step3,
-            server_var=self.blob_local_server_var,
-            db_var=self.blob_local_db_var,
-            auth_var=self.blob_local_auth_var,
-            user_var=self.blob_local_user_var,
-            password_var=self.blob_local_password_var,
-            label_text="Target database (auto-filled from blob folder; created if missing):",
-            row_start=0,
-        )
-        step3.columnconfigure(0, weight=0)
-        step3.columnconfigure(1, weight=1)
-        self.blob_local_replace_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            step3,
-            text="Replace existing database (WITH REPLACE)",
-            variable=self.blob_local_replace_var,
-        ).grid(
-            row=self.blob_local_conn_widget.grid_last_row + 1,
-            column=0,
-            columnspan=2,
-            sticky=tk.W,
-            pady=(8, 0),
-        )
-
-        btn_frame = ttk.Frame(parent)
-        btn_frame.pack(pady=10)
-        self.blob_local_download_btn = ttk.Button(
-            btn_frame,
-            text="1. Download from Blob",
-            command=self._start_blob_local_download,
-            width=22,
-        )
-        self.blob_local_download_btn.pack(side=tk.LEFT, padx=5)
-        self.blob_local_restore_btn = ttk.Button(
-            btn_frame,
-            text="2. Restore from Local File",
-            command=self._start_blob_local_restore,
-            width=24,
-        )
-        self.blob_local_restore_btn.pack(side=tk.LEFT, padx=5)
-        self.blob_local_stop_btn = ttk.Button(
-            btn_frame,
-            text="Stop",
-            command=self._stop_blob_local_process,
-            width=8,
-            state=tk.DISABLED,
-        )
-        self.blob_local_stop_btn.pack(side=tk.LEFT, padx=5)
-
-        prog_frame = ttk.Frame(parent)
-        prog_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
-        tk.Label(prog_frame, text="Progress:").pack(side=tk.LEFT)
-        self.blob_local_progress_var = tk.DoubleVar(value=0.0)
-        self.blob_local_progress_bar = ttk.Progressbar(
-            prog_frame,
-            orient=tk.HORIZONTAL,
-            mode="determinate",
-            maximum=100,
-            variable=self.blob_local_progress_var,
-        )
-        self.blob_local_progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6))
-        self.blob_local_progress_label = tk.Label(prog_frame, text="", width=20, anchor=tk.W)
-        self.blob_local_progress_label.pack(side=tk.LEFT)
-
-        log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.blob_local_log = scrolledtext.ScrolledText(log_frame, height=8, wrap=tk.WORD)
-        self.blob_local_log.pack(fill=tk.BOTH, expand=True)
-
-    def _blob_local_set_busy(self, busy: bool) -> None:
-        st = tk.DISABLED if busy else tk.NORMAL
-        for attr in ("blob_local_download_btn", "blob_local_restore_btn"):
-            btn = getattr(self, attr, None)
-            if btn is not None:
-                btn.config(state=st)
-        stop_btn = getattr(self, "blob_local_stop_btn", None)
-        if stop_btn is not None:
-            stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
-
-    def _stop_blob_local_process(self) -> None:
-        self._blob_local_stop_event.set()
-        self.blob_local_log.insert(tk.END, "Stop requested…\n")
-        self.blob_local_log.see(tk.END)
-        conn = self._blob_local_active_conn
-        if conn is not None:
-            try:
-                conn.cancel()
-            except Exception:
-                pass
-
-    def _set_blob_local_progress(self, pct: float, label: str = "") -> None:
-        self.blob_local_progress_var.set(max(0.0, min(100.0, pct)))
-        if label:
-            self.blob_local_progress_label.config(text=label)
-        elif pct >= 100:
-            self.blob_local_progress_label.config(text="Completed")
-        else:
-            self.blob_local_progress_label.config(text=f"{pct:.0f}%")
-
-    def _blob_local_browse_download_path(self) -> None:
-        from tkinter import filedialog
-
-        current = (self.blob_local_download_path_var.get() or "").strip()
-        initial = current if current and os.path.isdir(current) else (os.environ.get("USERPROFILE") or "C:\\")
-        folder = filedialog.askdirectory(title="Select download folder", initialdir=initial)
-        if folder:
-            self.blob_local_download_path_var.set(folder)
-
-    def _blob_local_on_backup_selected(self, event=None) -> None:
-        sel = self.blob_local_backups_listbox.curselection()
-        if not sel:
-            return
-        label = self.blob_local_backups_listbox.get(sel[0])
-        path = self._blob_local_label_to_path.get(label) or label.split("    [", 1)[0].strip()
-        self.blob_local_path_var.set(path)
-        if "/" in path:
-            db = path.split("/", 1)[0]
-            self.blob_local_db_filter_var.set(db)
-            self.blob_local_db_var.set(db)
-
-    def _blob_local_list_databases(self) -> None:
-        conn_str = (self.blob_conn_var.get() or "").strip()
-        container = (self.blob_container_var.get() or "").strip()
-        blob_auth_mode = self.blob_auth_mode_var.get()
-        storage_account_url = (self.blob_account_url_var.get() or "").strip()
+    def _refresh_local_azure_tools_status(self) -> None:
+        """Update AzCopy / Azure CLI status label on the Local Backup tab."""
         try:
-            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
-        except Exception as e:
-            messagebox.showerror("Error", _compact_dialog_error(str(e)))
-            return
-        if blob_auth_mode != "managed_identity" and not conn_str:
-            messagebox.showerror("Error", "Enter blob connection string first (or switch to Managed Identity).")
-            return
-        if blob_auth_mode == "managed_identity" and not storage_account_url:
-            messagebox.showerror("Error", "Enter storage account URL first.")
-            return
-        self.blob_local_db_filter_var.set("Listing...")
-
-        def run():
+            from src.utils.azcopy_utils import format_azure_tools_status
+        except ImportError:
             try:
-                client = _get_gui_blob_service_client(
-                    blob_auth_mode=blob_auth_mode,
-                    blob_connection_string=conn_str,
-                    blob_account_url=storage_account_url,
-                    container=container,
+                from azure_migration_tool.src.utils.azcopy_utils import format_azure_tools_status
+            except ImportError:
+                self.local_azure_tools_status_var.set(
+                    "AzCopy helpers not available (update the app)."
                 )
-                catalog = _import_blob_backup_catalog()
-                all_blobs = catalog.list_all_container_blobs(client.get_container_client(container))
-                names = catalog.discover_database_names(all_blobs)
-                self.frame.after(0, lambda n=names: self._blob_local_populate_databases(n))
-            except Exception as e:
-                msg = str(e) + _blob_list_error_suffix(str(e), blob_auth_mode)
-                self.frame.after(
-                    0,
-                    lambda m=msg: self._blob_local_populate_databases([], m),
-                )
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _blob_local_populate_databases(self, names, error=None) -> None:
-        if error:
-            self.blob_local_db_filter_combo["values"] = []
-            self.blob_local_db_filter_var.set("")
-            messagebox.showerror("List databases failed", _compact_dialog_error(str(error)))
-            return
-        self.blob_local_db_filter_combo["values"] = names
-        if names:
-            self.blob_local_db_filter_var.set(names[0])
-            self.blob_local_db_var.set(names[0])
-
-    def _blob_local_list_backups(self) -> None:
-        conn_str = (self.blob_conn_var.get() or "").strip()
-        container = (self.blob_container_var.get() or "").strip()
-        blob_auth_mode = self.blob_auth_mode_var.get()
-        storage_account_url = (self.blob_account_url_var.get() or "").strip()
-        try:
-            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
-        except Exception as e:
-            messagebox.showerror("Error", _compact_dialog_error(str(e)))
-            return
-        db_name = (self.blob_local_db_filter_var.get() or "").strip()
-        if blob_auth_mode != "managed_identity" and not conn_str:
-            messagebox.showerror("Error", "Enter blob connection string first.")
-            return
-        if not db_name or db_name.startswith("(") or db_name == "Listing...":
-            messagebox.showerror("Error", "List databases first, then pick a database name.")
-            return
-        self.blob_local_backups_listbox.delete(0, tk.END)
-        self.blob_local_backups_listbox.insert(tk.END, "Listing...")
-        db_name = db_name.strip().rstrip("/")
-
-        def run():
-            try:
-                client = _get_gui_blob_service_client(
-                    blob_auth_mode=blob_auth_mode,
-                    blob_connection_string=conn_str,
-                    blob_account_url=storage_account_url,
-                    container=container,
-                )
-                catalog = _import_blob_backup_catalog()
-                all_blobs = catalog.list_all_container_blobs(client.get_container_client(container))
-                matched = catalog.backup_blobs_for_database(all_blobs, db_name)
-                labels, label_to_path = catalog.build_backup_list_display(matched)
-                self._blob_local_label_to_path = label_to_path
-                self.frame.after(0, lambda ls=labels: self._blob_local_populate_backups(ls))
-            except Exception as e:
-                self._blob_local_label_to_path = {}
-                msg = _compact_dialog_error(str(e) + _blob_list_error_suffix(str(e), blob_auth_mode))
-                self.frame.after(
-                    0,
-                    lambda m=msg: self._blob_local_populate_backups([], m),
-                )
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _blob_local_populate_backups(self, labels, error=None) -> None:
-        self.blob_local_backups_listbox.delete(0, tk.END)
-        if error:
-            messagebox.showerror("List backups failed", error)
-            return
-        for label in labels:
-            self.blob_local_backups_listbox.insert(tk.END, label)
-
-    def _start_blob_local_download(self) -> None:
-        blob_path = (self.blob_local_path_var.get() or "").strip()
-        if not blob_path or blob_path.startswith("("):
-            messagebox.showerror("Error", "Select a backup from Step 1 (List backups).")
-            return
-        local_dest = (self.blob_local_download_path_var.get() or "").strip()
-        if not local_dest:
-            messagebox.showerror("Error", "Enter a download folder or full .bak path in Step 2.")
-            return
-
-        blob_auth_mode = self.blob_auth_mode_var.get() or "connection_string"
-        conn_str = (self.blob_conn_var.get() or "").strip()
-        storage_account_url = (self.blob_account_url_var.get() or "").strip()
-        container = (self.blob_container_var.get() or "").strip()
-        try:
-            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
-        except Exception as e:
-            messagebox.showerror("Error", _compact_dialog_error(str(e)))
-            return
-        if blob_auth_mode == "managed_identity":
-            if not storage_account_url:
-                messagebox.showerror("Error", "Storage account URL is required for Managed Identity mode.")
                 return
-            storage_account_url = _normalize_blob_account_url_for_gui(storage_account_url)
-        elif not conn_str:
-            messagebox.showerror("Error", "Blob connection string is required.")
-            return
+        self.local_azure_tools_status_var.set(format_azure_tools_status())
 
-        self._blob_local_stop_event.clear()
-        self._blob_local_set_busy(True)
-        self.blob_local_log.delete("1.0", tk.END)
-        self._set_blob_local_progress(0.0, "Downloading…")
-
-        def log(msg):
-            self.frame.after(0, lambda m=msg: self.blob_local_log.insert(tk.END, m + "\n"))
-            self.frame.after(0, lambda: self.blob_local_log.see(tk.END))
-
-        def on_progress(pct):
-            self.frame.after(0, lambda p=pct: self._set_blob_local_progress(p))
-
-        def run():
+    def _show_azure_tools_install_help(self) -> None:
+        try:
+            from src.utils.azcopy_utils import install_instructions
+        except ImportError:
             try:
-                try:
-                    from src.restore.download_from_blob import download_backup_from_blob
-                except ImportError:
-                    from azure_migration_tool.src.restore.download_from_blob import download_backup_from_blob
-                result = download_backup_from_blob(
-                    blob_path=blob_path,
-                    blob_auth_mode=blob_auth_mode,
-                    blob_connection_string=conn_str,
-                    blob_account_url=storage_account_url,
-                    blob_container=container,
-                    local_destination=local_dest,
-                    log=log,
-                    progress_callback=on_progress,
-                    cancel_event=self._blob_local_stop_event,
+                from azure_migration_tool.src.utils.azcopy_utils import install_instructions
+            except ImportError:
+                messagebox.showinfo(
+                    "Install Azure tools",
+                    "winget install Microsoft.AzureCLI\nwinget install Microsoft.Azure.AzCopy",
                 )
-                if result.get("success"):
-                    files = result.get("local_files") or []
-                    self._blob_local_last_download_files = files
-                    self.frame.after(
-                        0,
-                        lambda fs=files: self.blob_local_download_file_var.set("; ".join(fs)),
-                    )
-                    msg = (
-                        f"Download completed in {result.get('download_time_sec', 0):.1f}s\n\n"
-                        f"{len(files)} file(s) saved.\n\nNext: click '2. Restore from Local File'."
-                    )
-                    self.frame.after(0, lambda m=msg: messagebox.showinfo("Download complete", m))
-                else:
-                    err = result.get("message", "Download failed")
-                    self.frame.after(0, lambda e=err: messagebox.showerror("Download failed", _compact_dialog_error(e)))
-            except Exception as e:
-                log(str(e))
-                self.frame.after(0, lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)))
-            finally:
-                self.frame.after(0, lambda: self._blob_local_set_busy(False))
+                return
+        messagebox.showinfo("Install Azure CLI + AzCopy", install_instructions())
 
-        threading.Thread(target=run, daemon=True).start()
+    def _sign_in_azure_for_upload(self) -> None:
+        """Run az login (device code) from the app and refresh status."""
+        self.local_az_signin_btn.config(state=tk.DISABLED)
+        self.local_azure_tools_status_var.set("Signing in to Azure...")
 
-    def _start_blob_local_restore(self) -> None:
-        raw_files = (self.blob_local_download_file_var.get() or "").strip()
-        files = [p.strip() for p in raw_files.split(";") if p.strip()]
-        if not files and self._blob_local_last_download_files:
-            files = list(self._blob_local_last_download_files)
-        if not files:
-            messagebox.showerror(
-                "Error",
-                "No local .bak file. Click '1. Download from Blob' first, or enter a path in Step 2.",
+        def log(msg: str) -> None:
+            self.frame.after(
+                0,
+                lambda m=msg: (
+                    self.local_backup_log.insert(tk.END, m + "\n"),
+                    self.local_backup_log.see(tk.END),
+                ),
             )
-            return
 
-        server = (self.blob_local_server_var.get() or "").strip()
-        if not server:
-            messagebox.showerror("Error", "Enter target SQL Server in Step 3.")
-            return
-        target_db = (self.blob_local_db_var.get() or "").strip() or None
-        replace_existing = self.blob_local_replace_var.get()
-        if replace_existing and target_db:
-            if not messagebox.askyesno(
-                "Confirm Replace",
-                f"Replace existing database '{target_db}'?",
-            ):
-                return
-
-        self._blob_local_stop_event.clear()
-        self._blob_local_active_conn = None
-        self._blob_local_set_busy(True)
-        self.blob_local_log.insert(tk.END, f"=== Restoring from {len(files)} local file(s) ===\n")
-        self._set_blob_local_progress(0.0, "Restoring…")
-
-        def log(msg):
-            self.frame.after(0, lambda m=msg: self.blob_local_log.insert(tk.END, m + "\n"))
-            self.frame.after(0, lambda: self.blob_local_log.see(tk.END))
-
-        def on_progress(pct):
-            self.frame.after(0, lambda p=pct: self._set_blob_local_progress(p))
-
-        def _store_conn(conn):
-            self._blob_local_active_conn = conn
-
-        def run():
+        def run() -> None:
             try:
                 try:
-                    from src.restore.restore_from_disk import restore_database_from_disk
+                    from src.utils.azcopy_utils import run_az_login
                 except ImportError:
-                    from azure_migration_tool.src.restore.restore_from_disk import restore_database_from_disk
-                kwargs = dict(
-                    server=server,
-                    target_database_name=target_db,
-                    auth=self.blob_local_auth_var.get() or "windows",
-                    user=self.blob_local_user_var.get() or "",
-                    password=self.blob_local_password_var.get() or "",
-                    replace_existing=replace_existing,
-                    recovery=True,
-                    log=log,
-                    progress_callback=on_progress,
-                    cancel_event=self._blob_local_stop_event,
-                    on_connect=_store_conn,
-                )
-                if len(files) == 1:
-                    kwargs["backup_file_path"] = files[0]
-                else:
-                    kwargs["backup_file_paths"] = files
-                result = restore_database_from_disk(**kwargs)
-                if result.get("cancelled"):
-                    self.frame.after(
-                        0,
-                        lambda: messagebox.showinfo("Cancelled", "Restore was stopped."),
-                    )
-                elif result.get("success"):
-                    self.frame.after(0, lambda: self._set_blob_local_progress(100.0, "Completed"))
+                    from azure_migration_tool.src.utils.azcopy_utils import run_az_login
+                ok = run_az_login(log, use_device_code=True)
+                self.frame.after(0, self._refresh_local_azure_tools_status)
+                if ok:
                     self.frame.after(
                         0,
                         lambda: messagebox.showinfo(
-                            "Restore complete",
-                            f"Database '{result.get('database_name')}' restored in "
-                            f"{result.get('restore_time_sec', 0):.1f}s",
+                            "Azure sign-in",
+                            "Azure CLI sign-in completed. You can upload to blob now.",
                         ),
                     )
                 else:
-                    err = result.get("message", "Restore failed")
-                    self.frame.after(0, lambda: self.blob_local_progress_label.config(text="Failed"))
-                    self.frame.after(0, lambda e=err: messagebox.showerror("Restore failed", _compact_dialog_error(e)))
-            except Exception as e:
-                log(str(e))
-                self.frame.after(0, lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)))
+                    self.frame.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "Azure sign-in",
+                            "Sign-in did not complete. See the Log panel for the device code / errors.",
+                        ),
+                    )
+            except Exception as exc:
+                log(f"[X] Azure sign-in error: {exc}")
+                self.frame.after(
+                    0,
+                    lambda x=str(exc): messagebox.showerror(
+                        "Azure sign-in failed", _compact_dialog_error(x)
+                    ),
+                )
             finally:
-                self.frame.after(0, lambda: self._blob_local_set_busy(False))
+                self.frame.after(0, lambda: self.local_az_signin_btn.config(state=tk.NORMAL))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _preflight_azcopy_upload(self, blob_auth_mode: str, log) -> Optional[str]:
+        """Return error message if AzCopy upload cannot proceed, else None."""
+        if not getattr(self, "local_use_azcopy_var", None) or not self.local_use_azcopy_var.get():
+            return None
+        try:
+            from src.utils.azcopy_utils import ensure_azcopy_ready_for_upload
+        except ImportError:
+            try:
+                from azure_migration_tool.src.utils.azcopy_utils import ensure_azcopy_ready_for_upload
+            except ImportError:
+                return None
+        return ensure_azcopy_ready_for_upload(blob_auth_mode, log=log)
 
     def _create_restore_from_blob_widgets(self, parent):
         """Restore database from Azure Blob (.bak)."""
@@ -3411,10 +3211,77 @@ class BackupRestoreTab:
     # ------------------------------------------------------------------ #
     # Restore from Disk handlers
     # ------------------------------------------------------------------ #
-    def _save_restore_disk_connection(self):
-        """Save restore disk connection settings."""
-        # Connection settings are already stored in the ConnectionWidget
-        messagebox.showinfo("Saved", "Connection settings saved.")
+    def _update_restore_disk_destination_hint(self) -> None:
+        server = (self.restore_disk_server_var.get() or "").strip()
+        try:
+            from src.restore.restore_from_disk import disk_restore_unsupported_message
+        except ImportError:
+            from azure_migration_tool.src.restore.restore_from_disk import (
+                disk_restore_unsupported_message,
+            )
+        msg = disk_restore_unsupported_message(server)
+        if msg:
+            first_line = msg.split("\n", 1)[0]
+            self.restore_disk_azure_warning_var.set(
+                f"⚠ {first_line} Use the 'Restore from Blob' tab for this target."
+            )
+        else:
+            self.restore_disk_azure_warning_var.set("")
+
+    def _toggle_restore_disk_advanced(self) -> None:
+        frame = getattr(self, "restore_disk_advanced_frame", None)
+        if frame is None:
+            return
+        if self.restore_disk_show_advanced_var.get():
+            frame.pack(fill=tk.X, pady=(6, 0))
+        else:
+            frame.pack_forget()
+
+    def _on_restore_disk_file_focus_out(self) -> None:
+        """Auto-detect stripes and DB name when user finishes editing the path field."""
+        raw = (self.restore_disk_file_var.get() or "").strip()
+        if raw:
+            self._apply_restore_disk_backup_selection(raw)
+
+    def _apply_restore_disk_backup_selection(
+        self, backup_path: str, *, update_entry: bool = True
+    ) -> None:
+        """Resolve striped sets and suggest target database name."""
+        raw = (backup_path or "").strip()
+        if not raw:
+            self.restore_disk_stripe_hint_var.set("")
+            return
+        try:
+            from src.backup.backup_path_utils import (
+                discover_disk_stripe_set,
+                format_backup_paths_for_ui,
+                infer_database_name_from_backup_path,
+            )
+        except ImportError:
+            from azure_migration_tool.src.backup.backup_path_utils import (
+                discover_disk_stripe_set,
+                format_backup_paths_for_ui,
+                infer_database_name_from_backup_path,
+            )
+        paths = discover_disk_stripe_set(raw.split(";")[0].strip())
+        if update_entry:
+            self._restore_disk_apply_in_progress = True
+            try:
+                self.restore_disk_file_var.set(format_backup_paths_for_ui(paths))
+            finally:
+                self._restore_disk_apply_in_progress = False
+        db_name = infer_database_name_from_backup_path(paths[0])
+        if db_name:
+            self.restore_disk_target_db_var.set(db_name)
+        if len(paths) > 1:
+            self.restore_disk_stripe_hint_var.set(
+                f"Striped backup: {len(paths)} file(s) selected for restore."
+            )
+        else:
+            self.restore_disk_stripe_hint_var.set(
+                f"Single backup file selected."
+                + (f" Suggested database: {db_name}." if db_name else "")
+            )
 
     def _browse_restore_disk_file(self):
         """Browse for .bak file."""
@@ -3427,110 +3294,61 @@ class BackupRestoreTab:
         )
         
         if filename:
-            self.restore_disk_file_var.set(filename)
-
-    def _load_backup_history(self):
-        """Load recent backups from SQL Server backup history."""
-        try:
-            target_server = self.restore_disk_server_var.get().strip()
-            history_server = self.restore_disk_history_server_var.get().strip() or target_server
-            database_filter = self.restore_disk_history_db_filter_var.get().strip() or None
-
-            if not history_server:
-                messagebox.showwarning("Incomplete", "Please enter SQL Server instance first.")
-                return
-            
-            self.restore_disk_log.delete('1.0', tk.END)
-            self.restore_disk_log.insert(tk.END, f"Loading backup history from {history_server}...\n")
-            if database_filter:
-                self.restore_disk_log.insert(tk.END, f"Filtering by database: {database_filter}\n")
-            self.restore_disk_log.update()
-            
-            def run():
-                try:
-                    from azure_migration_tool.src.restore.restore_from_disk import get_recent_backups_from_history
-                    
-                    auth = self.restore_disk_auth_var.get()
-                    user = self.restore_disk_user_var.get()
-                    password = self.restore_disk_password_var.get()
-                    
-                    def log(msg):
-                        self.frame.after(0, lambda: self.restore_disk_log.insert(tk.END, msg + "\n"))
-                        self.frame.after(0, lambda: self.restore_disk_log.see(tk.END))
-                    
-                    backups = get_recent_backups_from_history(
-                        server=history_server,
-                        database=database_filter,
-                        auth=auth,
-                        user=user,
-                        password=password,
-                        limit=20,
-                        log=log
-                    )
-                    
-                    # Update listbox on main thread
-                    def update_list():
-                        self.restore_disk_history_list.delete(0, tk.END)
-                        self.restore_disk_history_data.clear()
-                        
-                        for idx, backup in enumerate(backups):
-                            db_name = backup['database_name']
-                            backup_date = backup['backup_date'].strftime("%Y-%m-%d %H:%M:%S")
-                            size_mb = backup['size_mb']
-                            backup_path = backup['backup_path']
-                            
-                            display_text = f"{db_name} | {backup_date} | {size_mb} MB | {backup_path}"
-                            self.restore_disk_history_list.insert(tk.END, display_text)
-                            self.restore_disk_history_data[idx] = backup_path
-
-                        if not backups:
-                            log("\nNo matching backups found. Try clearing the filter or checking the source server.")
-                        else:
-                            log(f"\nLoaded {len(backups)} backup(s). Select one to populate the Backup file path.")
-                    
-                    self.frame.after(0, update_list)
-                    
-                except Exception as e:
-                    error_msg = _compact_dialog_error(str(e))
-                    self.frame.after(
-                        0,
-                        lambda m=error_msg: messagebox.showerror(
-                            "Error", f"Failed to load backup history:\n\n{m}"
-                        ),
-                    )
-                    self.frame.after(
-                        0,
-                        lambda m=error_msg: self.restore_disk_log.insert(tk.END, f"\nERROR: {m}\n"),
-                    )
-            
-            threading.Thread(target=run, daemon=True).start()
-            
-        except Exception as e:
-            messagebox.showerror("Error", _compact_dialog_error(str(e)))
-
-    def _on_backup_history_select(self, event):
-        """Handle selection from backup history listbox."""
-        selection = self.restore_disk_history_list.curselection()
-        if selection:
-            idx = selection[0]
-            backup_path = self.restore_disk_history_data.get(idx, "")
-            if backup_path:
-                self.restore_disk_file_var.set(backup_path)
+            self._apply_restore_disk_backup_selection(filename)
 
     def _start_restore_from_disk(self):
         """Start restore from disk operation."""
+        backup_file = self.restore_disk_file_var.get().strip()
         server = self.restore_disk_server_var.get().strip()
+        target_db = self.restore_disk_target_db_var.get().strip()
+
+        if not backup_file:
+            messagebox.showwarning(
+                "Incomplete",
+                "Step 1: Enter or browse to the backup .bak file path.",
+            )
+            return
+
+        self._apply_restore_disk_backup_selection(backup_file)
         backup_file = self.restore_disk_file_var.get().strip()
         target_db = self.restore_disk_target_db_var.get().strip()
-        
+
         if not server:
-            messagebox.showwarning("Incomplete", "Please enter SQL Server instance.")
+            messagebox.showwarning(
+                "Incomplete",
+                "Step 2: Enter the destination SQL Server instance.",
+            )
             return
-        
-        if not backup_file:
-            messagebox.showwarning("Incomplete", "Please select a backup file.")
+
+        try:
+            from src.restore.restore_from_disk import disk_restore_unsupported_message
+        except ImportError:
+            from azure_migration_tool.src.restore.restore_from_disk import (
+                disk_restore_unsupported_message,
+            )
+        azure_block = disk_restore_unsupported_message(server)
+        if azure_block:
+            messagebox.showerror("Use Restore from Blob", azure_block)
             return
-        
+
+        if not target_db:
+            try:
+                from src.backup.backup_path_utils import infer_database_name_from_backup_path
+            except ImportError:
+                from azure_migration_tool.src.backup.backup_path_utils import infer_database_name_from_backup_path
+            inferred = infer_database_name_from_backup_path(backup_file.split(";")[0].strip())
+            if inferred:
+                target_db = inferred
+                self.restore_disk_target_db_var.set(inferred)
+
+        if not target_db:
+            messagebox.showwarning(
+                "Incomplete",
+                "Step 2: Enter the database name to restore as (or use a backup filename "
+                "that includes the database name, e.g. MyDb_20260903_031135.bak).",
+            )
+            return
+
         auth = self.restore_disk_auth_var.get()
         user = self.restore_disk_user_var.get()
         password = self.restore_disk_password_var.get()
@@ -3566,26 +3384,33 @@ class BackupRestoreTab:
         def _store_conn(conn):
             self._restore_disk_active_conn = conn
         
+        backup_paths = [p.strip() for p in backup_file.split(";") if p.strip()]
+
         def run():
             try:
                 from azure_migration_tool.src.restore.restore_from_disk import restore_database_from_disk
-                
-                result = restore_database_from_disk(
-                    server=server,
-                    backup_file_path=backup_file,
-                    target_database_name=target_db or None,
-                    auth=auth,
-                    user=user,
-                    password=password,
-                    data_file_path=data_file,
-                    log_file_path=log_file,
-                    replace_existing=replace_existing,
-                    recovery=True,
-                    log=log,
-                    progress_callback=on_progress,
-                    cancel_event=self._restore_disk_stop_event,
-                    on_connect=_store_conn,
-                )
+
+                restore_kwargs = {
+                    "server": server,
+                    "target_database_name": target_db or None,
+                    "auth": auth,
+                    "user": user,
+                    "password": password,
+                    "data_file_path": data_file,
+                    "log_file_path": log_file,
+                    "replace_existing": replace_existing,
+                    "recovery": True,
+                    "log": log,
+                    "progress_callback": on_progress,
+                    "cancel_event": self._restore_disk_stop_event,
+                    "on_connect": _store_conn,
+                }
+                if len(backup_paths) > 1:
+                    restore_kwargs["backup_file_paths"] = backup_paths
+                else:
+                    restore_kwargs["backup_file_path"] = backup_paths[0] if backup_paths else backup_file
+
+                result = restore_database_from_disk(**restore_kwargs)
                 
                 if result.get("cancelled"):
                     self.frame.after(0, lambda: self.restore_disk_progress_label.config(text="Stopped"))

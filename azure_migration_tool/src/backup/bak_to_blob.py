@@ -50,6 +50,12 @@ from typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import urlparse
 
 from ..utils.paths import utc_ts_compact
+from .stripe_utils import (
+    MAX_BACKUP_STRIPES,
+    STRIPE_TARGET_GB,
+    get_database_size_mb,
+    recommend_backup_stripes,
+)
 
 try:
     from ..utils.redact_secrets import redact_sensitive_text
@@ -73,9 +79,8 @@ DEFAULT_BLOCK_SIZE = 65536                       # 64 KB
 # if post-backup revoke fails, the SAS stops working when this expires.
 _TOOL_BACKUP_SAS_POLICY_MAX_HOURS = 72
 
-# Stripe auto-sizing thresholds (compressed-ish, MB)
-# Each stripe target ~150 GB so we stay comfortably below the 200 GB ceiling
-_STRIPE_TARGET_GB = 150
+# Stripe auto-sizing thresholds — see stripe_utils.STRIPE_TARGET_GB
+_STRIPE_TARGET_GB = STRIPE_TARGET_GB
 
 
 def _parse_storage_connection_string(conn_str: str) -> Dict[str, str]:
@@ -447,44 +452,11 @@ def _check_mi_backup_supported(cur, log) -> Optional[str]:
 
 
 def _get_database_size_mb(cur, database: str) -> Optional[float]:
-    """Return total data+log size of the database in MB, or None if it can't be read."""
-    try:
-        cur.execute(
-            """
-            SELECT CAST(SUM(CAST(size AS BIGINT)) * 8.0 / 1024.0 AS FLOAT) AS size_mb
-            FROM sys.master_files
-            WHERE database_id = DB_ID(?)
-            """,
-            (database,),
-        )
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            return float(row[0])
-    except Exception:
-        pass
-    return None
+    return get_database_size_mb(cur, database)
 
 
 def _recommend_stripes(size_mb: Optional[float]) -> int:
-    """Pick a sensible stripe count based on database size."""
-    if size_mb is None or size_mb <= 0:
-        return 1
-    size_gb = size_mb / 1024.0
-    if size_gb < 50:
-        return 1
-    # Aim for roughly _STRIPE_TARGET_GB per stripe; clamp to power-of-two-ish values
-    n = max(1, math.ceil(size_gb / _STRIPE_TARGET_GB))
-    if n <= 1:
-        return 1
-    if n <= 2:
-        return 2
-    if n <= 4:
-        return 4
-    if n <= 8:
-        return 8
-    if n <= 16:
-        return 16
-    return 32  # SQL Server supports up to 64 URLs
+    return recommend_backup_stripes(size_mb, max_stripes=MAX_BACKUP_STRIPES)
 
 
 def _build_stripe_paths(safe_db: str, run_id: str, stripes: int) -> List[str]:

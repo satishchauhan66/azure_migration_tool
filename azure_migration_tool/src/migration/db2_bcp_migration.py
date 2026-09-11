@@ -7,6 +7,7 @@ No ADF. Routing is automatic — no UI method picker.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -20,6 +21,11 @@ from datetime import date, datetime, time as dtime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+if sys.platform.startswith("win"):
+    import winreg
+else:
+    winreg = None  # type: ignore[assignment]
 
 from ..utils.bcp_tools import find_bcp_exe
 from ..utils.database import connect_to_db2_jdbc, ensure_db2_jdbc_driver
@@ -116,7 +122,7 @@ def connect_db2(role: Dict[str, Any], logger: Optional[logging.Logger] = None):
 
 
 def find_db2_clp() -> Optional[str]:
-    """Locate db2.exe (CLP) for client-side EXPORT."""
+    """Locate db2.exe (full Data Server Client / SQLLIB — not the thin dsdriver)."""
     env = (os.environ.get("DB2_CLP") or os.environ.get("DB2_HOME") or "").strip()
     candidates: List[Path] = []
     if env:
@@ -127,18 +133,240 @@ def find_db2_clp() -> Optional[str]:
         candidates.append(Path(which))
     for base in (
         Path(r"C:\Program Files\IBM\SQLLIB\bin"),
-        Path(r"C:\Program Files\IBM\IBM DATA SERVER DRIVER\bin"),
+        Path(r"C:\Program Files (x86)\IBM\SQLLIB\bin"),
         Path(r"C:\IBM\SQLLIB\bin"),
         Path(r"D:\IBM\SQLLIB\bin"),
+        Path(r"E:\IBM\SQLLIB\bin"),
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "IBM" / "SQLLIB" / "bin",
     ):
         candidates.append(base / "db2.exe")
+    # Registry InstalledCopies (Windows)
+    if winreg is not None:
+        try:
+            key_path = r"SOFTWARE\IBM\DB2\InstalledCopies"
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as root:
+                    i = 0
+                    while True:
+                        try:
+                            copy_name = winreg.EnumKey(root, i)
+                        except OSError:
+                            break
+                        i += 1
+                        try:
+                            with winreg.OpenKey(root, copy_name) as ck:
+                                install, _ = winreg.QueryValueEx(ck, "DB2 Path")
+                                if install:
+                                    candidates.append(Path(install) / "bin" / "db2.exe")
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+        except Exception:
+            pass
     for c in candidates:
         try:
             if c.is_file():
-                return str(c)
+                return str(c.resolve())
         except Exception:
             continue
     return None
+
+
+def find_db2cmd(db2_exe: Optional[str] = None) -> Optional[str]:
+    """Locate db2cmd.exe (required to initialize CLP environment on Windows)."""
+    which = shutil.which("db2cmd") or shutil.which("db2cmd.exe")
+    if which:
+        return which
+    if db2_exe:
+        sibling = Path(db2_exe).resolve().parent / "db2cmd.exe"
+        if sibling.is_file():
+            return str(sibling)
+    for base in (
+        Path(r"C:\Program Files\IBM\SQLLIB\bin"),
+        Path(r"C:\Program Files (x86)\IBM\SQLLIB\bin"),
+        Path(r"C:\IBM\SQLLIB\bin"),
+    ):
+        p = base / "db2cmd.exe"
+        if p.is_file():
+            return str(p)
+    return None
+
+
+def _clp_node_alias(host: str, port: int) -> str:
+    """DB2 node names are limited to 8 characters."""
+    digest = hashlib.md5(f"{host}:{port}".encode("utf-8")).hexdigest()[:7]
+    return ("A" + digest)[:8].upper()
+
+
+def _clp_db_alias(db: str) -> str:
+    """Prefer real DB name when ≤8 chars; otherwise a stable short alias."""
+    name = re.sub(r"[^A-Za-z0-9]", "", (db or "").strip()) or "DB2DB"
+    if len(name) <= 8:
+        return name.upper()
+    return ("D" + hashlib.md5(name.encode("utf-8")).hexdigest()[:7]).upper()
+
+
+def _escape_clp_password(password: str) -> str:
+    """Quote password for CLP USING clause."""
+    # Double any embedded double-quotes
+    return '"' + (password or "").replace('"', '""') + '"'
+
+
+def _run_db2_clp_script(
+    db2_exe: str,
+    script: str,
+    *,
+    log: Optional[LogFn] = None,
+    work_dir: Optional[Path] = None,
+) -> Tuple[int, str]:
+    """
+    Run a multi-statement CLP script.
+
+    On Windows, db2.exe must be launched via db2cmd (sets instance env).
+    Avoid CREATE_NO_WINDOW — it commonly causes DB21018E / silent CLP failure.
+    """
+    script_dir = work_dir or Path(os.environ.get("TEMP") or ".")
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script_file = script_dir / f"amt_db2_clp_{os.getpid()}_{int(time.time() * 1000)}.sql"
+    script_file.write_text(script, encoding="utf-8", errors="replace")
+    try:
+        db2cmd = find_db2cmd(db2_exe) if sys.platform.startswith("win") else None
+        if db2cmd:
+            # db2cmd /c /w /i  — close, wait, inherit console; then run db2 -tvf
+            cmd = [db2cmd, "/c", "/w", "/i", db2_exe, "-tvf", str(script_file)]
+        else:
+            cmd = [db2_exe, "-tvf", str(script_file)]
+
+        env = os.environ.copy()
+        # Ensure SQLLIB bin is on PATH for dependent DLLs
+        bin_dir = str(Path(db2_exe).resolve().parent)
+        env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        if "DB2INSTANCE" not in env:
+            # Common default instance name for client installs
+            env["DB2INSTANCE"] = env.get("DB2INSTANCE") or "DB2"
+
+        _log(log, f"  CLP invoke: {' '.join(cmd[:5])}…")
+        startupinfo = None
+        creationflags = 0
+        if sys.platform.startswith("win"):
+            # Hide window without CREATE_NO_WINDOW (which breaks CLP)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=bin_dir,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            timeout=None,
+        )
+        out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        return int(proc.returncode or 0), out
+    finally:
+        try:
+            script_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _build_clp_connect_script(role: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Build catalog + CONNECT statements for a remote TCPIP DB2.
+    Returns (script_prefix_ending_with_CONNECT, db_alias_used).
+    """
+    db = (role.get("db") or "").strip()
+    user = (role.get("user") or "").strip()
+    password = role.get("password") or ""
+    host = (role.get("server") or "").strip()
+    port = int(role.get("port") or 50000)
+    node = _clp_node_alias(host, port)
+    alias = _clp_db_alias(db)
+    pwd = _escape_clp_password(password)
+
+    # Catalog is idempotent enough if we uncatalog first (ignore failures).
+    lines = [
+        f"UNCATALOG DATABASE {alias}",
+        f"UNCATALOG NODE {node}",
+        f"CATALOG TCPIP NODE {node} REMOTE {host} SERVER {port}",
+        f"CATALOG DATABASE {db} AS {alias} AT NODE {node} AUTHENTICATION SERVER",
+        "TERMINATE",
+        f"CONNECT TO {alias} USER {user} USING {pwd}",
+    ]
+    return "\n".join(lines), alias
+
+
+def export_db2_table_clp(
+    role: Dict[str, Any],
+    table: str,
+    out_file: Path,
+    *,
+    write_order: Sequence[str],
+    db2_exe: str,
+    log: Optional[LogFn] = None,
+) -> int:
+    """Client-side DB2 CLP EXPORT to pipe-delimited DEL file (writes on this host)."""
+    schema, name = _split_fqn(table)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    if out_file.exists():
+        out_file.unlink()
+
+    # Prefer a local staging path for EXPORT when UNC is used — CLP is more reliable
+    # writing local then we can copy; but UNC often works from the client. Try direct first.
+    out_path = str(out_file)
+    try:
+        out_path = str(out_file.resolve())
+    except Exception:
+        out_path = str(out_file)
+    out_path = out_path.replace("/", "\\")
+
+    select_sql = _export_select_sql(schema, name, write_order)
+    # coldel0x7C = '|'; nochardel = no quote wrapping
+    export_sql = (
+        f'EXPORT TO "{out_path}" OF DEL MODIFIED BY coldel0x7C nochardel {select_sql}'
+    )
+    connect_prefix, alias = _build_clp_connect_script(role)
+    host = (role.get("server") or "").strip()
+    port = int(role.get("port") or 50000)
+    db = (role.get("db") or "").strip()
+
+    script = connect_prefix + "\n" + export_sql + "\nCONNECT RESET\nTERMINATE\n"
+    _log(log, f"DB2 CLP EXPORT {table} -> {out_file.name}")
+    _log(log, f"  (remote {host}:{port} db={db} alias={alias})")
+
+    rc, out = _run_db2_clp_script(db2_exe, script, log=log, work_dir=out_file.parent)
+    for line in out.splitlines()[-50:]:
+        if line.strip():
+            _log(log, "  " + line)
+
+    # Soft-fail catalog noise is normal; require export file or clear EXPORT success
+    if not out_file.exists():
+        hint = ""
+        if "SQL1024N" in out or "not cataloged" in out.lower():
+            hint = (
+                " Catalog/connect failed — ensure IBM Data Server *Client* "
+                "(SQLLIB with db2.exe) is installed, not only the JDBC jar / dsdriver."
+            )
+        if "DB21018E" in out:
+            hint = (
+                " CLP failed to start (DB21018E). Run from a DB2 Command Window "
+                "or ensure db2cmd.exe is next to db2.exe and DB2INSTANCE is set."
+            )
+        if "SQL30081N" in out:
+            hint = f" Network error reaching {host}:{port} — check firewall / DB2 port."
+        raise RuntimeError(
+            f"DB2 CLP EXPORT produced no file (exit {rc}): {out[-2000:]}{hint}"
+        )
+
+    rows = _parse_rows_exported(out)
+    if rows is None:
+        rows = _count_file_lines(out_file, log)
+    _log(log, f"[OK] CLP EXPORT {rows:,} rows -> {out_file.name}")
+    return rows
 
 
 def list_db2_tables(
@@ -147,37 +375,45 @@ def list_db2_tables(
     schema: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
 ) -> List[TableInfo]:
-    """List DB2 tables with CARD estimate from SYSCAT.TABLES."""
+    """List DB2 tables with CARD and approximate size (NPAGES * tablespace pagesize)."""
     sch = (schema or role.get("schema") or "").strip() or None
     conn = connect_db2(role, logger)
     try:
         cur = conn.cursor()
+        # NPAGES = used data pages; PAGESIZE from tablespace (default 4K if missing).
+        # CARD / NPAGES can be -1 when RUNSTATS has not been collected.
+        base_sql = """
+            SELECT t.TABSCHEMA, t.TABNAME, t.CARD, t.NPAGES,
+                   COALESCE(ts.PAGESIZE, 4096) AS PAGESIZE
+            FROM SYSCAT.TABLES t
+            LEFT JOIN SYSCAT.TABLESPACES ts ON t.TBSPACE = ts.TBSPACE
+            WHERE t.TYPE = 'T'
+        """
         if sch:
             cur.execute(
-                """
-                SELECT TABSCHEMA, TABNAME, CARD
-                FROM SYSCAT.TABLES
-                WHERE TYPE = 'T' AND TABSCHEMA = ?
-                ORDER BY TABSCHEMA, TABNAME
-                """,
+                base_sql + " AND t.TABSCHEMA = ? ORDER BY t.TABSCHEMA, t.TABNAME",
                 [sch],
             )
         else:
             cur.execute(
-                """
-                SELECT TABSCHEMA, TABNAME, CARD
-                FROM SYSCAT.TABLES
-                WHERE TYPE = 'T' AND TABSCHEMA NOT LIKE 'SYS%'
-                ORDER BY TABSCHEMA, TABNAME
-                """
+                base_sql
+                + " AND t.TABSCHEMA NOT LIKE 'SYS%' ORDER BY t.TABSCHEMA, t.TABNAME"
             )
         out: List[TableInfo] = []
         for row in cur.fetchall():
             card = _py_int(row[2])
             if card < 0:
                 card = 0
+            npages = _py_int(row[3])
+            pagesize = _py_int(row[4]) or 4096
+            size_bytes = max(0, npages) * max(0, pagesize) if npages > 0 else 0
             out.append(
-                TableInfo(schema=_py_str(row[0]), name=_py_str(row[1]), src_rows=card)
+                TableInfo(
+                    schema=_py_str(row[0]),
+                    name=_py_str(row[1]),
+                    src_rows=card,
+                    src_size_bytes=size_bytes,
+                )
             )
         return out
     finally:
@@ -530,64 +766,6 @@ def _count_file_lines(path: Path, log: Optional[LogFn] = None) -> int:
     return n
 
 
-def export_db2_table_clp(
-    role: Dict[str, Any],
-    table: str,
-    out_file: Path,
-    *,
-    write_order: Sequence[str],
-    db2_exe: str,
-    log: Optional[LogFn] = None,
-) -> int:
-    """Client-side DB2 CLP EXPORT to pipe-delimited DEL file."""
-    schema, name = _split_fqn(table)
-    out_file.parent.mkdir(parents=True, exist_ok=True)
-    if out_file.exists():
-        out_file.unlink()
-    # CLP wants forward slashes or escaped paths on Windows
-    out_path = str(out_file.resolve()).replace("/", "\\")
-    select_sql = _export_select_sql(schema, name, write_order)
-    # coldel0x7C = ASCII '|' as column delimiter; nochardel avoids quote wrapping
-    export_sql = (
-        f"EXPORT TO \"{out_path}\" OF DEL MODIFIED BY coldel0x7C nochardel {select_sql}"
-    )
-    db = role["db"]
-    user = role.get("user") or ""
-    password = role.get("password") or ""
-    host = role.get("server") or ""
-    port = int(role.get("port") or 50000)
-
-    connect_cmds = [
-        f'CONNECT TO {db} USER {user} USING "{password}"',
-    ]
-    script = "\n".join(connect_cmds + [export_sql, "CONNECT RESET"]) + "\n"
-    _log(log, f"DB2 CLP EXPORT {table} -> {out_file.name}")
-    _log(log, f"  (host={host}:{port} db={db})")
-
-    # db2 -tvf via stdin
-    proc = subprocess.run(
-        [db2_exe, "-tv"],
-        input=script,
-        capture_output=True,
-        text=True,
-        creationflags=_CREATE_NO_WINDOW,
-        timeout=None,
-    )
-    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    for line in out.splitlines()[-40:]:
-        if line.strip():
-            _log(log, "  " + line)
-    if proc.returncode != 0 and not out_file.exists():
-        raise RuntimeError(f"DB2 CLP EXPORT failed (exit {proc.returncode}): {out[-2000:]}")
-    if not out_file.exists():
-        raise RuntimeError(f"DB2 CLP EXPORT produced no file: {out_file}\n{out[-1500:]}")
-    rows = _parse_rows_exported(out)
-    if rows is None:
-        rows = _count_file_lines(out_file, log)
-    _log(log, f"[OK] CLP EXPORT {rows:,} rows -> {out_file.name}")
-    return rows
-
-
 def export_db2_table_admin_cmd(
     role: Dict[str, Any],
     table: str,
@@ -772,11 +950,20 @@ def run_db2_preflight(cfg: Dict[str, Any], log: Optional[LogFn] = None) -> Tuple
 
     clp = find_db2_clp()
     if clp:
-        msgs.append(f"[OK] DB2 CLP: {clp} (preferred for large EXPORT)")
+        db2cmd = find_db2cmd(clp)
+        msgs.append(f"[OK] DB2 CLP: {clp}")
+        if sys.platform.startswith("win") and not db2cmd:
+            msgs.append(
+                "[WARN] db2cmd.exe not found next to db2.exe — CLP EXPORT may fail (DB21018E)"
+            )
+        else:
+            msgs.append("[OK] Large tables prefer native CLP EXPORT (remote catalog + EXPORT)")
     else:
         msgs.append(
-            "[OK] Large tables: client-side JDBC extract -> staging -> BCP "
-            "(db2.exe CLP not installed; ADMIN_CMD skipped — it needs DB2-server write ACL on UNC)"
+            "[WARN] db2.exe CLP not installed — large tables use slower client JDBC extract. "
+            "Install IBM Data Server Client (SQLLIB with db2.exe + db2cmd.exe), "
+            "not only the JDBC jar / Data Server Driver Package. "
+            "Then set DB2_HOME or DB2_CLP to the SQLLIB folder and re-Validate."
         )
 
     src = {

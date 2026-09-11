@@ -24,6 +24,58 @@ def _q(name: str) -> str:
     return "[" + name.replace("]", "]]") + "]"
 
 
+def disk_restore_unsupported_for_host(server: str) -> bool:
+    """True when hostname is Azure SQL Database or Managed Instance (*.database.windows.net)."""
+    host = (server or "").split(",")[0].strip().lower()
+    return ".database.windows.net" in host
+
+
+def disk_restore_unsupported_message(
+    server: str = "",
+    engine_edition: Optional[int] = None,
+) -> Optional[str]:
+    """
+    Return a user-facing message when RESTORE FROM DISK is not supported on the target.
+
+    Azure SQL Managed Instance and Azure SQL Database require blob URL restores only.
+    """
+    try:
+        from azure_migration_tool.src.utils.azure_compat import (
+            AZURE_MANAGED_INSTANCE_EDITION,
+            AZURE_SQL_DATABASE_EDITION,
+            detect_azure_engine_edition,
+            is_azure_sql_server,
+        )
+    except ImportError:
+        from src.utils.azure_compat import (
+            AZURE_MANAGED_INSTANCE_EDITION,
+            AZURE_SQL_DATABASE_EDITION,
+            detect_azure_engine_edition,
+            is_azure_sql_server,
+        )
+
+    edition = engine_edition
+    if edition is None and disk_restore_unsupported_for_host(server):
+        edition = AZURE_MANAGED_INSTANCE_EDITION
+
+    if edition == AZURE_MANAGED_INSTANCE_EDITION:
+        target = "Azure SQL Managed Instance"
+    elif edition == AZURE_SQL_DATABASE_EDITION:
+        target = "Azure SQL Database"
+    elif is_azure_sql_server(server):
+        target = "Azure SQL"
+    else:
+        return None
+
+    return (
+        f"{target} cannot restore from a local or UNC .bak path (RESTORE FROM DISK).\n\n"
+        "Use the 'Restore from Blob' tab instead:\n"
+        "  1. Upload the .bak to Azure Blob Storage (Local Backup tab or AzCopy)\n"
+        "  2. Restore to this server from the blob URL\n\n"
+        "SQL Server error 41902 (when attempted): URI backup device only."
+    )
+
+
 def get_recent_backups_from_history(
     *,
     server: str,
@@ -75,10 +127,11 @@ def get_recent_backups_from_history(
     
     cur = conn.cursor()
     
-    # Query backup history
+    # Query backup history (one row per stripe; grouped below by backup_set_id)
     sql = """
-        SELECT TOP (?)
+        SELECT
             bs.database_name,
+            bs.backup_set_id,
             bmf.physical_device_name,
             bs.backup_finish_date,
             bs.backup_size / 1024.0 / 1024.0 AS size_mb,
@@ -86,35 +139,64 @@ def get_recent_backups_from_history(
             bs.compressed_backup_size / 1024.0 / 1024.0 AS compressed_size_mb
         FROM msdb.dbo.backupset bs
         JOIN msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
-        WHERE bs.type = 'D'  -- Full database backups only
+        WHERE bs.type = 'D'
     """
-    
-    params = [limit]
-    
+    params: List = []
     if database:
         sql += " AND bs.database_name = ?"
         params.append(database)
-    
     sql += " ORDER BY bs.backup_finish_date DESC"
-    
+
     cur.execute(sql, params)
-    
-    backups = []
+
+    grouped: Dict[Any, Dict[str, Any]] = {}
     for row in cur:
-        backup_type = {
-            'D': 'Full',
-            'I': 'Differential',
-            'L': 'Log'
-        }.get(row[4], 'Unknown')
-        
-        backups.append({
-            'database_name': row[0],
-            'backup_path': row[1],
-            'backup_date': row[2],
-            'size_mb': round(row[3], 2),
-            'compressed_size_mb': round(row[5], 2) if row[5] else None,
-            'type': backup_type,
-        })
+        backup_type = {"D": "Full", "I": "Differential", "L": "Log"}.get(row[5], "Unknown")
+        key = row[1]
+        entry = grouped.get(key)
+        if entry is None:
+            entry = {
+                "database_name": row[0],
+                "backup_set_id": row[1],
+                "paths": [],
+                "backup_date": row[3],
+                "size_mb": round(float(row[4] or 0), 2),
+                "compressed_size_mb": round(float(row[6]), 2) if row[6] is not None else None,
+                "type": backup_type,
+            }
+            grouped[key] = entry
+        path = (row[2] or "").strip()
+        if path and path not in entry["paths"]:
+            entry["paths"].append(path)
+
+    backups = []
+    for entry in sorted(grouped.values(), key=lambda e: e["backup_date"], reverse=True)[:limit]:
+        try:
+            from ..backup.backup_path_utils import (
+                discover_disk_stripe_set,
+                format_backup_paths_for_ui,
+            )
+        except ImportError:
+            from src.backup.backup_path_utils import (
+                discover_disk_stripe_set,
+                format_backup_paths_for_ui,
+            )
+        primary = entry["paths"][0] if entry["paths"] else ""
+        paths = discover_disk_stripe_set(primary) if primary else list(entry["paths"])
+        if len(paths) == 1 and len(entry["paths"]) > 1:
+            paths = list(entry["paths"])
+        backups.append(
+            {
+                "database_name": entry["database_name"],
+                "backup_path": format_backup_paths_for_ui(paths),
+                "backup_paths": paths,
+                "stripe_count": len(paths),
+                "backup_date": entry["backup_date"],
+                "size_mb": entry["size_mb"],
+                "compressed_size_mb": entry["compressed_size_mb"],
+                "type": entry["type"],
+            }
+        )
     
     cur.close()
     conn.close()
@@ -187,9 +269,20 @@ def restore_database_from_disk(
         if backup_file_paths:
             paths = [p.strip() for p in backup_file_paths if (p or "").strip()]
         elif backup_file_path:
-            paths = [backup_file_path.strip()]
+            raw = backup_file_path.strip()
+            if ";" in raw:
+                paths = [p.strip() for p in raw.split(";") if p.strip()]
+            else:
+                paths = [raw]
         if not paths:
             raise ValueError("No backup file path(s) provided.")
+
+        try:
+            from ..backup.backup_path_utils import discover_disk_stripe_set
+        except ImportError:
+            from src.backup.backup_path_utils import discover_disk_stripe_set
+        if len(paths) == 1:
+            paths = discover_disk_stripe_set(paths[0])
         primary_path = paths[0]
 
         log(f"Connecting to SQL Server: {server}")
@@ -213,6 +306,16 @@ def restore_database_from_disk(
                 on_connect(conn)
             except Exception:
                 pass
+
+        try:
+            from azure_migration_tool.src.utils.azure_compat import detect_azure_engine_edition
+        except ImportError:
+            from src.utils.azure_compat import detect_azure_engine_edition
+        engine_edition = detect_azure_engine_edition(cur, server)
+        unsupported = disk_restore_unsupported_message(server, engine_edition)
+        if unsupported:
+            raise ValueError(unsupported)
+
         _watcher_stop = False
         if cancel_event is not None:
             def _watch_cancel() -> None:
@@ -425,12 +528,20 @@ def restore_database_from_disk(
                 )
             elif "access is denied" in error_str.lower() or "cannot open" in error_str.lower():
                 raise RuntimeError(
-                    f"Cannot access backup file: {backup_file_path}\n\n"
+                    f"Cannot access backup file: {primary_path}\n\n"
                     f"Solutions:\n"
                     f"1. Verify the path is correct\n"
                     f"2. Ensure SQL Server service account has read permission\n"
                     f"3. For network paths, verify the UNC path is accessible\n\n"
                     f"Original error: {restore_error}"
+                )
+            elif "41902" in error_str or "uri backup device" in error_str.lower():
+                raise ValueError(
+                    disk_restore_unsupported_message(server)
+                    or (
+                        "This SQL Server target cannot restore from DISK/UNC paths. "
+                        "Use Restore from Blob instead."
+                    )
                 )
             else:
                 raise restore_error

@@ -3,7 +3,7 @@
 """
 Download SQL Server .bak backup file(s) from Azure Blob Storage to a local or UNC path.
 
-Used by the Blob → Local Restore tab: download stripe sets to disk, then RESTORE FROM DISK.
+Download stripe sets to disk for restore via RESTORE FROM DISK (e.g. Local Backup workflow).
 """
 
 from __future__ import annotations

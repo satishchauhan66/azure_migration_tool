@@ -62,7 +62,8 @@ class ConnectionWidget:
         row_start: int = 0,
         db_type_var: Optional[tk.StringVar] = None,
         port_var: Optional[tk.StringVar] = None,
-        schema_var: Optional[tk.StringVar] = None
+        schema_var: Optional[tk.StringVar] = None,
+        server_only: bool = False,
     ):
         """
         Initialize connection widget.
@@ -79,8 +80,10 @@ class ConnectionWidget:
             db_type_var: Optional StringVar for database type (sqlserver/db2)
             port_var: Optional StringVar for port (for DB2)
             schema_var: Optional StringVar for schema (for DB2)
+            server_only: When True, show only server + authentication (no database picker)
         """
         self.parent = parent
+        self._server_only = server_only
         self.server_var = server_var
         self.db_var = db_var
         self.auth_var = auth_var
@@ -113,7 +116,8 @@ class ConnectionWidget:
         self._auth_display_var = tk.StringVar(value=AUTH_DISPLAY.get(self.auth_var.get(), self.auth_var.get()))
         
         # Database type row (for selecting SQL Server vs DB2)
-        tk.Label(self.frame, text="Database Type:").grid(row=row_start, column=0, sticky=tk.W, pady=5)
+        self._db_type_label = tk.Label(self.frame, text="Database Type:")
+        self._db_type_label.grid(row=row_start, column=0, sticky=tk.W, pady=5)
         self.db_type_combo = ttk.Combobox(self.frame, textvariable=self._db_type_display_var,
                                          values=list(DB_TYPE_DISPLAY.values()),
                                          state="readonly", width=37)
@@ -151,8 +155,10 @@ class ConnectionWidget:
         self._update_port_visibility()
         
         # Database row
-        tk.Label(self.frame, text="Database:").grid(row=row_start+3, column=0, sticky=tk.W, pady=5)
+        self._db_label = tk.Label(self.frame, text="Database:")
+        self._db_label.grid(row=row_start+3, column=0, sticky=tk.W, pady=5)
         db_frame = ttk.Frame(self.frame)
+        self._db_frame = db_frame
         db_frame.grid(row=row_start+3, column=1, pady=5, padx=5, sticky=tk.EW)
         
         # Create combobox - allow manual entry without triggering validation
@@ -176,6 +182,7 @@ class ConnectionWidget:
         self.schema_label = tk.Label(self.frame, text="Schema (e.g. user ID):")
         self.schema_label.grid(row=row_start+4, column=0, sticky=tk.W, pady=5)
         schema_frame = ttk.Frame(self.frame)
+        self._schema_frame = schema_frame
         schema_frame.grid(row=row_start+4, column=1, pady=5, padx=5, sticky=tk.EW)
         
         self.schema_combo = ttk.Combobox(
@@ -235,7 +242,24 @@ class ConnectionWidget:
         # Load saved servers + recent hosts / users
         self._refresh_server_list()
         self._on_user_combo_postcommand()
+
+        if self._server_only:
+            self._apply_server_only_layout()
     
+    def _apply_server_only_layout(self) -> None:
+        """Hide database-type/database/schema rows — server + auth only."""
+        for widget in (
+            self._db_type_label,
+            self.db_type_combo,
+            self.port_label,
+            self.port_entry,
+            self._db_label,
+            self._db_frame,
+            self.schema_label,
+            self._schema_frame,
+        ):
+            widget.grid_remove()
+
     def _on_db_type_combo_selected(self, event=None):
         """When user selects a database type from the combo, store internal value and update UI."""
         display = self._db_type_display_var.get()

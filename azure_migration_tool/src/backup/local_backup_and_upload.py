@@ -209,7 +209,9 @@ def run_local_backup_and_upload(
     delete_local_after_upload: bool = False,
     compression: bool = True,
     skip_upload: bool = False,
-    stripes: int = 1,
+    prefer_azcopy: bool = True,
+    structured_local_paths: bool = True,
+    stripes: Optional[int] = None,
     cancel_event: Optional[Any] = None,
     on_connect: Optional[Callable[[Any], None]] = None,
     log: Optional[Callable[[str], None]] = None,
@@ -349,39 +351,7 @@ def run_local_backup_and_upload(
         elif explicit_bak_file and is_unc_dir:
             log("Skipping Python write test (UNC folder not visible from this PC).")
 
-        try:
-            n_stripes = max(1, int(stripes or 1))
-        except (TypeError, ValueError):
-            n_stripes = 1
-
-        if explicit_bak_file:
-            if n_stripes > 1:
-                stem = local_file.stem  # filename without .bak
-                local_files = [
-                    local_file.parent / f"{stem}_part{i:02d}of{n_stripes:02d}.bak"
-                    for i in range(1, n_stripes + 1)
-                ]
-            else:
-                local_files = [local_file]
-        else:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            if n_stripes > 1:
-                local_files = [
-                    local_backup_dir / f"{database}_{timestamp}_part{i:02d}of{n_stripes:02d}.bak"
-                    for i in range(1, n_stripes + 1)
-                ]
-            else:
-                local_files = [local_backup_dir / f"{database}_{timestamp}.bak"]
-
-        # Keep single-file variables pointing at the first stripe for existing logic below.
-        local_file = local_files[0]
-        backup_filename = local_file.name
-        result["local_file"] = str(local_file)
-        result["local_files"] = [str(f) for f in local_files]
-        if n_stripes > 1:
-            log(f"Striped backup: {n_stripes} files")
-        
-        # Step 2: Connect to SQL Server and perform local backup
+        # Step 2: Connect to SQL Server (stripe count needs DB size when Auto)
         log(f"Connecting to SQL Server: {server}")
         
         # Build connection string for reuse
@@ -469,6 +439,66 @@ def run_local_backup_and_upload(
         row = cur.fetchone()
         db_size = row[0] if row and row[0] is not None else 0
         log(f"Database size: ~{db_size} GB")
+
+        try:
+            from .stripe_utils import STRIPE_TARGET_GB, get_database_size_mb, recommend_backup_stripes
+        except ImportError:
+            from src.backup.stripe_utils import STRIPE_TARGET_GB, get_database_size_mb, recommend_backup_stripes
+
+        size_mb = get_database_size_mb(cur, database)
+        if stripes is None or stripes <= 0:
+            n_stripes = recommend_backup_stripes(size_mb)
+            if size_mb is not None:
+                log(
+                    f"Auto stripes: {n_stripes} file(s) for ~{size_mb / 1024.0:.1f} GB "
+                    f"(~{STRIPE_TARGET_GB} GB per stripe, max 64)"
+                )
+            else:
+                log(f"Auto stripes: {n_stripes} file(s) (database size unknown)")
+        else:
+            n_stripes = max(1, min(64, int(stripes)))
+            log(f"Using {n_stripes} stripe(s) (user-specified)")
+        result["stripes"] = n_stripes
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result["run_id"] = timestamp
+        if explicit_bak_file:
+            target_dir = local_file.parent
+        elif structured_local_paths:
+            try:
+                from .backup_path_utils import build_structured_local_backup_dir
+            except ImportError:
+                from src.backup.backup_path_utils import build_structured_local_backup_dir
+            target_dir = build_structured_local_backup_dir(local_backup_dir, database, timestamp)
+            os.makedirs(str(target_dir), exist_ok=True)
+            log(f"Using structured backup folder: {target_dir}")
+        else:
+            target_dir = local_backup_dir
+
+        if explicit_bak_file:
+            if n_stripes > 1:
+                stem = local_file.stem
+                local_files = [
+                    local_file.parent / f"{stem}_part{i:02d}of{n_stripes:02d}.bak"
+                    for i in range(1, n_stripes + 1)
+                ]
+            else:
+                local_files = [local_file]
+        else:
+            if n_stripes > 1:
+                local_files = [
+                    target_dir / f"{database}_{timestamp}_part{i:02d}of{n_stripes:02d}.bak"
+                    for i in range(1, n_stripes + 1)
+                ]
+            else:
+                local_files = [target_dir / f"{database}_{timestamp}.bak"]
+
+        local_file = local_files[0]
+        backup_filename = local_file.name
+        result["local_file"] = str(local_file)
+        result["local_files"] = [str(f) for f in local_files]
+        if n_stripes > 1:
+            log(f"Striped backup: {n_stripes} files")
         
         # Build BACKUP DATABASE command (one DISK per stripe)
         disk_clause = ", ".join("DISK = ?" for _ in local_files)
@@ -688,6 +718,7 @@ def run_local_backup_and_upload(
                         container=blob_container,
                         blob_path=blob_path,
                         log=log,
+                        prefer_azcopy=prefer_azcopy,
                     )
                 else:
                     blob_url = _upload_with_connection_string(
@@ -696,6 +727,7 @@ def run_local_backup_and_upload(
                         container=blob_container,
                         blob_path=blob_path,
                         log=log,
+                        prefer_azcopy=prefer_azcopy,
                     )
                 
                 upload_elapsed = time.time() - upload_start
@@ -752,6 +784,7 @@ def upload_existing_bak_to_blob(
     structured_blob_paths: bool = True,
     delete_local_after_upload: bool = False,
     log: Optional[Callable[[str], None]] = None,
+    prefer_azcopy: bool = True,
 ) -> Dict[str, Any]:
     """
     Upload an EXISTING .bak file (local or an accessible UNC path) to Azure Blob Storage.
@@ -832,6 +865,7 @@ def upload_existing_bak_to_blob(
                 container=blob_container,
                 blob_path=blob_path,
                 log=log,
+                prefer_azcopy=prefer_azcopy,
             )
         else:
             if not blob_connection_string:
@@ -842,6 +876,7 @@ def upload_existing_bak_to_blob(
                 container=blob_container,
                 blob_path=blob_path,
                 log=log,
+                prefer_azcopy=prefer_azcopy,
             )
         upload_elapsed = time.time() - upload_start
         result["upload_time_sec"] = round(upload_elapsed, 2)
@@ -970,8 +1005,32 @@ def _upload_file_to_blob(
     container: str,
     blob_path: str,
     log: Callable[[str], None],
+    prefer_azcopy: bool = True,
 ) -> str:
     """Upload a local file to blob storage; return the blob URL."""
+    if prefer_azcopy:
+        try:
+            from ..utils.azcopy_utils import find_azcopy_executable, upload_file_with_azcopy
+        except ImportError:
+            try:
+                from src.utils.azcopy_utils import find_azcopy_executable, upload_file_with_azcopy
+            except ImportError:
+                find_azcopy_executable = None  # type: ignore[misc, assignment]
+                upload_file_with_azcopy = None  # type: ignore[misc, assignment]
+        if find_azcopy_executable and upload_file_with_azcopy and find_azcopy_executable():
+            log("  Using AzCopy for upload (recommended for large .bak files)...")
+            return upload_file_with_azcopy(
+                local_file,
+                blob_auth_mode=blob_auth_mode,
+                blob_connection_string=blob_connection_string,
+                blob_account_url=blob_account_url,
+                container=container,
+                blob_path=blob_path,
+                log=log,
+            )
+        if prefer_azcopy:
+            log("  AzCopy not found — falling back to Python SDK upload.")
+
     blob_service = _get_tool_blob_service_client(
         blob_auth_mode=blob_auth_mode,
         blob_connection_string=blob_connection_string,
@@ -980,7 +1039,7 @@ def _upload_file_to_blob(
         log=log,
     )
     blob_client = blob_service.get_blob_client(container=container, blob=blob_path)
-    log(f"  Uploading {local_file.name} to {container}/{blob_path}...")
+    log(f"  Uploading {local_file.name} to {container}/{blob_path} (SDK)...")
     with open(local_file, "rb") as data:
         blob_client.upload_blob(data, overwrite=True, max_concurrency=4)
     account_url = str(blob_service.url).rstrip("/")
@@ -993,6 +1052,7 @@ def _upload_with_managed_identity(
     container: str,
     blob_path: str,
     log: Callable[[str], None],
+    prefer_azcopy: bool = True,
 ) -> str:
     """Upload file to blob storage (Managed Identity / Azure AD mode)."""
     return _upload_file_to_blob(
@@ -1003,6 +1063,7 @@ def _upload_with_managed_identity(
         container=container,
         blob_path=blob_path,
         log=log,
+        prefer_azcopy=prefer_azcopy,
     )
 
 
@@ -1012,6 +1073,7 @@ def _upload_with_connection_string(
     container: str,
     blob_path: str,
     log: Callable[[str], None],
+    prefer_azcopy: bool = True,
 ) -> str:
     """Upload file to blob storage using connection string (account key)."""
     return _upload_file_to_blob(
@@ -1022,4 +1084,5 @@ def _upload_with_connection_string(
         container=container,
         blob_path=blob_path,
         log=log,
+        prefer_azcopy=prefer_azcopy,
     )

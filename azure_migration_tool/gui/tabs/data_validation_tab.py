@@ -20,7 +20,7 @@ sys.path.insert(0, str(parent_dir))
 from gui.utils.excel_utils import read_excel_file, create_sample_excel
 from gui.utils.database_utils import connect_with_msal_cache, connect_to_any_database
 from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
-from gui.utils.schema_remap import physical_dest_schema_table
+from gui.utils.schema_remap import physical_dest_schema_table, resolve_src_dest_table
 from gui.utils.compare_keys import (
     align_pairs_to_cursor_columns,
     db2_order_by_clause,
@@ -303,9 +303,20 @@ class DataValidationTab:
         options_frame = ttk.LabelFrame(scrollable_frame, text="Validation Options", padding=10)
         options_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        tk.Label(options_frame, text="Table Name (optional, leave empty for all tables):").pack(anchor=tk.W)
+        tk.Label(
+            options_frame,
+            text="Table Name (optional, leave empty for all tables):",
+        ).pack(anchor=tk.W)
         self.table_name_var = tk.StringVar()
         ttk.Entry(options_frame, textvariable=self.table_name_var, width=50).pack(anchor=tk.W, pady=5)
+        tk.Label(
+            options_frame,
+            text="DB2: use SOURCE_SCHEMA.TABLE or bare TABLE with Source Schema set. "
+            "Azure dbo.TABLE needs schema remap (e.g. userid -> dbo).",
+            font=("Arial", 8),
+            fg="gray",
+            wraplength=520,
+        ).pack(anchor=tk.W)
         
         self.sample_rows_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(options_frame, text="Sample Row Differences (first 100)", 
@@ -511,16 +522,38 @@ class DataValidationTab:
         self._last_sample_export_data = None  # for Export sample (top 100) to Excel
         self._cached_driver = None  # Cache the detected driver
 
+    def _remap_settings(self) -> dict:
+        """Current schema-remap UI settings for resolve helpers."""
+        return {
+            "remap_enabled": bool(
+                getattr(self, "schema_remap_enabled_var", None)
+                and self.schema_remap_enabled_var.get()
+            ),
+            "remap_from": (
+                (self.schema_remap_from_var.get() if getattr(self, "schema_remap_from_var", None) else "")
+                or ""
+            ),
+            "remap_to": (
+                (self.schema_remap_to_var.get() if getattr(self, "schema_remap_to_var", None) else "")
+                or ""
+            ),
+        }
+
     def _physical_dest_schema_table(self, src_schema: str, table_name: str):
         """Destination (schema, table) to query for a given source schema.table."""
         return physical_dest_schema_table(
             src_schema,
             table_name,
-            remap_enabled=bool(
-                getattr(self, "schema_remap_enabled_var", None) and self.schema_remap_enabled_var.get()
-            ),
-            remap_from=(self.schema_remap_from_var.get() if getattr(self, "schema_remap_from_var", None) else "") or "",
-            remap_to=(self.schema_remap_to_var.get() if getattr(self, "schema_remap_to_var", None) else "") or "",
+            **self._remap_settings(),
+        )
+
+    def _resolve_src_dest_table(self, table_spec: str, *, src_is_db2: bool, default_src_schema: str = ""):
+        """Resolve source/dest schemas for a user or catalog table name."""
+        return resolve_src_dest_table(
+            table_spec,
+            src_is_db2=src_is_db2,
+            default_src_schema=default_src_schema or "",
+            **self._remap_settings(),
         )
     
     def _get_odbc_driver(self):
@@ -727,7 +760,7 @@ class DataValidationTab:
                             WHERE TABLE_TYPE = 'BASE TABLE'
                             ORDER BY TABLE_SCHEMA, TABLE_NAME
                         """)
-                    tables = [f"{row[0]}.{row[1]}" for row in src_cur.fetchall()]
+                    tables = [f"{str(row[0]).strip()}.{str(row[1]).strip()}" for row in src_cur.fetchall()]
                     self._log(f"Found {len(tables)} table(s) in source database", logging.INFO, context)
                 
                 self._update_status(f"Validating {len(tables)} table(s)...", "green")
@@ -796,13 +829,43 @@ class DataValidationTab:
                     self._log("Using fast path: row counts from batch (no per-table queries).", logging.INFO, context)
                 
                 for idx, table in enumerate(tables, 1):
-                    schema, name = (
-                        table.split(".", 1) if "." in table else ("dbo", table)
-                    )
-                    dest_schema, dest_name = self._physical_dest_schema_table(
-                        schema, name
-                    )
+                    try:
+                        schema, name, dest_schema, dest_name = self._resolve_src_dest_table(
+                            table,
+                            src_is_db2=src_is_db2,
+                            default_src_schema=src_schema or "",
+                        )
+                    except ValueError as resolve_err:
+                        self._log(f"  [X] {resolve_err}", logging.ERROR, {**context, "table": table})
+                        err_key = f"error:{table}"
+                        self.validation_results[err_key] = {
+                            "type": "error",
+                            "table": table,
+                            "error": str(resolve_err),
+                        }
+                        def add_resolve_error(tbl=table, err=str(resolve_err), ek=f"error:{table}"):
+                            try:
+                                item = self.results_tree.insert(
+                                    "",
+                                    tk.END,
+                                    text=str(tbl),
+                                    values=("Row count", f"{src_db} vs {dest_db}", "Error", "Error", "Error", err[:200]),
+                                    tags=(ek,),
+                                )
+                                self.all_tree_items.append(item)
+                            except Exception:
+                                pass
+                        self.frame.after(0, add_resolve_error)
+                        continue
+                    # Prefer resolved source FQN so sample/compare reuse the correct DB2 schema
+                    table = f"{schema}.{name}"
                     table_context = {**context, "table": table}
+                    if f"{dest_schema}.{dest_name}".lower() != table.lower():
+                        self._log(
+                            f"  Schema map: source {table} -> dest [{dest_schema}].[{dest_name}]",
+                            logging.INFO,
+                            table_context,
+                        )
                     
                     # Update progress every 10 tables or for first/last
                     if idx % 10 == 0 or idx == 1 or idx == len(tables):
@@ -1522,7 +1585,7 @@ After installation, restart this application.
                                 WHERE TABLE_TYPE = 'BASE TABLE'
                                 ORDER BY TABLE_SCHEMA, TABLE_NAME
                             """)
-                        tables = [f"{row[0]}.{row[1]}" for row in src_cur.fetchall()]
+                        tables = [f"{str(row[0]).strip()}.{str(row[1]).strip()}" for row in src_cur.fetchall()]
                         self._log(f"Found {len(tables)} table(s) in source database", logging.INFO, context)
                         for i, tbl in enumerate(tables[:10], 1):  # Log first 10
                             self._log(f"  Table {i}: {tbl}", logging.DEBUG, context)
@@ -1536,8 +1599,23 @@ After installation, restart this application.
                     error_count = 0
                     
                     for table_idx, table in enumerate(tables, 1):
-                        schema, name = table.split('.', 1) if '.' in table else ('dbo', table)
-                        dest_schema, dest_name = self._physical_dest_schema_table(schema, name)
+                        try:
+                            schema, name, dest_schema, dest_name = self._resolve_src_dest_table(
+                                table,
+                                src_is_db2=src_is_db2,
+                                default_src_schema=src_schema_cfg or "",
+                            )
+                        except ValueError as resolve_err:
+                            error_count += 1
+                            self._log(f"  [X] {resolve_err}", logging.ERROR, {**context, "table": table})
+                            err_key = f"error:{src_db}.{table}"
+                            self.validation_results[err_key] = {
+                                "type": "error",
+                                "table": table,
+                                "error": str(resolve_err),
+                            }
+                            continue
+                        table = f"{schema}.{name}"
                         table_context = {**context, "table": table}
                         
                         # Update status for each table
@@ -1925,13 +2003,18 @@ After installation, restart this application.
             )
             return
         table = result.get("table", "")
-        if "." in table:
-            schema, name = table.split(".", 1)
-        else:
-            schema, name = "dbo", table
+        src_is_db2 = (self.src_db_type_var.get() or "").strip().lower() == "db2"
+        try:
+            schema, name, dest_schema, dest_name = self._resolve_src_dest_table(
+                table,
+                src_is_db2=src_is_db2,
+                default_src_schema=(self.src_schema_var.get() or "").strip(),
+            )
+        except ValueError as resolve_err:
+            messagebox.showwarning("Suggest compare key", str(resolve_err))
+            return
         if not name:
             return
-        dest_schema, dest_name = self._physical_dest_schema_table(schema, name)
         conn_info = None
         if "." in key:
             src_db_from_key = key.split(".", 1)[0]
@@ -2172,13 +2255,20 @@ After installation, restart this application.
         if not result or result.get("type") != "row_count":
             return
         table = result.get("table", "")
-        if "." in table:
-            schema, name = table.split(".", 1)
-        else:
-            schema, name = "dbo", table
+        src_is_db2 = (self.src_db_type_var.get() or "").strip().lower() == "db2"
+        try:
+            schema, name, dest_schema, dest_name = self._resolve_src_dest_table(
+                table,
+                src_is_db2=src_is_db2,
+                default_src_schema=(self.src_schema_var.get() or "").strip(),
+            )
+        except ValueError as resolve_err:
+            lbl = getattr(self, "detail_sample_result_label", None)
+            if lbl:
+                lbl.config(text=str(resolve_err), fg="red")
+            return
         if not name:
             return
-        dest_schema, dest_name = self._physical_dest_schema_table(schema, name)
         # Use bulk connection info if this result came from bulk validation (key is "src_db.schema.table")
         conn_info = None
         if "." in key:
