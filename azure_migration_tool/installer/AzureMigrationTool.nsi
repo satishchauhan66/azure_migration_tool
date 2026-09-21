@@ -49,6 +49,8 @@
 !define JAVA_DIR           "java"
 ; SQL Server Command Line Utilities (bcp.exe) - run installer\build_installer.ps1 to download MSI
 !define BCP_MSI            "tools\SqlCmdLnUtils.msi"
+; AzCopy v10 (blob upload) - run installer\download_azcopy.ps1 or build_installer.ps1
+!define AZCOPY_DIR         "azcopy"
 
 ; ---------------------------------------------------------------------------
 ; Installer attributes
@@ -74,7 +76,7 @@ Unicode True
 !define MUI_ABORTWARNING
 !define MUI_BRANDINGTEXT "Developed by 66Degrees"
 !define MUI_WELCOMEPAGE_TITLE "Welcome to ${PRODUCT_NAME} Setup"
-!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and optional components.$\r$\n$\r$\nYou can install for the current user only, or for all users (requires administrator).$\r$\n$\r$\nIncluded: application; BCP/SQL Command Line tools (if bundled); ODBC Driver 18 (all-users); Java 17 for DB2/JDBC if bundled.$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar).$\r$\n$\r$\nClick Next to continue."
+!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and optional components.$\r$\n$\r$\nYou can install for the current user only, or for all users (requires administrator).$\r$\n$\r$\nIncluded: application; AzCopy (blob upload); BCP/SQL Command Line tools (if bundled); ODBC Driver 18 (all-users); Java 17 for DB2/JDBC if bundled.$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar).$\r$\n$\r$\nClick Next to continue."
 !define MUI_FINISHPAGE_TITLE "Completing ${PRODUCT_NAME} Setup"
 !define MUI_FINISHPAGE_TEXT "${PRODUCT_NAME} has been installed.$\r$\n$\r$\nPer-user installs do not run the ODBC MSI automatically; install Microsoft ODBC Driver 18 for SQL Server separately if needed.$\r$\n$\r$\nDeveloped by 66Degrees."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXE}"
@@ -187,6 +189,13 @@ Section "MainSection" SEC01
   SetOutPath "$INSTDIR"
   !endif
 
+  !ifdef HAVE_AZCOPY
+  DetailPrint "Installing bundled AzCopy (blob upload)..."
+  SetOutPath "$INSTDIR\tools\azcopy"
+  File "${AZCOPY_DIR}\azcopy.exe"
+  SetOutPath "$INSTDIR"
+  !endif
+
   ; Registry + uninstall (hive follows install mode; stable id for in-place upgrades)
   ${if} $MultiUser.InstallMode == "AllUsers"
     WriteRegStr HKLM "Software\${PRODUCT_NAME}" "InstallPath" "$INSTDIR"
@@ -234,6 +243,8 @@ Section "Uninstall"
   Delete "$INSTDIR\odbc\msodbcsql18_x64.msi"
   RMDir "$INSTDIR\odbc"
   Delete "$INSTDIR\tools\SqlCmdLnUtils.msi"
+  Delete "$INSTDIR\tools\azcopy\azcopy.exe"
+  RMDir "$INSTDIR\tools\azcopy"
   RMDir "$INSTDIR\tools"
   RMDir /r "$INSTDIR\java"
   RMDir "$INSTDIR"

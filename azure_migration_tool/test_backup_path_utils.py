@@ -21,6 +21,9 @@ discover_disk_stripe_set = _mod.discover_disk_stripe_set
 infer_database_name_from_backup_path = _mod.infer_database_name_from_backup_path
 build_structured_local_backup_dir = _mod.build_structured_local_backup_dir
 format_backup_paths_for_ui = _mod.format_backup_paths_for_ui
+format_run_folder_for_ui = _mod.format_run_folder_for_ui
+discover_bak_files_in_run_folder = _mod.discover_bak_files_in_run_folder
+resolve_upload_paths_from_state = _mod.resolve_upload_paths_from_state
 
 
 class TestNormalizeBackupPath(unittest.TestCase):
@@ -88,6 +91,35 @@ class TestStructuredPaths(unittest.TestCase):
     def test_format_for_ui(self):
         joined = format_backup_paths_for_ui([r"a\b1.bak", r"a\b2.bak"])
         self.assertEqual(joined, r"a\b1.bak; a\b2.bak")
+
+    def test_format_run_folder(self):
+        paths = [
+            r"\\server\share\Db\20260918_011647\Db_20260918_011647_part01of02.bak",
+            r"\\server\share\Db\20260918_011647\Db_20260918_011647_part02of02.bak",
+        ]
+        self.assertEqual(
+            format_run_folder_for_ui(paths),
+            r"\\server\share\Db\20260918_011647",
+        )
+
+
+class TestRunFolderDiscovery(unittest.TestCase):
+    def test_discover_stripes_in_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "FUSION" / "20260918_011647"
+            root.mkdir(parents=True)
+            for i in range(1, 4):
+                (root / f"FUSION_20260918_011647_part{i:02d}of03.bak").write_bytes(b"x")
+            found = discover_bak_files_in_run_folder(str(root))
+            self.assertEqual(len(found), 3)
+
+    def test_resolve_from_folder_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "run"
+            root.mkdir()
+            (root / "single.bak").write_bytes(b"x")
+            paths = resolve_upload_paths_from_state(entry_text=str(root))
+            self.assertEqual(len(paths), 1)
 
 
 if __name__ == "__main__":

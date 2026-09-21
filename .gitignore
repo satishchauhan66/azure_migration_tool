@@ -32,6 +32,10 @@ azure_migration_tool/installer/java/
 azure_migration_tool/installer/odbc/*.msi
 azure_migration_tool/installer/tools/*.msi
 azure_migration_tool/tools/*.msi
+azure_migration_tool/installer/azcopy/
+azure_migration_tool/tools/azcopy/
+installer/azcopy/
+tools/azcopy/
 installer/java/
 installer/odbc/*.msi
 installer/tools/*.msi

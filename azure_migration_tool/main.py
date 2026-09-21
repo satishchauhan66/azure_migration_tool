@@ -34,8 +34,12 @@ def _suppress_subprocess_console_windows() -> None:
 
     def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         kwargs.setdefault("creationflags", 0)
-        kwargs["creationflags"] |= _CREATE_NO_WINDOW
-        if kwargs.get("startupinfo") is None:
+        # Allow intentional console windows (e.g. az login browser flow).
+        if not (kwargs["creationflags"] & subprocess.CREATE_NEW_CONSOLE):
+            kwargs["creationflags"] |= _CREATE_NO_WINDOW
+        if kwargs.get("startupinfo") is None and not (
+            kwargs["creationflags"] & subprocess.CREATE_NEW_CONSOLE
+        ):
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = 0  # SW_HIDE

@@ -161,13 +161,11 @@ class TestUploadFileToBlob(unittest.TestCase):
 
         shutil.rmtree(self._tmp, ignore_errors=True)
 
-    @mock.patch("src.backup.local_backup_and_upload._get_tool_blob_service_client")
-    def test_upload_uses_container_and_blob_path(self, mock_get_client):
-        mock_blob = mock.Mock()
-        mock_service = mock.Mock()
-        mock_service.get_blob_client.return_value = mock_blob
-        mock_service.url = ACCOUNT
-        mock_get_client.return_value = mock_service
+    @mock.patch("src.utils.azcopy_utils.upload_file_with_azcopy")
+    @mock.patch("src.utils.azcopy_utils.find_azcopy_executable", return_value="azcopy.exe")
+    def test_upload_uses_azcopy_with_container_and_blob_path(self, _mock_find, mock_azcopy):
+        dest = f"{ACCOUNT}/sqlbackups/NICU_test/20260810_031718/NICU_test.bak"
+        mock_azcopy.return_value = dest
 
         url = _upload_file_to_blob(
             local_file=self.bak,
@@ -177,16 +175,31 @@ class TestUploadFileToBlob(unittest.TestCase):
             container="sqlbackups",
             blob_path="NICU_test/20260810_031718/NICU_test.bak",
             log=lambda _: None,
+            require_azcopy=True,
         )
 
-        mock_get_client.assert_called_once()
-        self.assertEqual(mock_get_client.call_args.kwargs["container"], "sqlbackups")
-        mock_service.get_blob_client.assert_called_once_with(
-            container="sqlbackups",
-            blob="NICU_test/20260810_031718/NICU_test.bak",
+        mock_azcopy.assert_called_once()
+        self.assertEqual(mock_azcopy.call_args.kwargs["container"], "sqlbackups")
+        self.assertEqual(
+            mock_azcopy.call_args.kwargs["blob_path"],
+            "NICU_test/20260810_031718/NICU_test.bak",
         )
-        mock_blob.upload_blob.assert_called_once()
-        self.assertIn("sqlbackups", url)
+        self.assertEqual(url, dest)
+
+    @mock.patch("src.utils.azcopy_utils.find_azcopy_executable", return_value=None)
+    def test_upload_requires_azcopy_when_missing(self, _mock_find):
+        with self.assertRaises(RuntimeError) as ctx:
+            _upload_file_to_blob(
+                local_file=self.bak,
+                blob_auth_mode="connection_string",
+                blob_connection_string="AccountName=x;AccountKey=y;EndpointSuffix=core.windows.net",
+                blob_account_url="",
+                container="sqlbackups",
+                blob_path="x.bak",
+                log=lambda _: None,
+                require_azcopy=True,
+            )
+        self.assertIn("AzCopy is required", str(ctx.exception))
 
 
 class TestUploadExistingBakToBlob(unittest.TestCase):

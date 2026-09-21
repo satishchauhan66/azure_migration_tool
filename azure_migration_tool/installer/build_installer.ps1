@@ -96,6 +96,22 @@ if (-not (Test-Path $Db2Jar) -or ((Get-Item $Db2Jar).Length -lt 1000000)) {
 }
 Write-Host "DB2 JDBC present for embed: $Db2Jar"
 
+# 1d. Ensure AzCopy is present for installer + PyInstaller embed
+$AzCopyExe = Join-Path $ScriptDir "azcopy\azcopy.exe"
+if (-not (Test-Path $AzCopyExe)) {
+    Write-Host "Downloading AzCopy v10 for bundling..."
+    & (Join-Path $ScriptDir "download_azcopy.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: download_azcopy.ps1 failed" -ForegroundColor Red
+        Pause-IfError; exit 1
+    }
+}
+if (-not (Test-Path $AzCopyExe)) {
+    Write-Host "ERROR: installer\azcopy\azcopy.exe is required for blob upload on target PCs." -ForegroundColor Red
+    Pause-IfError; exit 1
+}
+Write-Host "AzCopy present for bundle: $AzCopyExe"
+
 # 2. Optional: ensure Java is bundled for DB2/JDBC
 $JavaExe = Join-Path $ScriptDir "java\bin\java.exe"
 if ($IncludeJava -and -not (Test-Path $JavaExe)) {
@@ -170,6 +186,7 @@ if ($version) { $makensisArgs = @("/DVERSION=$version") + $makensisArgs }
 if (Test-Path (Join-Path $ScriptDir "odbc\msodbcsql18_x64.msi")) { $makensisArgs = @("/DHAVE_ODBC") + $makensisArgs }
 if (Test-Path (Join-Path $ScriptDir "java\bin\java.exe")) { $makensisArgs = @("/DHAVE_JAVA") + $makensisArgs }
 if (Test-Path $BcpMsi) { $makensisArgs = @("/DHAVE_BCP") + $makensisArgs }
+if (Test-Path $AzCopyExe) { $makensisArgs = @("/DHAVE_AZCOPY") + $makensisArgs }
 Write-Host "Building installer with NSIS..."
 Push-Location $AppDir
 try {

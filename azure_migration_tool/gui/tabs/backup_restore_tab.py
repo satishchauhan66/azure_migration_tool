@@ -229,6 +229,8 @@ class BackupRestoreTab:
         # Local Backup: last .bak(s) created locally (used to pre-fill the upload step)
         self._local_last_backup_file: Optional[str] = None
         self._local_last_backup_files: list = []
+        self._local_last_run_id: str = ""
+        self._local_upload_tracker = None
         # Stop support for the Local Backup tab
         self._local_stop_event = threading.Event()
         self._local_active_conn = None
@@ -610,18 +612,19 @@ class BackupRestoreTab:
             show_browse_azure=True,
         )
 
-        # AzCopy + Azure CLI (required for large uploads / Azure AD blob auth on CDC host)
+        # AzCopy + Azure CLI (required for blob upload on CDC host)
         az_tools = ttk.LabelFrame(
             self.local_step3_frame,
-            text="Azure tools (AzCopy upload + sign-in)",
+            text="Azure tools (AzCopy required for upload)",
             padding=6,
         )
         az_tools.pack(fill=tk.X, pady=(8, 0))
-        self.local_use_azcopy_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
+        tk.Label(
             az_tools,
-            text="Use AzCopy for upload (recommended for large .bak files; falls back to SDK if missing)",
-            variable=self.local_use_azcopy_var,
+            text="Step 2 uploads use AzCopy only. The Setup installer includes AzCopy; Azure CLI is still required for Azure AD sign-in.",
+            fg="gray",
+            wraplength=650,
+            justify=tk.LEFT,
         ).pack(anchor=tk.W)
         self.local_azure_tools_status_var = tk.StringVar(value="Checking Azure CLI / AzCopy...")
         tk.Label(
@@ -646,6 +649,12 @@ class BackupRestoreTab:
             width=26,
         )
         self.local_az_signin_btn.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            az_btn_row,
+            text="Sign in (browser window)",
+            command=self._sign_in_azure_browser_window,
+            width=22,
+        ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             az_btn_row,
             text="Install instructions",
@@ -690,8 +699,9 @@ class BackupRestoreTab:
         # File to upload — auto-filled after 'Create Local Backup', or Browse an existing .bak.
         upload_file_row = ttk.Frame(self.local_step3_frame)
         upload_file_row.pack(fill=tk.X, pady=(10, 0))
-        tk.Label(upload_file_row, text="File to upload (.bak):").pack(side=tk.LEFT)
+        tk.Label(upload_file_row, text="Upload source (.bak or run folder):").pack(side=tk.LEFT)
         self.local_upload_file_var = tk.StringVar(value="")
+        self.local_upload_file_var.trace_add("write", lambda *_: self._schedule_local_upload_status_refresh())
         ttk.Entry(upload_file_row, textvariable=self.local_upload_file_var, width=48).pack(
             side=tk.LEFT, padx=(8, 4), fill=tk.X, expand=True
         )
@@ -700,11 +710,31 @@ class BackupRestoreTab:
         ).pack(side=tk.LEFT)
         tk.Label(
             self.local_step3_frame,
-            text="Auto-filled after 'Create Local Backup'. You can also browse an existing .bak "
-            "(must be readable from this PC — UNC files may not be).",
+            text="After backup, the run folder is filled (e.g. "
+            "\\\\server\\SQLBackups\\MyDb\\20260918_011647). "
+            "All .bak stripes in that folder are discovered automatically.",
             fg="gray",
             wraplength=650,
         ).pack(anchor=tk.W, pady=(4, 0))
+
+        parallel_row = ttk.Frame(self.local_step3_frame)
+        parallel_row.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(parallel_row, text="Parallel stripe uploads:").pack(side=tk.LEFT)
+        self.local_parallel_uploads_var = tk.StringVar(value="max")
+        parallel_combo = ttk.Combobox(
+            parallel_row,
+            textvariable=self.local_parallel_uploads_var,
+            values=("max", "32", "16", "8", "4", "1"),
+            width=8,
+            state="readonly",
+        )
+        parallel_combo.pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(
+            parallel_row,
+            text="Striped backups upload as one folder job (recommended). "
+            "Per-file parallel is capped at 4 for Azure AD auth.",
+            fg="gray",
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         # Two-step buttons: (1) create local backup, then (2) upload that file to blob.
         btn_frame = ttk.Frame(parent)
@@ -741,9 +771,28 @@ class BackupRestoreTab:
         # Log
         log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.local_upload_status_var = tk.StringVar(
+            value="Upload status: idle — run preflight on upload (AzCopy, auth, file count, size)."
+        )
+        tk.Label(
+            log_frame,
+            textvariable=self.local_upload_status_var,
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=720,
+            fg="#1a5276",
+        ).pack(fill=tk.X, pady=(0, 6))
         self.local_backup_log = scrolledtext.ScrolledText(log_frame, height=10, wrap=tk.WORD)
         self.local_backup_log.pack(fill=tk.BOTH, expand=True)
         self.frame.after(800, self._schedule_local_stripe_refresh)
+
+    def _schedule_local_upload_status_refresh(self) -> None:
+        if getattr(self, "_local_upload_status_after_id", None) is not None:
+            try:
+                self.frame.after_cancel(self._local_upload_status_after_id)
+            except Exception:
+                pass
+        self._local_upload_status_after_id = self.frame.after(400, self._refresh_local_upload_status)
 
     def _schedule_local_stripe_refresh(self, *_args) -> None:
         """Debounce stripe recommendation when server/database changes."""
@@ -813,21 +862,27 @@ class BackupRestoreTab:
                         get_database_size_mb,
                         recommend_backup_stripes,
                     )
-                    from src.utils.database import connect_to_database
+                    from src.utils.database import connect_to_database, pick_sql_driver
                 except ImportError:
                     from azure_migration_tool.src.backup.stripe_utils import (
                         format_stripe_hint,
                         get_database_size_mb,
                         recommend_backup_stripes,
                     )
-                    from azure_migration_tool.src.utils.database import connect_to_database
+                    from azure_migration_tool.src.utils.database import (
+                        connect_to_database,
+                        pick_sql_driver,
+                    )
 
+                auth = self.local_auth_var.get() or "windows"
+                driver = pick_sql_driver(logger)
                 conn = connect_to_database(
                     server=server,
                     db="master",
                     user=self.local_user_var.get() or "",
-                    auth=self.local_auth_var.get() or "windows",
-                    password=self.local_password_var.get() or "",
+                    driver=driver,
+                    auth=auth,
+                    password=self.local_password_var.get() or None,
                     timeout=30,
                     logger=logger,
                 )
@@ -1669,18 +1724,56 @@ class BackupRestoreTab:
         if f:
             self.local_upload_file_var.set(f)
 
+    def _local_parallel_upload_worker_count(self) -> Optional[int]:
+        """None / max -> upload module uses all stripes in parallel (cap 64)."""
+        raw = (self.local_parallel_uploads_var.get() or "max").strip().lower()
+        if raw in ("max", "all", ""):
+            return None
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return None
+
     def _resolve_local_upload_paths(self) -> List[str]:
-        """Best-effort list of .bak paths for upload / open-folder."""
-        raw_field = (self.local_upload_file_var.get() or "").strip()
-        files = [p.strip() for p in raw_field.split(";") if p.strip()]
-        if files:
-            return files
-        if self._local_last_backup_files:
-            return list(self._local_last_backup_files)
-        step2_path = (self.local_backup_path_var.get() or "").strip()
-        if step2_path.lower().endswith(".bak"):
-            return [step2_path]
-        return []
+        """Resolve .bak paths from run folder, stripes, or last backup state."""
+        try:
+            from src.backup.backup_path_utils import resolve_upload_paths_from_state
+        except ImportError:
+            from azure_migration_tool.src.backup.backup_path_utils import (
+                resolve_upload_paths_from_state,
+            )
+        return resolve_upload_paths_from_state(
+            entry_text=self.local_upload_file_var.get() or "",
+            last_backup_files=self._local_last_backup_files,
+            backup_root=self.local_backup_path_var.get() or "",
+            database=self.local_db_var.get() or "",
+            run_id=self._local_last_run_id or "",
+            structured_local_paths=self.local_structured_paths_var.get(),
+        )
+
+    def _refresh_local_upload_status(self) -> None:
+        tracker = self._local_upload_tracker
+        if tracker is not None:
+            self.local_upload_status_var.set(tracker.format_status_line())
+            return
+        paths = self._resolve_local_upload_paths()
+        if paths:
+            total = 0
+            for p in paths:
+                try:
+                    total += os.path.getsize(os.path.normpath(p))
+                except OSError:
+                    pass
+            gb = total / (1024**3) if total else 0.0
+            folder = os.path.dirname(paths[0]) if paths else ""
+            self.local_upload_status_var.set(
+                f"Ready: {len(paths)} .bak file(s), ~{gb:.2f} GB"
+                + (f" · {folder}" if folder else "")
+            )
+        else:
+            self.local_upload_status_var.set(
+                "Upload status: set run folder or create a local backup first."
+            )
 
     def _resolve_local_backup_folder(self) -> str:
         """Directory to open — prefer created backup file(s), then Step 2 path."""
@@ -2013,6 +2106,7 @@ class BackupRestoreTab:
                     files = [f for f in files if f]
                     self._local_last_backup_files = files
                     self._local_last_backup_file = files[0] if files else ""
+                    self._local_last_run_id = str(result.get("run_id") or "")
                     used_stripes = int(result.get("stripes") or 1)
                     try:
                         from gui.utils.local_backup_settings import save_stripe_preference
@@ -2027,8 +2121,17 @@ class BackupRestoreTab:
                         stripes_value=val,
                         last_auto_stripes=used_stripes,
                     )
-                    # Pre-fill the upload field (semicolon-separated for striped sets).
-                    self.frame.after(0, lambda fs=files: self.local_upload_file_var.set("; ".join(fs)))
+                    try:
+                        from src.backup.backup_path_utils import format_run_folder_for_ui
+                    except ImportError:
+                        from azure_migration_tool.src.backup.backup_path_utils import (
+                            format_run_folder_for_ui,
+                        )
+                    self.frame.after(
+                        0,
+                        lambda fs=files: self.local_upload_file_var.set(format_run_folder_for_ui(fs)),
+                    )
+                    self.frame.after(0, self._refresh_local_upload_status)
                     is_network = bool(files) and (files[0].startswith("\\\\") or files[0].startswith("//"))
                     files_txt = "\n".join(f"  {f}" for f in files)
                     msg = (
@@ -2064,13 +2167,20 @@ class BackupRestoreTab:
     def _start_local_upload_to_blob(self):
         """Step 2: Upload the created (or selected) .bak file to Azure Blob."""
         try:
-            from src.backup.local_backup_and_upload import upload_existing_bak_to_blob
+            from src.backup.local_backup_and_upload import (
+                run_blob_upload_preflight,
+                upload_existing_bak_files_parallel,
+            )
         except ImportError:
             try:
-                from azure_migration_tool.src.backup.local_backup_and_upload import upload_existing_bak_to_blob
+                from azure_migration_tool.src.backup.local_backup_and_upload import (
+                    run_blob_upload_preflight,
+                    upload_existing_bak_files_parallel,
+                )
             except ImportError:
-                upload_existing_bak_to_blob = None
-        if not upload_existing_bak_to_blob:
+                run_blob_upload_preflight = None
+                upload_existing_bak_files_parallel = None
+        if not upload_existing_bak_files_parallel or not run_blob_upload_preflight:
             messagebox.showerror("Error", "Local backup module not available (need azure-storage-blob).")
             return
 
@@ -2078,35 +2188,11 @@ class BackupRestoreTab:
         if not files:
             messagebox.showerror(
                 "Error",
-                "No .bak file to upload. Click '1. Create Local Backup' first, or Browse an existing .bak.",
+                "No .bak files found. Use a run folder like:\n"
+                "\\\\server\\SQLBackups\\Database\\20260918_011647\n"
+                "or click '1. Create Local Backup' first.",
             )
             return
-
-        readable: List[str] = []
-        missing: List[str] = []
-        for fpath in files:
-            norm = os.path.normpath(os.path.expanduser(fpath.strip()))
-            if os.path.isfile(norm):
-                readable.append(norm)
-            else:
-                missing.append(fpath)
-        if not readable:
-            messagebox.showerror(
-                "Cannot upload",
-                "None of the selected .bak files are readable from this PC.\n\n"
-                + "\n".join(missing[:8])
-                + ("\n..." if len(missing) > 8 else "")
-                + "\n\nUpload reads files from THIS PC. Use a path this machine can access "
-                "(local disk or UNC share), or copy the .bak here first.",
-            )
-            return
-        if missing and not messagebox.askyesno(
-            "Some files missing",
-            f"{len(missing)} file(s) are not readable from this PC and will be skipped.\n"
-            f"Continue uploading {len(readable)} file(s)?",
-        ):
-            return
-        files = readable
 
         blob_auth_mode = self.blob_auth_mode_var.get() or "connection_string"
         conn_str = (self.blob_conn_var.get() or "").strip()
@@ -2139,54 +2225,88 @@ class BackupRestoreTab:
 
         self._local_stop_event.clear()
 
-        def log(msg):
-            self.frame.after(0, lambda m=msg: self.local_backup_log.insert(tk.END, m + "\n"))
-            self.frame.after(0, lambda: self.local_backup_log.see(tk.END))
-
-        preflight_err = self._preflight_azcopy_upload(blob_auth_mode, log)
-        if preflight_err:
-            if not messagebox.askyesno(
-                "Azure tools not ready",
-                preflight_err
-                + "\n\nContinue with Python SDK upload instead (slower for large files)?",
-            ):
-                return
-
         self._local_set_busy(True)
-        log(f"=== Uploading {len(files)} file(s) to Blob ===")
+        self.local_upload_status_var.set("Preflight: checking AzCopy, auth, and files…")
+
+        max_parallel = self._local_parallel_upload_worker_count()
 
         def run():
             uploaded = 0
             failed = 0
             last_url = ""
+
+            def log(msg):
+                self.frame.after(0, lambda m=msg: self.local_backup_log.insert(tk.END, m + "\n"))
+                self.frame.after(0, lambda: self.local_backup_log.see(tk.END))
+                tracker = self._local_upload_tracker
+                if tracker is not None:
+                    tracker.note_log_line(str(msg))
+                self.frame.after(0, self._refresh_local_upload_status)
+
             try:
-                for idx, fpath in enumerate(files, 1):
-                    if self._local_stop_event.is_set():
-                        log("Stop requested — remaining uploads cancelled.")
-                        break
-                    log(f"[{idx}/{len(files)}] {fpath}")
-                    result = upload_existing_bak_to_blob(
-                        local_file_path=fpath,
-                        blob_auth_mode=blob_auth_mode,
-                        blob_connection_string=conn_str,
-                        blob_account_url=storage_account_url,
-                        blob_container=container,
-                        blob_folder=blob_folder,
-                        database=database,
-                        structured_blob_paths=structured_blob_paths,
-                        delete_local_after_upload=self.local_delete_after_upload_var.get(),
-                        prefer_azcopy=bool(
-                            getattr(self, "local_use_azcopy_var", None)
-                            and self.local_use_azcopy_var.get()
-                        ),
-                        log=log,
+                pre = run_blob_upload_preflight(
+                    files,
+                    blob_auth_mode=blob_auth_mode,
+                    blob_connection_string=conn_str,
+                    blob_account_url=storage_account_url,
+                    blob_container=container,
+                    log=log,
+                )
+                if not pre.get("ok"):
+                    err = pre.get("message") or "Upload preflight failed."
+                    self.frame.after(0, lambda: messagebox.showerror("Upload preflight", err))
+                    return
+                upload_files = pre.get("files") or []
+                missing = pre.get("missing") or []
+                if missing:
+                    log(f"Note: {len(missing)} path(s) skipped (not readable on this PC).")
+
+                try:
+                    from src.utils.blob_upload_progress import BlobUploadStatusTracker
+                except ImportError:
+                    from azure_migration_tool.src.utils.blob_upload_progress import (
+                        BlobUploadStatusTracker,
                     )
-                    if result.get("success"):
-                        uploaded += 1
-                        last_url = result.get("blob_url", "") or last_url
-                    else:
-                        failed += 1
-                        log(f"  [X] {result.get('message', 'Upload failed')}")
+                self._local_upload_tracker = BlobUploadStatusTracker(
+                    total_files=len(upload_files),
+                    total_bytes=int(pre.get("total_bytes") or 0),
+                )
+                self._local_upload_tracker.set_phase("Uploading")
+                self.frame.after(0, self._refresh_local_upload_status)
+
+                def on_azcopy_line(line: str) -> None:
+                    tracker = self._local_upload_tracker
+                    if tracker is not None:
+                        tracker.note_log_line(line)
+                    self.frame.after(0, self._refresh_local_upload_status)
+
+                def on_file_finished(ok: bool) -> None:
+                    tracker = self._local_upload_tracker
+                    if tracker is not None:
+                        tracker.note_file_finished(ok)
+                    self.frame.after(0, self._refresh_local_upload_status)
+
+                log(f"=== Uploading {len(upload_files)} file(s) to Blob ===")
+                batch = upload_existing_bak_files_parallel(
+                    local_file_paths=upload_files,
+                    max_parallel_uploads=max_parallel,
+                    cancel_event=self._local_stop_event,
+                    blob_auth_mode=blob_auth_mode,
+                    blob_connection_string=conn_str,
+                    blob_account_url=storage_account_url,
+                    blob_container=container,
+                    blob_folder=blob_folder,
+                    database=database,
+                    structured_blob_paths=structured_blob_paths,
+                    delete_local_after_upload=self.local_delete_after_upload_var.get(),
+                    require_azcopy=True,
+                    log=log,
+                    on_azcopy_line=on_azcopy_line,
+                    on_file_finished=on_file_finished,
+                )
+                uploaded = int(batch.get("uploaded", 0))
+                failed = int(batch.get("failed", 0))
+                last_url = batch.get("blob_url", "") or ""
 
                 cancelled = self._local_stop_event.is_set()
                 if cancelled and uploaded == 0:
@@ -2206,6 +2326,18 @@ class BackupRestoreTab:
                 log(f"ERROR: {str(e)}")
                 self.frame.after(0, lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)))
             finally:
+                tracker = self._local_upload_tracker
+                if tracker is not None:
+                    tracker.completed_files = max(tracker.completed_files, uploaded)
+                    if failed == 0 and uploaded >= tracker.total_files:
+                        tracker.azcopy_percent = 100.0
+                    if failed == 0 and uploaded > 0:
+                        tracker.set_phase("Complete")
+                    elif uploaded > 0:
+                        tracker.set_phase("Finished with errors")
+                    else:
+                        tracker.set_phase("Failed")
+                    self.frame.after(0, self._refresh_local_upload_status)
                 self.frame.after(0, lambda: self._local_set_busy(False))
 
         threading.Thread(target=run, daemon=True).start()
@@ -2213,16 +2345,21 @@ class BackupRestoreTab:
     def _refresh_local_azure_tools_status(self) -> None:
         """Update AzCopy / Azure CLI status label on the Local Backup tab."""
         try:
-            from src.utils.azcopy_utils import format_azure_tools_status
+            from src.utils.azcopy_utils import augment_path_for_azure_tools, format_azure_tools_status
         except ImportError:
             try:
-                from azure_migration_tool.src.utils.azcopy_utils import format_azure_tools_status
+                from azure_migration_tool.src.utils.azcopy_utils import (
+                    augment_path_for_azure_tools,
+                    format_azure_tools_status,
+                )
             except ImportError:
                 self.local_azure_tools_status_var.set(
                     "AzCopy helpers not available (update the app)."
                 )
                 return
+        augment_path_for_azure_tools()
         self.local_azure_tools_status_var.set(format_azure_tools_status())
+        self._enable_local_azure_signin_buttons()
 
     def _show_azure_tools_install_help(self) -> None:
         try:
@@ -2238,8 +2375,39 @@ class BackupRestoreTab:
                 return
         messagebox.showinfo("Install Azure CLI + AzCopy", install_instructions())
 
+    def _enable_local_azure_signin_buttons(self) -> None:
+        for attr in ("local_az_signin_btn",):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                try:
+                    btn.config(state=tk.NORMAL)
+                except tk.TclError:
+                    pass
+
     def _sign_in_azure_for_upload(self) -> None:
         """Run az login (device code) from the app and refresh status."""
+        self._run_azure_cli_sign_in(use_device_code=True)
+
+    def _sign_in_azure_browser_window(self) -> None:
+        """Open a console window for interactive az login (browser)."""
+        self._run_azure_cli_sign_in(use_device_code=False)
+
+    def _run_azure_cli_sign_in(self, *, use_device_code: bool) -> None:
+        try:
+            from src.utils.azcopy_utils import find_az_cli_executable, install_instructions
+        except ImportError:
+            from azure_migration_tool.src.utils.azcopy_utils import (
+                find_az_cli_executable,
+                install_instructions,
+            )
+        if not find_az_cli_executable():
+            messagebox.showerror(
+                "Azure CLI required",
+                install_instructions(),
+            )
+            self._refresh_local_azure_tools_status()
+            return
+
         self.local_az_signin_btn.config(state=tk.DISABLED)
         self.local_azure_tools_status_var.set("Signing in to Azure...")
 
@@ -2252,13 +2420,26 @@ class BackupRestoreTab:
                 ),
             )
 
+        def on_device_code(hint: str) -> None:
+            self.frame.after(
+                0,
+                lambda h=hint: messagebox.showinfo(
+                    "Azure device sign-in",
+                    "Complete sign-in in your browser:\n\n" + h,
+                ),
+            )
+
         def run() -> None:
             try:
                 try:
                     from src.utils.azcopy_utils import run_az_login
                 except ImportError:
                     from azure_migration_tool.src.utils.azcopy_utils import run_az_login
-                ok = run_az_login(log, use_device_code=True)
+                ok = run_az_login(
+                    log,
+                    use_device_code=use_device_code,
+                    on_device_code=on_device_code if use_device_code else None,
+                )
                 self.frame.after(0, self._refresh_local_azure_tools_status)
                 if ok:
                     self.frame.after(
@@ -2268,7 +2449,7 @@ class BackupRestoreTab:
                             "Azure CLI sign-in completed. You can upload to blob now.",
                         ),
                     )
-                else:
+                elif use_device_code:
                     self.frame.after(
                         0,
                         lambda: messagebox.showerror(
@@ -2285,22 +2466,24 @@ class BackupRestoreTab:
                     ),
                 )
             finally:
-                self.frame.after(0, lambda: self.local_az_signin_btn.config(state=tk.NORMAL))
+                self.frame.after(0, self._enable_local_azure_signin_buttons)
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _preflight_azcopy_upload(self, blob_auth_mode: str, log) -> Optional[str]:
+    def _preflight_azcopy_upload(
+        self, blob_auth_mode: str, log, *, auto_login: bool = False
+    ) -> Optional[str]:
         """Return error message if AzCopy upload cannot proceed, else None."""
-        if not getattr(self, "local_use_azcopy_var", None) or not self.local_use_azcopy_var.get():
-            return None
         try:
             from src.utils.azcopy_utils import ensure_azcopy_ready_for_upload
         except ImportError:
             try:
                 from azure_migration_tool.src.utils.azcopy_utils import ensure_azcopy_ready_for_upload
             except ImportError:
-                return None
-        return ensure_azcopy_ready_for_upload(blob_auth_mode, log=log)
+                return "AzCopy utilities are not available."
+        return ensure_azcopy_ready_for_upload(
+            blob_auth_mode, log=log, auto_login=auto_login
+        )
 
     def _create_restore_from_blob_widgets(self, parent):
         """Restore database from Azure Blob (.bak)."""

@@ -22,10 +22,12 @@ Limitations:
 import os
 import logging
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +211,7 @@ def run_local_backup_and_upload(
     delete_local_after_upload: bool = False,
     compression: bool = True,
     skip_upload: bool = False,
-    prefer_azcopy: bool = True,
+    require_azcopy: bool = True,
     structured_local_paths: bool = True,
     stripes: Optional[int] = None,
     cancel_event: Optional[Any] = None,
@@ -718,7 +720,7 @@ def run_local_backup_and_upload(
                         container=blob_container,
                         blob_path=blob_path,
                         log=log,
-                        prefer_azcopy=prefer_azcopy,
+                        require_azcopy=require_azcopy,
                     )
                 else:
                     blob_url = _upload_with_connection_string(
@@ -727,7 +729,7 @@ def run_local_backup_and_upload(
                         container=blob_container,
                         blob_path=blob_path,
                         log=log,
-                        prefer_azcopy=prefer_azcopy,
+                        require_azcopy=require_azcopy,
                     )
                 
                 upload_elapsed = time.time() - upload_start
@@ -784,7 +786,9 @@ def upload_existing_bak_to_blob(
     structured_blob_paths: bool = True,
     delete_local_after_upload: bool = False,
     log: Optional[Callable[[str], None]] = None,
-    prefer_azcopy: bool = True,
+    require_azcopy: bool = True,
+    parallel_file_jobs: int = 1,
+    on_azcopy_line: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
     Upload an EXISTING .bak file (local or an accessible UNC path) to Azure Blob Storage.
@@ -865,7 +869,9 @@ def upload_existing_bak_to_blob(
                 container=blob_container,
                 blob_path=blob_path,
                 log=log,
-                prefer_azcopy=prefer_azcopy,
+                require_azcopy=require_azcopy,
+                parallel_file_jobs=parallel_file_jobs,
+                on_azcopy_line=on_azcopy_line,
             )
         else:
             if not blob_connection_string:
@@ -876,7 +882,9 @@ def upload_existing_bak_to_blob(
                 container=blob_container,
                 blob_path=blob_path,
                 log=log,
-                prefer_azcopy=prefer_azcopy,
+                require_azcopy=require_azcopy,
+                parallel_file_jobs=parallel_file_jobs,
+                on_azcopy_line=on_azcopy_line,
             )
         upload_elapsed = time.time() - upload_start
         result["upload_time_sec"] = round(upload_elapsed, 2)
@@ -903,6 +911,366 @@ def upload_existing_bak_to_blob(
             error_msg = f"{error_msg}{hint}"
         result["message"] = redact_sensitive_text(error_msg)
         return result
+
+
+def _normalized_paths_same_folder(paths: List[str]) -> Optional[str]:
+    """Return the common parent directory when every path is a file in the same folder."""
+    if not paths:
+        return None
+    parents = {
+        os.path.normpath(os.path.dirname(os.path.expanduser(str(p).strip())))
+        for p in paths
+        if str(p).strip()
+    }
+    if len(parents) != 1:
+        return None
+    parent = parents.pop()
+    if not parent or not os.path.isdir(parent):
+        return None
+    return parent
+
+
+def _common_structured_blob_prefix(
+    paths: List[str],
+    *,
+    blob_folder: str,
+    database: str,
+    run_id: str,
+) -> Optional[str]:
+    """Blob path prefix (inside container) shared by every file, or None if layouts differ."""
+    prefixes: set[str] = set()
+    for raw in paths:
+        name = Path(raw).name
+        blob_path = build_blob_upload_path(
+            local_filename=name,
+            blob_folder=blob_folder,
+            database=database,
+            run_id=run_id,
+            structured_layout=True,
+        )
+        prefix = str(Path(blob_path).parent).replace("\\", "/")
+        prefixes.add(prefix)
+    if len(prefixes) != 1:
+        return None
+    return prefixes.pop()
+
+
+def upload_existing_bak_files_parallel(
+    *,
+    local_file_paths: List[str],
+    max_parallel_uploads: Optional[int] = None,
+    cancel_event: Optional[threading.Event] = None,
+    blob_auth_mode: str = "connection_string",
+    blob_connection_string: str = "",
+    blob_account_url: str = "",
+    blob_container: str = "",
+    blob_folder: str = "",
+    database: str = "",
+    run_id: str = "",
+    structured_blob_paths: bool = True,
+    delete_local_after_upload: bool = False,
+    log: Optional[Callable[[str], None]] = None,
+    require_azcopy: bool = True,
+    on_azcopy_line: Optional[Callable[[str], None]] = None,
+    on_file_finished: Optional[Callable[[bool], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Upload multiple .bak files (e.g. striped backup set) with parallel AzCopy jobs.
+
+    Returns aggregate dict: success, uploaded, failed, results, message, blob_url (last success).
+    """
+    if log is None:
+        log = logger.info
+    try:
+        from ..utils.azcopy_utils import (
+            cap_parallel_workers_for_entra,
+            prepare_azcopy_entra_auth,
+            resolve_parallel_upload_workers,
+            upload_directory_with_azcopy,
+        )
+    except ImportError:
+        from src.utils.azcopy_utils import (
+            cap_parallel_workers_for_entra,
+            prepare_azcopy_entra_auth,
+            resolve_parallel_upload_workers,
+            upload_directory_with_azcopy,
+        )
+
+    paths = [p.strip() for p in (local_file_paths or []) if p and str(p).strip()]
+    if not paths:
+        return {
+            "success": False,
+            "uploaded": 0,
+            "failed": 0,
+            "results": [],
+            "message": "No files to upload.",
+            "blob_url": "",
+        }
+
+    workers = resolve_parallel_upload_workers(len(paths), max_parallel_uploads)
+    workers = cap_parallel_workers_for_entra(blob_auth_mode, workers)
+    log_lock = threading.Lock()
+
+    def safe_log(msg: str) -> None:
+        with log_lock:
+            log(msg)
+
+    if require_azcopy and (blob_auth_mode or "").strip().lower() == "managed_identity":
+        prep_err = prepare_azcopy_entra_auth(safe_log, auto_login=True)
+        if prep_err:
+            return {
+                "success": False,
+                "uploaded": 0,
+                "failed": len(paths),
+                "results": [],
+                "message": prep_err,
+                "blob_url": "",
+            }
+
+    if len(paths) > 1 and structured_blob_paths:
+        local_folder = _normalized_paths_same_folder(paths)
+        blob_prefix = (
+            _common_structured_blob_prefix(
+                paths,
+                blob_folder=blob_folder,
+                database=database,
+                run_id=run_id,
+            )
+            if local_folder
+            else None
+        )
+        if local_folder and blob_prefix:
+            safe_log(
+                f"Stripe folder upload: {len(paths)} file(s) in one AzCopy job "
+                f"(avoids parallel Azure CLI sign-in failures)"
+            )
+            try:
+                if not blob_container:
+                    raise ValueError("Container name is required.")
+                upload_start = time.time()
+                folder_url = upload_directory_with_azcopy(
+                    Path(local_folder),
+                    blob_auth_mode=blob_auth_mode,
+                    blob_connection_string=blob_connection_string,
+                    blob_account_url=blob_account_url,
+                    container=blob_container,
+                    blob_dest_prefix=blob_prefix,
+                    log=safe_log,
+                    parallel_file_jobs=min(len(paths), 32),
+                    on_azcopy_line=on_azcopy_line,
+                )
+                elapsed = time.time() - upload_start
+                safe_log(f"✓ Folder upload completed in {elapsed:.1f}s")
+                if delete_local_after_upload:
+                    for fpath in paths:
+                        try:
+                            Path(fpath).unlink(missing_ok=True)
+                        except Exception as del_exc:
+                            safe_log(f"Warning: could not delete {fpath}: {del_exc}")
+                return {
+                    "success": True,
+                    "uploaded": len(paths),
+                    "failed": 0,
+                    "results": [
+                        {
+                            "success": True,
+                            "local_file": p,
+                            "blob_url": folder_url,
+                            "message": f"Uploaded via folder job in {elapsed:.1f}s",
+                        }
+                        for p in paths
+                    ],
+                    "message": f"{len(paths)} file(s) uploaded in one AzCopy job ({elapsed:.1f}s)",
+                    "blob_url": folder_url,
+                }
+            except Exception as folder_exc:
+                safe_log(
+                    f"Folder upload failed ({folder_exc}); "
+                    f"retrying with up to {workers} parallel file job(s)..."
+                )
+
+    safe_log(
+        f"Parallel blob upload: {len(paths)} file(s), {workers} simultaneous AzCopy job(s)"
+    )
+
+    if len(paths) == 1:
+        one = upload_existing_bak_to_blob(
+            local_file_path=paths[0],
+            blob_auth_mode=blob_auth_mode,
+            blob_connection_string=blob_connection_string,
+            blob_account_url=blob_account_url,
+            blob_container=blob_container,
+            blob_folder=blob_folder,
+            database=database,
+            run_id=run_id,
+            structured_blob_paths=structured_blob_paths,
+            delete_local_after_upload=delete_local_after_upload,
+            log=log,
+            require_azcopy=require_azcopy,
+            parallel_file_jobs=1,
+            on_azcopy_line=on_azcopy_line,
+        )
+        ok = bool(one.get("success"))
+        return {
+            "success": ok,
+            "uploaded": 1 if ok else 0,
+            "failed": 0 if ok else 1,
+            "results": [one],
+            "message": one.get("message", ""),
+            "blob_url": one.get("blob_url", "") or "",
+        }
+
+    results: List[Dict[str, Any]] = []
+    uploaded = 0
+    failed = 0
+    last_url = ""
+
+    def upload_one(fpath: str) -> Dict[str, Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            return {
+                "success": False,
+                "local_file": fpath,
+                "message": "Cancelled",
+                "blob_url": "",
+            }
+        return upload_existing_bak_to_blob(
+            local_file_path=fpath,
+            blob_auth_mode=blob_auth_mode,
+            blob_connection_string=blob_connection_string,
+            blob_account_url=blob_account_url,
+            blob_container=blob_container,
+            blob_folder=blob_folder,
+            database=database,
+            run_id=run_id,
+            structured_blob_paths=structured_blob_paths,
+            delete_local_after_upload=delete_local_after_upload,
+            log=safe_log,
+            require_azcopy=require_azcopy,
+            parallel_file_jobs=workers,
+            on_azcopy_line=on_azcopy_line if workers == 1 else None,
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_map = {pool.submit(upload_one, p): p for p in paths}
+        for fut in as_completed(future_map):
+            fpath = future_map[fut]
+            try:
+                result = fut.result()
+            except Exception as e:
+                result = {
+                    "success": False,
+                    "local_file": fpath,
+                    "message": str(e),
+                    "blob_url": "",
+                }
+            results.append(result)
+            if result.get("success"):
+                uploaded += 1
+                last_url = result.get("blob_url", "") or last_url
+                if on_file_finished:
+                    on_file_finished(True)
+            else:
+                failed += 1
+                if on_file_finished:
+                    on_file_finished(False)
+                if result.get("message") != "Cancelled":
+                    safe_log(f"  [X] {fpath}: {result.get('message', 'Upload failed')}")
+            done = uploaded + failed
+            safe_log(
+                f"Upload progress: {done}/{len(paths)} finished "
+                f"({uploaded} ok, {failed} failed)"
+            )
+
+    cancelled = cancel_event is not None and cancel_event.is_set()
+    all_ok = failed == 0 and uploaded == len(paths) and not cancelled
+    msg = f"{uploaded} succeeded, {failed} failed"
+    if cancelled:
+        msg += " (stopped)"
+    return {
+        "success": all_ok,
+        "uploaded": uploaded,
+        "failed": failed,
+        "results": results,
+        "message": msg,
+        "blob_url": last_url,
+    }
+
+
+def run_blob_upload_preflight(
+    local_file_paths: List[str],
+    *,
+    blob_auth_mode: str,
+    blob_connection_string: str = "",
+    blob_account_url: str = "",
+    blob_container: str = "",
+    log: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Pre-upload checks: AzCopy, auth, readable files, total size.
+
+    Returns dict with keys: ok, message, files, missing, total_bytes, total_gb.
+    """
+    _log = log or logger.info
+    out: Dict[str, Any] = {
+        "ok": False,
+        "message": "",
+        "files": [],
+        "missing": [],
+        "total_bytes": 0,
+        "total_gb": 0.0,
+    }
+    try:
+        from ..utils.azcopy_utils import ensure_azcopy_ready_for_upload
+    except ImportError:
+        from src.utils.azcopy_utils import ensure_azcopy_ready_for_upload
+
+    _log("=== Upload preflight ===")
+    az_err = ensure_azcopy_ready_for_upload(blob_auth_mode, log=_log, auto_login=True)
+    if az_err:
+        out["message"] = az_err
+        return out
+
+    if not (blob_container or "").strip():
+        out["message"] = "Container name is required."
+        return out
+    mode = (blob_auth_mode or "").strip().lower()
+    if mode == "managed_identity" and not (blob_account_url or "").strip():
+        out["message"] = "Storage account URL is required for Managed Identity mode."
+        return out
+    if mode != "managed_identity" and not (blob_connection_string or "").strip():
+        out["message"] = "Blob connection string is required."
+        return out
+
+    readable: List[str] = []
+    missing: List[str] = []
+    total_bytes = 0
+    for raw in local_file_paths:
+        norm = os.path.normpath(os.path.expanduser(str(raw).strip()))
+        if os.path.isfile(norm):
+            readable.append(norm)
+            try:
+                total_bytes += os.path.getsize(norm)
+            except OSError:
+                pass
+        else:
+            missing.append(str(raw))
+
+    out["files"] = readable
+    out["missing"] = missing
+    out["total_bytes"] = total_bytes
+    out["total_gb"] = round(total_bytes / (1024**3), 2)
+    if not readable:
+        out["message"] = "No readable .bak files found from this PC."
+        return out
+    if missing:
+        _log(f"Preflight: {len(missing)} path(s) missing on disk (skipped).")
+    _log(
+        f"Preflight OK: AzCopy + auth ready; {len(readable)} file(s), "
+        f"~{out['total_gb']:.2f} GB total → container '{blob_container}'"
+    )
+    out["ok"] = True
+    out["message"] = "OK"
+    return out
 
 
 def _diagnose_blob_upload_error(err_text: str, blob_auth_mode: str) -> str:
@@ -1005,31 +1373,51 @@ def _upload_file_to_blob(
     container: str,
     blob_path: str,
     log: Callable[[str], None],
-    prefer_azcopy: bool = True,
+    require_azcopy: bool = True,
+    parallel_file_jobs: int = 1,
+    on_azcopy_line: Optional[Callable[[str], None]] = None,
 ) -> str:
-    """Upload a local file to blob storage; return the blob URL."""
-    if prefer_azcopy:
-        try:
-            from ..utils.azcopy_utils import find_azcopy_executable, upload_file_with_azcopy
-        except ImportError:
-            try:
-                from src.utils.azcopy_utils import find_azcopy_executable, upload_file_with_azcopy
-            except ImportError:
-                find_azcopy_executable = None  # type: ignore[misc, assignment]
-                upload_file_with_azcopy = None  # type: ignore[misc, assignment]
-        if find_azcopy_executable and upload_file_with_azcopy and find_azcopy_executable():
-            log("  Using AzCopy for upload (recommended for large .bak files)...")
-            return upload_file_with_azcopy(
-                local_file,
-                blob_auth_mode=blob_auth_mode,
-                blob_connection_string=blob_connection_string,
-                blob_account_url=blob_account_url,
-                container=container,
-                blob_path=blob_path,
-                log=log,
+    """Upload a local file to blob storage via AzCopy; return the blob URL."""
+    try:
+        from ..utils.azcopy_utils import find_azcopy_executable, upload_file_with_azcopy
+    except ImportError:
+        from src.utils.azcopy_utils import find_azcopy_executable, upload_file_with_azcopy
+
+    azcopy_exe = find_azcopy_executable()
+    if require_azcopy:
+        if not azcopy_exe:
+            raise RuntimeError(
+                "AzCopy is required for blob upload but was not found.\n\n"
+                "Install or upgrade using the Azure Migration Tool Setup installer "
+                "(includes tools\\azcopy), or run: winget install Microsoft.Azure.AzCopy\n"
+                "Then restart the app."
             )
-        if prefer_azcopy:
-            log("  AzCopy not found — falling back to Python SDK upload.")
+        log("  Upload engine: AzCopy (required)")
+        return upload_file_with_azcopy(
+            local_file,
+            blob_auth_mode=blob_auth_mode,
+            blob_connection_string=blob_connection_string,
+            blob_account_url=blob_account_url,
+            container=container,
+            blob_path=blob_path,
+            log=log,
+            parallel_file_jobs=parallel_file_jobs,
+            on_azcopy_line=on_azcopy_line,
+        )
+
+    if azcopy_exe:
+        log("  Upload engine: AzCopy")
+        return upload_file_with_azcopy(
+            local_file,
+            blob_auth_mode=blob_auth_mode,
+            blob_connection_string=blob_connection_string,
+            blob_account_url=blob_account_url,
+            container=container,
+            blob_path=blob_path,
+            log=log,
+            parallel_file_jobs=parallel_file_jobs,
+            on_azcopy_line=on_azcopy_line,
+        )
 
     blob_service = _get_tool_blob_service_client(
         blob_auth_mode=blob_auth_mode,
@@ -1039,7 +1427,7 @@ def _upload_file_to_blob(
         log=log,
     )
     blob_client = blob_service.get_blob_client(container=container, blob=blob_path)
-    log(f"  Uploading {local_file.name} to {container}/{blob_path} (SDK)...")
+    log(f"  Uploading {local_file.name} to {container}/{blob_path} (Python SDK fallback)...")
     with open(local_file, "rb") as data:
         blob_client.upload_blob(data, overwrite=True, max_concurrency=4)
     account_url = str(blob_service.url).rstrip("/")
@@ -1052,7 +1440,9 @@ def _upload_with_managed_identity(
     container: str,
     blob_path: str,
     log: Callable[[str], None],
-    prefer_azcopy: bool = True,
+    require_azcopy: bool = True,
+    parallel_file_jobs: int = 1,
+    on_azcopy_line: Optional[Callable[[str], None]] = None,
 ) -> str:
     """Upload file to blob storage (Managed Identity / Azure AD mode)."""
     return _upload_file_to_blob(
@@ -1063,7 +1453,9 @@ def _upload_with_managed_identity(
         container=container,
         blob_path=blob_path,
         log=log,
-        prefer_azcopy=prefer_azcopy,
+        require_azcopy=require_azcopy,
+        parallel_file_jobs=parallel_file_jobs,
+        on_azcopy_line=on_azcopy_line,
     )
 
 
@@ -1073,7 +1465,9 @@ def _upload_with_connection_string(
     container: str,
     blob_path: str,
     log: Callable[[str], None],
-    prefer_azcopy: bool = True,
+    require_azcopy: bool = True,
+    parallel_file_jobs: int = 1,
+    on_azcopy_line: Optional[Callable[[str], None]] = None,
 ) -> str:
     """Upload file to blob storage using connection string (account key)."""
     return _upload_file_to_blob(
@@ -1084,5 +1478,7 @@ def _upload_with_connection_string(
         container=container,
         blob_path=blob_path,
         log=log,
-        prefer_azcopy=prefer_azcopy,
+        require_azcopy=require_azcopy,
+        parallel_file_jobs=parallel_file_jobs,
+        on_azcopy_line=on_azcopy_line,
     )

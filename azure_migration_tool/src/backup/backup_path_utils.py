@@ -132,3 +132,93 @@ def build_structured_local_backup_dir(
 def format_backup_paths_for_ui(paths: List[str]) -> str:
     """Semicolon-separated paths for multi-stripe display in entry fields."""
     return "; ".join(p for p in paths if p)
+
+
+def format_run_folder_for_ui(paths: List[str]) -> str:
+    """
+    Prefer the structured run folder for multi-stripe sets in the upload field.
+
+    Example: ``\\\\server\\SQLBackups\\MyDb\\20260918_011647`` instead of 64 file paths.
+    """
+    if not paths:
+        return ""
+    if len(paths) == 1:
+        p = Path(normalize_backup_path(paths[0]))
+        return normalize_backup_path(str(p)) if p.suffix.lower() == ".bak" else str(p)
+    parents = {normalize_backup_path(str(Path(normalize_backup_path(p)).parent)) for p in paths}
+    if len(parents) == 1:
+        return parents.pop()
+    return format_backup_paths_for_ui(paths)
+
+
+def discover_bak_files_in_run_folder(folder: str) -> List[str]:
+    """
+    List ordered .bak files under a run folder (single file or full stripe set).
+
+    Path pattern: ``.../database_name/YYYYMMDD_HHMMSS/*.bak``
+    """
+    norm = normalize_backup_path(folder)
+    if not norm:
+        return []
+    p = Path(norm)
+    if not p.is_dir():
+        return []
+    baks = sorted(p.glob("*.bak"), key=lambda x: x.name.lower())
+    if not baks:
+        return []
+    for candidate in baks:
+        if _STRIPE_RE.search(candidate.name):
+            return discover_disk_stripe_set(str(candidate))
+    return [normalize_backup_path(str(b)) for b in baks]
+
+
+def _expand_upload_token(token: str) -> List[str]:
+    norm = normalize_backup_path(token)
+    if not norm:
+        return []
+    if norm.lower().endswith(".bak"):
+        return discover_disk_stripe_set(norm)
+    return discover_bak_files_in_run_folder(norm)
+
+
+def resolve_upload_paths_from_state(
+    *,
+    entry_text: str = "",
+    last_backup_files: Optional[List[str]] = None,
+    backup_root: str = "",
+    database: str = "",
+    run_id: str = "",
+    structured_local_paths: bool = True,
+) -> List[str]:
+    """
+    Resolve the full list of .bak paths to upload from UI fields and last backup state.
+    """
+    tokens = [t.strip() for t in (entry_text or "").split(";") if t.strip()]
+    if tokens:
+        merged: List[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            for path in _expand_upload_token(token):
+                if path not in seen:
+                    seen.add(path)
+                    merged.append(path)
+        if merged:
+            return merged
+
+    last = [normalize_backup_path(p) for p in (last_backup_files or []) if p]
+    if last:
+        folder = normalize_backup_path(str(Path(last[0]).parent))
+        from_folder = discover_bak_files_in_run_folder(folder)
+        if from_folder:
+            return from_folder
+        if len(last) == 1:
+            return discover_disk_stripe_set(last[0])
+        return last
+
+    if structured_local_paths and backup_root and database and run_id:
+        folder = str(build_structured_local_backup_dir(backup_root, database, run_id))
+        found = discover_bak_files_in_run_folder(folder)
+        if found:
+            return found
+
+    return []

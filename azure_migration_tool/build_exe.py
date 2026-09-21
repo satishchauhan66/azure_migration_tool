@@ -156,6 +156,23 @@ def build_pyinstaller(app_dir: Path, console: bool = False) -> bool:
         if tools_candidate.is_dir() and any(tools_candidate.glob('*.msi')):
             datas_list.append((str(tools_candidate), 'tools'))
             break
+
+    # AzCopy v10 (run installer/download_azcopy.ps1 or build_installer.ps1)
+    azcopy_candidates = (
+        app_dir / 'tools' / 'azcopy',
+        app_dir / 'installer' / 'azcopy',
+    )
+    for azcopy_dir in azcopy_candidates:
+        azcopy_exe = azcopy_dir / 'azcopy.exe'
+        if azcopy_exe.is_file():
+            datas_list.append((str(azcopy_dir), 'tools/azcopy'))
+            print(f"  [OK] Bundling AzCopy: {azcopy_exe}")
+            break
+    else:
+        print(
+            "  [WARN] AzCopy not bundled — run installer\\download_azcopy.ps1 before build "
+            "(blob upload will require a system AzCopy install)."
+        )
     
     # Add gui, setup, backup, and src folders
     for subdir in ['gui', 'setup', 'backup', 'src']:
