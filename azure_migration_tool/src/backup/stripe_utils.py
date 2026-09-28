@@ -6,8 +6,11 @@ from __future__ import annotations
 import math
 from typing import Any, Optional
 
-# Target ~150 GB per stripe (under block-blob limits; good parallel I/O on large DBs).
-STRIPE_TARGET_GB = 150
+# Target ~10 GB per stripe for aggressive parallel I/O (faster BACKUP / upload / restore).
+# Still well under block-blob limits; capped at MAX_BACKUP_STRIPES.
+STRIPE_TARGET_GB = 10
+# Below this size, a single .bak is fine (striping overhead not worth it).
+STRIPE_MIN_SIZE_GB = 5
 MAX_BACKUP_STRIPES = 64
 
 
@@ -39,15 +42,15 @@ def recommend_backup_stripes(
     Pick stripe count from database size.
 
     Rules:
-      - < 50 GB -> 1 stripe
+      - < STRIPE_MIN_SIZE_GB -> 1 stripe
       - else ~STRIPE_TARGET_GB per stripe, rounded up to next power of 2 (max 64)
-      - 7+ TB databases -> up to 64 stripes
+      - multi-TB databases -> up to 64 stripes
     """
     cap = max(1, min(int(max_stripes or MAX_BACKUP_STRIPES), MAX_BACKUP_STRIPES))
     if size_mb is None or size_mb <= 0:
         return 1
     size_gb = size_mb / 1024.0
-    if size_gb < 50:
+    if size_gb < STRIPE_MIN_SIZE_GB:
         return 1
     needed = max(1, math.ceil(size_gb / STRIPE_TARGET_GB))
     power = 1

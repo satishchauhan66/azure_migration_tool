@@ -24,6 +24,8 @@ format_backup_paths_for_ui = _mod.format_backup_paths_for_ui
 format_run_folder_for_ui = _mod.format_run_folder_for_ui
 discover_bak_files_in_run_folder = _mod.discover_bak_files_in_run_folder
 resolve_upload_paths_from_state = _mod.resolve_upload_paths_from_state
+resolve_sql_default_backup_path = _mod.resolve_sql_default_backup_path
+DEFAULT_SHARED_BACKUP_ROOT = _mod.DEFAULT_SHARED_BACKUP_ROOT
 
 
 class TestNormalizeBackupPath(unittest.TestCase):
@@ -33,6 +35,27 @@ class TestNormalizeBackupPath(unittest.TestCase):
             normalize_backup_path(raw),
             r"\\gpitd-shir01.us.pressganey.com\sqlbackups\MyDb_20260903_031135.bak",
         )
+
+
+class TestResolveSqlDefaultBackupPath(unittest.TestCase):
+    def test_prefers_unc_sql_default(self):
+        path, reason = resolve_sql_default_backup_path(
+            r"\\fileserver\sqlbackups\\"
+        )
+        self.assertEqual(path, r"\\fileserver\sqlbackups")
+        self.assertEqual(reason, "sql_unc")
+
+    def test_local_drive_falls_back_to_shared_root(self):
+        path, reason = resolve_sql_default_backup_path(
+            r"C:\Program Files\Microsoft SQL Server\MSSQL15.MSSQLSERVER\MSSQL\Backup"
+        )
+        self.assertEqual(path, DEFAULT_SHARED_BACKUP_ROOT)
+        self.assertEqual(reason, "sql_local")
+
+    def test_missing_falls_back_to_shared_root(self):
+        path, reason = resolve_sql_default_backup_path(None)
+        self.assertEqual(path, DEFAULT_SHARED_BACKUP_ROOT)
+        self.assertEqual(reason, "fallback")
 
 
 class TestInferDatabaseName(unittest.TestCase):

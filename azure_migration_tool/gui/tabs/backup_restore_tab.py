@@ -12,7 +12,7 @@ import subprocess
 import sys
 import os
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 parent_dir = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(parent_dir))
@@ -72,6 +72,51 @@ def _is_conditional_access_error(err: str) -> bool:
     return any(k in low for k in _CONDITIONAL_ACCESS_MARKERS)
 
 
+def _restore_blob_client_lost_but_server_may_continue(err: str) -> bool:
+    """ODBC disconnected or retry hit existing credential while RESTORE may still run on SQL."""
+    low = (err or "").lower()
+    if "15530" in err or ("credential" in low and "already exists" in low):
+        return True
+    if "hyt00" in low or "query timeout expired" in low:
+        return True
+    if "42036" in err or "3013" in err:
+        return True
+    if "terminating abnormally" in low or "operation has been cancelled" in low:
+        return True
+    if "restore managed database" in low:
+        return True
+    return False
+
+
+def _restore_blob_server_still_running_message(database: str) -> str:
+    db = (database or "your database").strip() or "your database"
+    return (
+        "\n\nThe app lost its connection to SQL Server, but RESTORE may still be running on the "
+        f"managed instance.\n\n"
+        f"On the MI, run:\n"
+        f"  SELECT name, state_desc FROM sys.databases WHERE name = N'{db}';\n"
+        f"  SELECT session_id, command, percent_complete, status, wait_type\n"
+        f"  FROM sys.dm_exec_requests WHERE command LIKE 'RESTORE%';\n\n"
+        "If state_desc is RESTORING, wait until ONLINE — do not start another restore.\n"
+        "If the bar below still shows a high %, that was server progress before the client error."
+    )
+
+
+def _is_likely_auth_error(err: str) -> bool:
+    """True for Entra / login failures — not ODBC query timeouts or SQL credential conflicts."""
+    low = (err or "").lower()
+    if "query timeout expired" in low or "hyt00" in low:
+        return False
+    if "15530" in low or ("credential" in low and "already exists" in low):
+        return False
+    if "token expired" in low or "lifetime validation failed" in low:
+        return True
+    if "expired" in low and "query" not in low and "timeout" not in low:
+        if any(x in low for x in ("token", "aadsts", "session", "certificate", "sas")):
+            return True
+    return any(k in low for k in _AUTH_ERROR_KEYWORDS if k != "expired")
+
+
 def _auth_hint_suffix(err: str) -> str:
     """If an error looks like a sign-in / authorization problem, add guidance.
 
@@ -86,7 +131,7 @@ def _auth_hint_suffix(err: str) -> str:
             "Workarounds: use 'SQL Server login' auth (no Azure AD), or ask your admin to allow "
             "the app / use a registered (compliant) device. Then click 'Re-authenticate' and retry."
         )
-    if any(k in low for k in _AUTH_ERROR_KEYWORDS):
+    if _is_likely_auth_error(low):
         return (
             "\n\nA sign-in/authorization problem was detected and the tool tried to "
             "re-authenticate automatically. If it still fails: confirm the Microsoft account "
@@ -231,6 +276,9 @@ class BackupRestoreTab:
         self._local_last_backup_files: list = []
         self._local_last_run_id: str = ""
         self._local_upload_tracker = None
+        # After Create Local Backup: timed auto-upload prompt
+        self._local_auto_upload_after_id: Optional[str] = None
+        self._local_auto_upload_dialog: Optional[tk.Toplevel] = None
         # Stop support for the Local Backup tab
         self._local_stop_event = threading.Event()
         self._local_active_conn = None
@@ -242,7 +290,11 @@ class BackupRestoreTab:
         self._restore_disk_active_conn = None
         # Restore from Blob
         self._restore_blob_stop_event = threading.Event()
+        self._restore_blob_watcher_stop = threading.Event()
         self._restore_blob_active_conn = None
+        self._restore_blob_primary_spid: Optional[int] = None
+        self._restore_live_pct: float = 0.0
+        self._restore_blob_abort_context: Optional[dict] = None
         self._create_widgets()
 
     def set_project_path(self, project_path):
@@ -405,7 +457,7 @@ class BackupRestoreTab:
         tk.Label(
             step3,
             text=(
-                "Auto picks 1 stripe for DBs < 50 GB, more for larger ones (~150 GB / stripe). "
+                "Auto picks 1 stripe for DBs < 5 GB, more for larger ones (~10 GB / stripe). "
                 "Striping avoids the per-blob 50,000-block limit (error 3203 / 1117) and "
                 "speeds up large backups via parallel streams."
             ),
@@ -498,7 +550,9 @@ class BackupRestoreTab:
             "(e.g. \\\\fileserver\\share\\MyDb.bak — matches BACKUP ... TO DISK). "
             "With structured folders enabled, backups are written as "
             "\\\\share\\sqlbackups\\DatabaseName\\YYYYMMDD_HHMMSS\\DatabaseName_YYYYMMDD_HHMMSS.bak. "
-            "Use \"Use SQL Server Default\" for the server's backup folder.",
+            "Use \"Use SQL Server Default\" for a UNC backup folder "
+            "(falls back to \\\\gpitd-shir01.us.pressganey.com\\sqlbackups when the server "
+            "reports a local drive path).",
             fg="gray",
             wraplength=650,
         ).pack(anchor=tk.W, pady=(0, 6))
@@ -575,7 +629,7 @@ class BackupRestoreTab:
         self.local_stripes_combo.pack(side=tk.LEFT, padx=(4, 4))
         self.local_stripes_combo.bind("<<ComboboxSelected>>", self._on_local_stripes_changed)
         self.local_stripes_hint_var = tk.StringVar(
-            value="Auto: ~150 GB per stripe (up to 64 files for multi-TB databases). Preference is remembered per database."
+            value="Auto: ~10 GB per stripe (up to 64 files for multi-TB databases). Preference is remembered per database."
         )
         tk.Label(
             step2,
@@ -767,6 +821,13 @@ class BackupRestoreTab:
             command=self._open_local_backup_folder,
             width=20
         ).pack(side=tk.LEFT, padx=5)
+        tk.Label(
+            parent,
+            text="After Create Local Backup completes, upload starts in 10 seconds if Step 3 "
+            "blob settings are filled — use Cancel on the popup to skip.",
+            fg="gray",
+            wraplength=700,
+        ).pack(pady=(0, 4))
 
         # Log
         log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
@@ -828,7 +889,7 @@ class BackupRestoreTab:
         database = (self.local_db_var.get() or "").strip()
         if not database:
             self.local_stripes_hint_var.set(
-                "Enter a database name to auto-calculate stripes (~150 GB per file, max 64)."
+                "Enter a database name to auto-calculate stripes (~10 GB per file, max 64)."
             )
             return
 
@@ -1839,7 +1900,7 @@ class BackupRestoreTab:
             self.local_backup_path_var.set(directory)
     
     def _use_sql_default_backup_path(self):
-        """Query SQL Server for its default backup directory and use it."""
+        """Use SQL Server's UNC default backup directory, or the shared sqlbackups root."""
         server = (self.local_server_var.get() or "").strip()
         if not server:
             messagebox.showwarning(
@@ -1849,6 +1910,8 @@ class BackupRestoreTab:
             return
         
         def query_sql_default():
+            sql_backup_dir = None
+            query_error = None
             try:
                 try:
                     from src.utils.database import connect_to_database
@@ -1883,39 +1946,63 @@ class BackupRestoreTab:
                 sql_backup_dir = row[0] if row and row[0] else None
                 cur.close()
                 conn.close()
-                
-                if sql_backup_dir:
-                    self.frame.after(
-                        0,
-                        lambda path=sql_backup_dir: self._apply_sql_default_path(path)
-                    )
-                else:
-                    self.frame.after(
-                        0,
-                        lambda: messagebox.showwarning(
-                            "Not Found",
-                            "Could not detect SQL Server's default backup directory.\n\n"
-                            "The registry query might not be available or you lack permissions."
-                        )
-                    )
             except Exception as e:
-                self.frame.after(
-                    0,
-                    lambda err=_compact_dialog_error(str(e)): messagebox.showerror(
-                        "Query Failed",
-                        f"Could not query SQL Server:\n\n{err}"
-                    )
+                query_error = e
+
+            try:
+                from src.backup.backup_path_utils import resolve_sql_default_backup_path
+            except ImportError:
+                from azure_migration_tool.src.backup.backup_path_utils import (
+                    resolve_sql_default_backup_path,
                 )
+
+            path, reason = resolve_sql_default_backup_path(sql_backup_dir)
+            self.frame.after(
+                0,
+                lambda p=path, r=reason, detected=sql_backup_dir, err=query_error: (
+                    self._apply_sql_default_path(p, r, detected_sql_path=detected, query_error=err)
+                ),
+            )
         
         threading.Thread(target=query_sql_default, daemon=True).start()
     
-    def _apply_sql_default_path(self, path: str):
-        """Apply SQL Server's default backup path to the UI."""
+    def _apply_sql_default_path(
+        self,
+        path: str,
+        reason: str = "sql_unc",
+        detected_sql_path: Optional[str] = None,
+        query_error: Optional[BaseException] = None,
+    ):
+        """Apply resolved SQL Server / shared backup path to the UI."""
         self.local_backup_path_var.set(path)
+        if reason == "sql_unc":
+            messagebox.showinfo(
+                "Path Updated",
+                f"Using SQL Server's default backup directory:\n\n{path}\n\n"
+                "This UNC path is reachable from both SQL Server and this PC.",
+            )
+            return
+        if reason == "sql_local":
+            messagebox.showinfo(
+                "Path Updated",
+                "SQL Server reported a host-local backup directory "
+                f"(not usable from this PC):\n\n{detected_sql_path}\n\n"
+                f"Using shared backup location instead:\n\n{path}",
+            )
+            return
+        detail = ""
+        if query_error is not None:
+            detail = f"\n\nCould not query SQL Server:\n{_compact_dialog_error(str(query_error))}"
+        elif detected_sql_path:
+            detail = f"\n\nDetected value was not usable:\n{detected_sql_path}"
+        else:
+            detail = (
+                "\n\nCould not detect SQL Server's default backup directory "
+                "(registry query unavailable or insufficient permissions)."
+            )
         messagebox.showinfo(
             "Path Updated",
-            f"Using SQL Server's default backup directory:\n\n{path}\n\n"
-            "This path is guaranteed to have correct permissions."
+            f"Using shared backup location:\n\n{path}{detail}",
         )
 
     def _check_local_backup_capacity(self):
@@ -2032,6 +2119,7 @@ class BackupRestoreTab:
 
     def _stop_local_process(self) -> None:
         """Request cancellation of the running local backup or upload."""
+        self._cancel_local_auto_upload_prompt()
         self._local_stop_event.set()
         self.local_backup_log.insert(tk.END, "Stop requested — cancelling…\n")
         self.local_backup_log.see(tk.END)
@@ -2042,6 +2130,188 @@ class BackupRestoreTab:
                 conn.cancel()
             except Exception:
                 pass
+
+    def _local_blob_upload_config_ready(self) -> Tuple[bool, str]:
+        """Return (True, '') when Step 3 blob settings are complete enough to auto-upload."""
+        files = self._resolve_local_upload_paths()
+        if not files:
+            return False, "No .bak files ready to upload."
+
+        blob_auth_mode = self.blob_auth_mode_var.get() or "connection_string"
+        conn_str = (self.blob_conn_var.get() or "").strip()
+        storage_account_url = (self.blob_account_url_var.get() or "").strip()
+        container = (self.blob_container_var.get() or "").strip()
+        try:
+            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
+        except Exception as e:
+            return False, _compact_dialog_error(str(e))
+
+        if blob_auth_mode == "managed_identity":
+            if not storage_account_url:
+                return False, "Storage account URL is required for Managed Identity mode."
+        elif not conn_str:
+            return False, "Blob connection string is required (connection-string mode)."
+        if not container:
+            return False, "Container name is required in Step 3 (or in the storage URL path)."
+        return True, ""
+
+    def _cancel_local_auto_upload_prompt(self) -> None:
+        """Close/cancel any pending post-backup auto-upload countdown."""
+        after_id = getattr(self, "_local_auto_upload_after_id", None)
+        if after_id is not None:
+            try:
+                self.frame.after_cancel(after_id)
+            except Exception:
+                pass
+            self._local_auto_upload_after_id = None
+        dlg = getattr(self, "_local_auto_upload_dialog", None)
+        if dlg is not None:
+            try:
+                if dlg.winfo_exists():
+                    dlg.destroy()
+            except Exception:
+                pass
+            self._local_auto_upload_dialog = None
+
+    def _prompt_auto_upload_after_backup(self, summary: str, countdown_sec: int = 10) -> None:
+        """
+        After a successful local backup: if blob config is ready, show a timed prompt.
+        User can Cancel; otherwise upload starts when the countdown reaches 0.
+        """
+        self._cancel_local_auto_upload_prompt()
+        ready, reason = self._local_blob_upload_config_ready()
+        if not ready:
+            messagebox.showinfo(
+                "Backup complete",
+                summary
+                + "\n\nUpload to Blob was not started automatically:\n"
+                + f"{reason}\n\n"
+                "Complete Step 3 (Azure Blob destination), then click "
+                "'2. Upload .bak to Blob'.",
+            )
+            return
+
+        parent = self.frame.winfo_toplevel()
+        dlg = tk.Toplevel(parent)
+        self._local_auto_upload_dialog = dlg
+        dlg.title("Backup complete — upload starting")
+        dlg.transient(parent)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        body = ttk.Frame(dlg, padding=14)
+        body.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            body,
+            text=summary,
+            justify=tk.LEFT,
+            wraplength=520,
+            anchor=tk.W,
+        ).pack(anchor=tk.W)
+
+        status_var = tk.StringVar()
+        status_lbl = tk.Label(
+            body,
+            textvariable=status_var,
+            justify=tk.LEFT,
+            wraplength=520,
+            fg="#1a5276",
+            anchor=tk.W,
+        )
+        status_lbl.pack(anchor=tk.W, pady=(12, 0))
+
+        btn_row = ttk.Frame(body)
+        btn_row.pack(fill=tk.X, pady=(14, 0))
+
+        state = {"seconds": max(1, int(countdown_sec)), "done": False}
+
+        def _close_dialog() -> None:
+            self._local_auto_upload_after_id = None
+            self._local_auto_upload_dialog = None
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        def _cancel() -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            after_id = self._local_auto_upload_after_id
+            if after_id is not None:
+                try:
+                    self.frame.after_cancel(after_id)
+                except Exception:
+                    pass
+                self._local_auto_upload_after_id = None
+            _close_dialog()
+            self.local_backup_log.insert(
+                tk.END, "Auto upload cancelled — click '2. Upload .bak to Blob' when ready.\n"
+            )
+            self.local_backup_log.see(tk.END)
+
+        def _start_upload(now: bool = False) -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            after_id = self._local_auto_upload_after_id
+            if after_id is not None:
+                try:
+                    self.frame.after_cancel(after_id)
+                except Exception:
+                    pass
+                self._local_auto_upload_after_id = None
+            _close_dialog()
+            still_ready, why = self._local_blob_upload_config_ready()
+            if not still_ready:
+                messagebox.showwarning(
+                    "Upload not started",
+                    f"Blob configuration is no longer complete:\n{why}",
+                )
+                return
+            note = "Upload now" if now else "Countdown finished"
+            self.local_backup_log.insert(
+                tk.END, f"{note} — starting upload to Blob…\n"
+            )
+            self.local_backup_log.see(tk.END)
+            self._start_local_upload_to_blob()
+
+        def _tick() -> None:
+            if state["done"] or not dlg.winfo_exists():
+                return
+            secs = state["seconds"]
+            if secs <= 0:
+                _start_upload(now=False)
+                return
+            status_var.set(
+                f"Upload to Blob starts automatically in {secs} second(s).\n"
+                "Click Cancel to keep the .bak local only."
+            )
+            state["seconds"] = secs - 1
+            self._local_auto_upload_after_id = self.frame.after(1000, _tick)
+
+        ttk.Button(btn_row, text="Upload now", command=lambda: _start_upload(now=True), width=14).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(btn_row, text="Cancel upload", command=_cancel, width=14).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        dlg.protocol("WM_DELETE_WINDOW", _cancel)
+
+        # Center over parent
+        dlg.update_idletasks()
+        try:
+            px = parent.winfo_rootx() + max(0, (parent.winfo_width() - dlg.winfo_width()) // 2)
+            py = parent.winfo_rooty() + max(0, (parent.winfo_height() - dlg.winfo_height()) // 3)
+            dlg.geometry(f"+{px}+{py}")
+        except Exception:
+            pass
+
+        _tick()
 
     def _start_local_create_backup(self):
         """Step 1: BACKUP DATABASE to the local/UNC path only (no upload)."""
@@ -2127,27 +2397,30 @@ class BackupRestoreTab:
                         from azure_migration_tool.src.backup.backup_path_utils import (
                             format_run_folder_for_ui,
                         )
-                    self.frame.after(
-                        0,
-                        lambda fs=files: self.local_upload_file_var.set(format_run_folder_for_ui(fs)),
-                    )
-                    self.frame.after(0, self._refresh_local_upload_status)
                     is_network = bool(files) and (files[0].startswith("\\\\") or files[0].startswith("//"))
                     files_txt = "\n".join(f"  {f}" for f in files)
                     msg = (
                         f"Local backup completed!\n\n"
                         f"Time: {result.get('backup_time_sec', 0):.1f}s\n"
                         f"Stripes: {used_stripes}\n"
-                        f"File(s):\n{files_txt}\n\n"
-                        "Next: set the Azure Blob destination (Step 3) and click "
-                        "'2. Upload .bak to Blob'."
+                        f"File(s):\n{files_txt}"
                     )
                     if is_network:
                         msg += (
                             "\n\nNote: this is a network (UNC) path. Upload needs the file(s) readable "
                             "from this PC; if not, copy locally or run the app on a host that can read the share."
                         )
-                    self.frame.after(0, lambda m=msg: messagebox.showinfo("Backup complete", m))
+
+                    def _after_backup_success(
+                        fs=files,
+                        summary=msg,
+                        fmt=format_run_folder_for_ui,
+                    ):
+                        self.local_upload_file_var.set(fmt(fs))
+                        self._refresh_local_upload_status()
+                        self._prompt_auto_upload_after_backup(summary, countdown_sec=10)
+
+                    self.frame.after(0, _after_backup_success)
                 else:
                     self.frame.after(
                         0,
@@ -2632,8 +2905,20 @@ class BackupRestoreTab:
         )
         self.restore_blob_stop_btn.pack(side=tk.LEFT, padx=5)
 
+        self.restore_blob_status_var = tk.StringVar(
+            value="SQL status: idle — during restore, polls sys.databases + dm_exec_requests on the target instance."
+        )
+        tk.Label(
+            parent,
+            textvariable=self.restore_blob_status_var,
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=720,
+            fg="#1a5276",
+        ).pack(fill=tk.X, padx=5, pady=(0, 4))
+
         prog_frame = ttk.Frame(parent)
-        prog_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
+        prog_frame.pack(fill=tk.X, padx=5, pady=(0, 6))
         tk.Label(prog_frame, text="Restore progress:").pack(side=tk.LEFT)
         self.restore_progress_var = tk.DoubleVar(value=0.0)
         self.restore_progress_bar = ttk.Progressbar(
@@ -2880,8 +3165,26 @@ class BackupRestoreTab:
         # restore_reauth_btn is intentionally left enabled so the user can always sign in again.
 
     def _stop_restore_blob_process(self) -> None:
+        ctx = self._restore_blob_abort_context
+        db_name = (ctx or {}).get("database") or (
+            self.restore_blob_database_var.get() if hasattr(self, "restore_blob_database_var") else ""
+        )
+        db_name = (db_name or "").strip()
+        if db_name:
+            if not messagebox.askyesno(
+                "Stop restore",
+                f"Stop RESTORE for database [{db_name}]?\n\n"
+                "This will:\n"
+                "  • KILL all SQL sessions restoring that blob backup (same .bak URL)\n"
+                "  • Wait 5 seconds for worker threads to abort\n"
+                "  • DROP the database to clear partial files\n\n"
+                "Continue?",
+            ):
+                return
+
         self._restore_blob_stop_event.set()
-        self.restore_from_blob_log.insert(tk.END, "Stop requested — cancelling…\n")
+        self._restore_blob_watcher_stop.set()
+        self.restore_from_blob_log.insert(tk.END, "Stop requested — cancelling app connection…\n")
         self.restore_from_blob_log.see(tk.END)
         conn = self._restore_blob_active_conn
         if conn is not None:
@@ -2889,6 +3192,55 @@ class BackupRestoreTab:
                 conn.cancel()
             except Exception:
                 pass
+
+        if not ctx or not ctx.get("server") or not db_name:
+            self.restore_from_blob_log.insert(
+                tk.END, "Stop: no SQL connection context — ODBC cancel only.\n"
+            )
+            self.restore_from_blob_log.see(tk.END)
+            return
+
+        def log_abort(msg: str) -> None:
+            self.frame.after(
+                0, lambda m=msg: self.restore_from_blob_log.insert(tk.END, m + "\n")
+            )
+            self.frame.after(0, lambda: self.restore_from_blob_log.see(tk.END))
+
+        def run_sql_abort() -> None:
+            try:
+                from src.restore.restore_from_blob import run_abort_blob_restore_on_sql_server
+            except ImportError:
+                from azure_migration_tool.src.restore.restore_from_blob import (
+                    run_abort_blob_restore_on_sql_server,
+                )
+            summary = run_abort_blob_restore_on_sql_server(
+                server=ctx["server"],
+                database=db_name,
+                auth=ctx.get("auth") or "windows",
+                user=ctx.get("user"),
+                password=ctx.get("password"),
+                log_callback=log_abort,
+                logger=logger,
+            )
+            st = summary.get("status")
+            if st == "success":
+                self.frame.after(0, lambda: self._reset_restore_progress("Stopped"))
+                self.frame.after(
+                    0,
+                    lambda d=db_name: self.restore_blob_status_var.set(
+                        f"{d}: restore stopped — database dropped on SQL Server."
+                    ),
+                )
+            elif st == "partial":
+                self.frame.after(
+                    0,
+                    lambda: messagebox.showwarning(
+                        "Stop partial",
+                        summary.get("error") or "Database may still exist on SQL Server.",
+                    ),
+                )
+
+        threading.Thread(target=run_sql_abort, daemon=True).start()
 
     def _set_restore_progress(self, pct: float, text: Optional[str] = None) -> None:
         """Update the restore progress bar (0-100) and its label. Call on the UI thread."""
@@ -2899,8 +3251,23 @@ class BackupRestoreTab:
         self.restore_progress_var.set(pct)
         self.restore_progress_label.config(text=text if text is not None else f"{pct:.1f}%")
 
+    def _set_restore_progress_live(self, pct: float, text: Optional[str] = None) -> None:
+        """Monotonic restore % so stale DMV rows cannot move the bar backward."""
+        try:
+            pct = max(0.0, min(100.0, float(pct)))
+        except (TypeError, ValueError):
+            return
+        if pct < self._restore_live_pct and pct < 100.0:
+            pct = self._restore_live_pct
+        else:
+            self._restore_live_pct = max(self._restore_live_pct, pct)
+        label = text if text is not None else f"{self._restore_live_pct:.1f}%"
+        self.restore_progress_var.set(self._restore_live_pct)
+        self.restore_progress_label.config(text=label)
+
     def _reset_restore_progress(self, text: str = "") -> None:
         """Reset the restore progress bar to 0 with an optional status label."""
+        self._restore_live_pct = 0.0
         self.restore_progress_var.set(0.0)
         self.restore_progress_label.config(text=text)
 
@@ -3130,7 +3497,7 @@ class BackupRestoreTab:
             exc = e
 
         text = _failure_text(summary, exc)
-        if text and any(k in text.lower() for k in _AUTH_ERROR_KEYWORDS):
+        if text and _is_likely_auth_error(text):
             log("Sign-in/authorization problem detected — trying to re-authenticate automatically…")
             if self._try_reauth_azure(auth, user, log):
                 log("Re-authentication done. Retrying once…")
@@ -3318,23 +3685,96 @@ class BackupRestoreTab:
                 return
 
         self._restore_blob_stop_event.clear()
+        self._restore_blob_watcher_stop.clear()
         self._restore_blob_active_conn = None
+        self._restore_blob_primary_spid = None
+        self._restore_live_pct = 0.0
+        self._restore_blob_abort_context = {
+            "server": p["server"],
+            "database": p["database"],
+            "auth": self.restore_blob_auth_var.get() or "windows",
+            "user": self.restore_blob_user_var.get() or None,
+            "password": self.restore_blob_password_var.get() or None,
+        }
         self._restore_blob_tab_set_busy(True)
         self.restore_from_blob_log.delete("1.0", tk.END)
-        self._reset_restore_progress("waiting for progress…")
+        self._reset_restore_progress("starting…")
+        self.restore_blob_status_var.set(
+            f"SQL status: connecting to {p['server']} — watching {p['database']} …"
+        )
 
         def log(msg):
             self.frame.after(0, lambda m=msg: self.restore_from_blob_log.insert(tk.END, m + "\n"))
             self.frame.after(0, lambda: self.restore_from_blob_log.see(tk.END))
 
         def on_progress(pct):
-            # Called from the restore monitor thread; marshal to the UI thread.
-            self.frame.after(0, lambda pv=pct: self._set_restore_progress(pv))
+            self.frame.after(0, lambda pv=pct: self._set_restore_progress_live(pv))
+
+        def on_restore_spid(spid: int) -> None:
+            self._restore_blob_primary_spid = int(spid)
+            self._restore_live_pct = 0.0
+            self.frame.after(0, lambda: self.restore_progress_var.set(0.0))
+            log(
+                f"  [server status] ODBC RESTORE connection SPID {spid} "
+                "(progress uses blob URL worker query — parent/child DMV match, not this SPID)."
+            )
+
+        def _apply_server_snapshot(snap) -> None:
+            if getattr(snap, "is_misleading_complete_reading", None) and snap.is_misleading_complete_reading():
+                return
+            bar_pct = snap.progress_for_bar()
+            if getattr(snap, "overall_phase", ""):
+                label = snap.overall_phase
+                if snap.percent_complete is not None and snap.percent_complete >= 0:
+                    label = f"{label} · {snap.percent_complete:.1f}%"
+            elif snap.percent_complete is not None and snap.percent_complete >= 0:
+                label = f"{snap.state_desc} · {snap.percent_complete:.1f}%"
+            else:
+                label = snap.state_desc or ""
+            self._set_restore_progress_live(bar_pct, label)
+            self.restore_blob_status_var.set(snap.format_status_line())
+
+        def on_server_snapshot(snap):
+            self.frame.after(0, lambda s=snap: _apply_server_snapshot(s))
 
         def _store_conn(conn):
             self._restore_blob_active_conn = conn
 
+        def _run_server_status_watcher() -> str:
+            try:
+                from src.restore.restore_from_blob import watch_restore_on_sql_server
+                from src.utils.database import pick_sql_driver
+            except ImportError:
+                from azure_migration_tool.src.restore.restore_from_blob import (
+                    watch_restore_on_sql_server,
+                )
+                from azure_migration_tool.src.utils.database import pick_sql_driver
+            connect_kwargs = dict(
+                server=p["server"],
+                db="master",
+                user=self.restore_blob_user_var.get() or "",
+                driver=pick_sql_driver(logger),
+                auth=self.restore_blob_auth_var.get() or "windows",
+                password=self.restore_blob_password_var.get() or None,
+                timeout=120,
+                logger=logger,
+            )
+            return watch_restore_on_sql_server(
+                connect_kwargs=connect_kwargs,
+                database=p["database"],
+                log=log,
+                stop_event=self._restore_blob_watcher_stop,
+                poll_sec=5.0,
+                on_snapshot=on_server_snapshot,
+                get_preferred_spid=lambda: self._restore_blob_primary_spid,
+            )
+
+        watcher_thread = threading.Thread(target=_run_server_status_watcher, daemon=True)
+        watcher_thread.start()
+
         def run():
+            summary: Optional[dict] = None
+            keep_watching_after_client = False
             try:
                 summary = self._run_with_auto_reauth(
                     lambda: run_restore_from_blob(
@@ -3353,6 +3793,7 @@ class BackupRestoreTab:
                         progress_callback=on_progress,
                         cancel_event=self._restore_blob_stop_event,
                         on_connect=_store_conn,
+                        on_restore_spid=on_restore_spid,
                     ),
                     auth=self.restore_blob_auth_var.get() or "windows",
                     user=self.restore_blob_user_var.get() or "",
@@ -3363,31 +3804,153 @@ class BackupRestoreTab:
                     self.frame.after(
                         0, lambda: messagebox.showinfo("Cancelled", "Restore from blob was stopped.")
                     )
-                elif summary.get("status") == "success":
-                    self.frame.after(0, lambda: self._set_restore_progress(100.0, "Completed"))
-                    self.frame.after(
-                        0, lambda: messagebox.showinfo("Success", "Restore from blob completed successfully.")
-                    )
+                elif summary.get("status") in ("success", "client_lost"):
+                    err = summary.get("error") or ""
+                    db_name = p.get("database") or ""
+                    if summary.get("status") == "client_lost" or _restore_blob_client_lost_but_server_may_continue(
+                        err
+                    ):
+                        keep_watching_after_client = True
+                        log(
+                            "App connection ended early — still polling SQL Server "
+                            f"for {db_name} (RESTORING / RECOVERING → ONLINE)…"
+                        )
+                        self.frame.after(
+                            0,
+                            lambda d=db_name: self.restore_blob_status_var.set(
+                                f"{d}: monitoring on SQL Server (see log [server status] lines)…"
+                            ),
+                        )
+                        if err:
+                            self.frame.after(
+                                0,
+                                lambda e=err, d=db_name: messagebox.showwarning(
+                                    "App disconnected — still monitoring SQL Server",
+                                    _compact_dialog_error(e)
+                                    + _restore_blob_server_still_running_message(d)
+                                    + "\n\nStatus above the log will update every ~5 seconds.",
+                                ),
+                            )
+                    else:
+                        self._restore_blob_watcher_stop.set()
+                        self.frame.after(0, lambda: self._set_restore_progress(100.0, "Completed"))
+                        self.frame.after(
+                            0,
+                            lambda db=p["database"]: self.restore_blob_status_var.set(
+                                f"{db}: ONLINE — restore completed on SQL Server."
+                            ),
+                        )
+                        self.frame.after(
+                            0,
+                            lambda: messagebox.showinfo(
+                                "Success", "Restore from blob completed successfully."
+                            ),
+                        )
                 else:
                     err = summary.get("error") or "Unknown error"
-                    self.frame.after(0, lambda: self.restore_progress_label.config(text="Failed"))
-                    self.frame.after(
-                        0,
-                        lambda e=err: messagebox.showerror(
-                            "Restore failed", _compact_dialog_error(e) + _auth_hint_suffix(e)
-                        ),
-                    )
+                    db_name = p.get("database") or ""
+                    if _restore_blob_client_lost_but_server_may_continue(err):
+                        keep_watching_after_client = True
+                        log(
+                            "App connection ended early — still polling SQL Server "
+                            f"for {db_name} (RESTORING / RECOVERING → ONLINE)…"
+                        )
+                        self.frame.after(
+                            0,
+                            lambda d=db_name: self.restore_blob_status_var.set(
+                                f"{d}: monitoring on SQL Server (see log [server status] lines)…"
+                            ),
+                        )
+                        self.frame.after(
+                            0,
+                            lambda e=err, d=db_name: messagebox.showwarning(
+                                "App disconnected — still monitoring SQL Server",
+                                _compact_dialog_error(e)
+                                + _restore_blob_server_still_running_message(d)
+                                + "\n\nStatus above the log will update every ~5 seconds.",
+                            ),
+                        )
+                    else:
+                        self._restore_blob_watcher_stop.set()
+                        self.frame.after(0, lambda: self._reset_restore_progress("Failed"))
+                        self.frame.after(
+                            0,
+                            lambda e=err: messagebox.showerror(
+                                "Restore failed",
+                                _compact_dialog_error(e) + _auth_hint_suffix(e),
+                            ),
+                        )
             except Exception as e:
                 log(str(e))
-                self.frame.after(0, lambda: self.restore_progress_label.config(text="Failed"))
-                self.frame.after(
-                    0,
-                    lambda x=str(e): messagebox.showerror(
-                        "Error", _compact_dialog_error(x) + _auth_hint_suffix(x)
-                    ),
-                )
+                err_text = str(e)
+                db_name = p.get("database") or ""
+                if _restore_blob_client_lost_but_server_may_continue(err_text):
+                    keep_watching_after_client = True
+                    log(
+                        "App connection ended early — still polling SQL Server "
+                        f"for {db_name} (RESTORING / RECOVERING → ONLINE)…"
+                    )
+                    self.frame.after(
+                        0,
+                        lambda d=db_name: self.restore_blob_status_var.set(
+                            f"{d}: monitoring on SQL Server (see log [server status] lines)…"
+                        ),
+                    )
+                    self.frame.after(
+                        0,
+                        lambda x=err_text, d=db_name: messagebox.showwarning(
+                            "App disconnected — still monitoring SQL Server",
+                            _compact_dialog_error(x)
+                            + _restore_blob_server_still_running_message(d)
+                            + "\n\nStatus above the log will update every ~5 seconds.",
+                        ),
+                    )
+                else:
+                    self._restore_blob_watcher_stop.set()
+                    self.frame.after(0, lambda: self._reset_restore_progress("Failed"))
+                    self.frame.after(
+                        0,
+                        lambda x=err_text: messagebox.showerror(
+                            "Error", _compact_dialog_error(x) + _auth_hint_suffix(x)
+                        ),
+                    )
             finally:
-                self.frame.after(0, lambda: self._restore_blob_tab_set_busy(False))
+
+                def _finish_ui_after_watch() -> None:
+                    self._restore_blob_abort_context = None
+                    self.frame.after(0, lambda: self._restore_blob_tab_set_busy(False))
+
+                if keep_watching_after_client:
+
+                    def _wait_for_server() -> None:
+                        watcher_thread.join()
+                        db = p.get("database") or "database"
+                        if not self._restore_blob_watcher_stop.is_set():
+                            self.frame.after(
+                                0,
+                                lambda: self._set_restore_progress(100.0, "Completed"),
+                            )
+                            self.frame.after(
+                                0,
+                                lambda d=db: self.restore_blob_status_var.set(
+                                    f"{d}: ONLINE — restore finished on SQL Server."
+                                ),
+                            )
+                            self.frame.after(
+                                0,
+                                lambda d=db: messagebox.showinfo(
+                                    "Restore complete on SQL Server",
+                                    f"{d} is ONLINE on the target instance.\n\n"
+                                    "The app lost its ODBC connection earlier, but the "
+                                    "restore completed on the server.",
+                                ),
+                            )
+                        _finish_ui_after_watch()
+
+                    threading.Thread(target=_wait_for_server, daemon=True).start()
+                else:
+                    self._restore_blob_watcher_stop.set()
+                    _finish_ui_after_watch()
 
         threading.Thread(target=run, daemon=True).start()
 

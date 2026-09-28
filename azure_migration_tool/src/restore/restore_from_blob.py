@@ -19,7 +19,8 @@ import re
 import time
 import logging
 import threading
-from typing import Optional, Dict, Any, List, Tuple
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple, Callable
 
 try:
     from ..utils.redact_secrets import redact_sensitive_text
@@ -34,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 
 _STRIPE_RE = re.compile(r"_part(\d+)of(\d+)\.bak$", re.IGNORECASE)
+_RESTORE_TARGET_DB_RE = re.compile(
+    r"RESTORE\s+(?:DATABASE|LOG)\s+(?:\[([^\]]+)\]|([^\s;\[]+))",
+    re.IGNORECASE,
+)
 
 # Commands that expose percent_complete in sys.dm_exec_requests.
 _PROGRESS_COMMANDS = (
@@ -46,6 +51,712 @@ _PROGRESS_COMMANDS = (
     "UPDATE STATISTICS",
     "KILLED/ROLLBACK",
 )
+
+
+def _log_restore_urls(log, restore_urls: List[str]) -> None:
+    """Avoid flooding the log with dozens of identical stripe URLs."""
+    if len(restore_urls) <= 3:
+        for u in restore_urls:
+            log(f"Restore URL: {u}")
+        return
+    log(f"Restore URLs: {len(restore_urls)} stripe file(s)")
+    log(f"  first: {restore_urls[0]}")
+    log(f"  last:  {restore_urls[-1]}")
+
+
+def _credential_exists(cur, credential_name: str, esc_sql) -> bool:
+    name_lit = esc_sql(credential_name)
+    cur.execute(
+        "SELECT COUNT(1) FROM sys.credentials WHERE name = N'" + name_lit + "'"
+    )
+    row = cur.fetchone()
+    return bool(row and int(row[0]) > 0)
+
+
+def _ensure_sql_blob_credential(
+    cur,
+    *,
+    credential_name: str,
+    blob_auth_mode: str,
+    sas_token: Optional[str],
+    log,
+    mi_credential_sql,
+    esc_sql,
+) -> None:
+    """
+    Create or reuse the SQL credential for RESTORE FROM URL.
+
+    Managed Identity credentials are reused when already present (retry-safe).
+    SAS credentials are dropped and recreated so the SECRET can be refreshed.
+    """
+    cred_bracket = credential_name.replace("]", "]]")
+    exists = _credential_exists(cur, credential_name, esc_sql)
+    mode = (blob_auth_mode or "").strip().lower()
+
+    if exists and mode == "managed_identity":
+        log(
+            f"SQL credential already exists [{credential_name}] — reusing for Managed Identity RESTORE."
+        )
+        return
+
+    if exists:
+        log(f"Dropping existing credential [{credential_name}] to refresh SAS…")
+        drop_sql = (
+            "IF EXISTS (SELECT 1 FROM sys.credentials WHERE name = N'"
+            + esc_sql(credential_name)
+            + "') DROP CREDENTIAL ["
+            + cred_bracket
+            + "]"
+        )
+        cur.execute(drop_sql)
+    else:
+        log("Creating SQL Server credential for blob container…")
+
+    if mode == "managed_identity":
+        create_cred_sql = mi_credential_sql(credential_name)
+        log("CREATE CREDENTIAL (IDENTITY = 'Managed Identity').")
+    else:
+        create_cred_sql = (
+            f"CREATE CREDENTIAL [{cred_bracket}] "
+            f"WITH IDENTITY = N'SHARED ACCESS SIGNATURE', "
+            f"SECRET = N'{esc_sql(sas_token or '')}'"
+        )
+        log("CREATE CREDENTIAL (SHARED ACCESS SIGNATURE).")
+
+    try:
+        cur.execute(create_cred_sql)
+    except Exception as exc:
+        err = str(exc)
+        if exists and mode == "managed_identity" and (
+            "15530" in err or "already exists" in err.lower()
+        ):
+            log("Credential already present — continuing with RESTORE.")
+            return
+        raise
+
+
+def _restore_target_db_from_sql(sql_text: Optional[str]) -> Optional[str]:
+    """Parse ``RESTORE DATABASE|LOG <name>`` from the batch text for a DMV session."""
+    if not sql_text:
+        return None
+    m = _RESTORE_TARGET_DB_RE.search(str(sql_text))
+    if not m:
+        return None
+    return (m.group(1) or m.group(2) or "").strip()
+
+
+def _filter_restore_rows_for_database(
+    rows: List[Tuple[Any, ...]],
+    database: str,
+) -> Tuple[List[Tuple[Any, ...]], bool]:
+    """
+    When several RESTOREs run on one instance, keep rows whose T-SQL targets ``database``.
+
+    Returns (filtered_rows, matched_by_sql_text).
+    """
+    if not rows or not (database or "").strip():
+        return rows, False
+    db_key = database.strip().lower()
+    by_sql: List[Tuple[Any, ...]] = []
+    for row in rows:
+        sql = row[8] if len(row) > 8 else None
+        target = _restore_target_db_from_sql(sql)
+        if target and target.lower() == db_key:
+            by_sql.append(row)
+    if by_sql:
+        return by_sql, True
+    by_ctx = [
+        r
+        for r in rows
+        if len(r) > 6 and str(r[6] or "").strip().lower() == db_key
+    ]
+    if by_ctx:
+        return by_ctx, False
+    return rows, False
+
+
+def _warn_if_restore_in_progress(cur, log, database: str) -> None:
+    """Best-effort warning when another RESTORE may still be running on the instance."""
+    try:
+        rows = _fetch_restore_dmv_rows(cur)
+        if not rows:
+            return
+        db_key = (database or "").strip().lower()
+        same_db: List[str] = []
+        other_db: List[str] = []
+        for row in rows:
+            sid, cmd, pct = row[0], row[1], row[2]
+            sql = row[8] if len(row) > 8 else None
+            target = _restore_target_db_from_sql(sql)
+            label = target or (str(row[6]) if len(row) > 6 else "") or "?"
+            entry = f"SPID {sid} {cmd} {float(pct or 0):.1f}% ({label})"
+            if target and target.lower() == db_key:
+                same_db.append(entry)
+            elif target and target.lower() != db_key:
+                other_db.append(entry)
+        if same_db:
+            log(
+                "WARNING: RESTORE already active for this database on this instance:\n  "
+                + "\n  ".join(same_db)
+                + "\n  Wait for it to finish before starting another restore to the same DB."
+            )
+            return
+        if other_db and len(rows) > 1:
+            log(
+                "WARNING: Other RESTORE operation(s) are running on this instance:\n  "
+                + "\n  ".join(other_db)
+                + f"\n  Your restore targets [{database}] — progress will be matched by RESTORE "
+                "T-SQL when possible; avoid overlapping restores when you can."
+            )
+    except Exception:
+        pass
+
+
+@dataclass
+class RestoreServerSnapshot:
+    """Live restore state from sys.databases + sys.dm_exec_requests (SQL Server host)."""
+
+    database: str
+    state_desc: str = "UNKNOWN"
+    session_id: Optional[int] = None
+    command: str = ""
+    percent_complete: Optional[float] = None
+    request_status: str = ""
+    wait_type: str = ""
+    est_minutes_remaining: Optional[float] = None
+    overall_phase: str = ""
+    status_source: str = "dmv"
+    blob_restore_session_count: int = 0
+
+    def is_misleading_complete_reading(self) -> bool:
+        """Query ``ISNULL(...,100)`` / Complete phase without a worker row — not real progress."""
+        if self.session_id is not None or self.wait_type:
+            return False
+        if self.percent_complete is not None and 0 < float(self.percent_complete) < 100:
+            return False
+        phase = self.overall_phase or ""
+        if "Complete and Ready" in phase and self.session_id is None:
+            return True
+        if (
+            self.percent_complete is not None
+            and float(self.percent_complete) >= 100
+            and self.session_id is None
+        ):
+            return True
+        return (self.state_desc or "").upper() == "ONLINE" and "Complete and Ready" in phase
+
+    def indicates_active_restore(self) -> bool:
+        if self.blob_restore_session_count > 0:
+            return True
+        state_u = (self.state_desc or "").upper()
+        if state_u in ("RESTORING", "RECOVERING"):
+            return True
+        phase = self.overall_phase or ""
+        if "Moving Data" in phase or "Spinning Up" in phase:
+            return True
+        if self.session_id is not None and (self.wait_type or self.request_status):
+            return True
+        if self.percent_complete is not None and 0 < float(self.percent_complete) < 100:
+            return True
+        return False
+
+    def progress_for_bar(self) -> float:
+        if self.is_misleading_complete_reading():
+            return 0.0
+        if self.percent_complete is not None and self.percent_complete >= 0:
+            if (self.state_desc or "").upper() == "RECOVERING" and self.percent_complete >= 100:
+                return 99.0
+            if self.percent_complete < 100:
+                return float(self.percent_complete)
+        state = (self.state_desc or "").upper()
+        if state == "ONLINE" and self.percent_complete is not None:
+            return min(100.0, float(self.percent_complete))
+        if state == "ONLINE" and self.status_source != "blob_url_worker":
+            return 100.0
+        if state == "RECOVERING":
+            return 99.0
+        if state == "RESTORING":
+            return 0.0
+        return 0.0
+
+    def format_status_line(self) -> str:
+        db = self.database or "database"
+        parts = [f"{db}: {self.state_desc or 'UNKNOWN'}"]
+        if self.overall_phase:
+            parts.append(self.overall_phase)
+        if self.command:
+            pct = (
+                f"{self.percent_complete:.1f}%"
+                if self.percent_complete is not None
+                else "—"
+            )
+            parts.append(f"{self.command} {pct}")
+        if self.request_status:
+            parts.append(self.request_status)
+        if self.wait_type:
+            parts.append(f"wait={self.wait_type}")
+        if self.est_minutes_remaining is not None and self.est_minutes_remaining > 0:
+            parts.append(f"ETA ~{self.est_minutes_remaining:.0f} min")
+        if self.session_id is not None:
+            parts.append(f"SPID {self.session_id}")
+        return " · ".join(parts)
+
+
+# Blob RESTORE FROM URL: parent session (0% / SLEEP_TASK) + worker (real %) share the same .bak URL.
+_TARGETED_BLOB_RESTORE_STATUS_SQL = """
+DECLARE @TargetDB NVARCHAR(128) = ?;
+
+WITH RestoreRequests AS (
+    SELECT
+        r.session_id,
+        r.percent_complete,
+        r.status,
+        r.wait_type,
+        t.text AS executed_query,
+        SUBSTRING(
+            t.text,
+            CHARINDEX('https://', t.text),
+            CHARINDEX('.bak', t.text) - CHARINDEX('https://', t.text) + 4
+        ) AS BackupURL
+    FROM sys.dm_exec_requests r
+    CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+    WHERE r.command LIKE 'RESTORE%'
+      AND t.text LIKE '%https://%.bak%'
+),
+ActiveRestore AS (
+    SELECT
+        @TargetDB AS DBName,
+        Child.session_id AS worker_spid,
+        Child.percent_complete,
+        Child.status AS worker_status,
+        Child.wait_type AS worker_wait
+    FROM RestoreRequests Parent
+    JOIN RestoreRequests Child
+        ON Parent.BackupURL = Child.BackupURL
+    WHERE Parent.executed_query LIKE '%' + @TargetDB + '%'
+      AND Child.session_id <> Parent.session_id
+)
+SELECT
+    @TargetDB AS Target_Database,
+    ISNULL(ar.percent_complete, CASE WHEN d.name IS NOT NULL THEN 100 ELSE 0 END)
+        AS Restore_Percent_Complete,
+    ISNULL(d.state_desc, 'INITIALIZING') AS SQL_Database_State,
+    CASE
+        WHEN ar.percent_complete IS NOT NULL THEN '1 - Moving Data (Restore Active)'
+        WHEN d.state_desc = 'RESTORING' THEN '2 - Spinning Up (Recovery Phase)'
+        WHEN d.state_desc = 'ONLINE' THEN '3 - Complete and Ready'
+        ELSE 'Not Found / Dropped'
+    END AS Overall_Phase,
+    ar.worker_status,
+    ar.worker_wait,
+    ar.worker_spid
+FROM (SELECT @TargetDB AS DBName) Anchor
+LEFT JOIN ActiveRestore ar ON Anchor.DBName = ar.DBName
+LEFT JOIN sys.databases d ON Anchor.DBName = d.name;
+"""
+
+_RESTORE_DMV_SQL = """
+            SELECT
+                r.session_id,
+                r.command,
+                r.percent_complete,
+                r.status,
+                r.wait_type,
+                (r.estimated_completion_time / 1000.0) / 60.0 AS est_min,
+                DB_NAME(r.database_id) AS db_ctx,
+                r.total_elapsed_time,
+                st.text AS sql_text
+            FROM sys.dm_exec_requests r
+            OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) st
+            WHERE r.command IN ('RESTORE DATABASE', 'RESTORE LOG', 'RESTORE VERIFYONLY')
+"""
+
+# Worker sessions report real %; the ODBC coordinator often sits at 0% + SLEEP_TASK.
+_RESTORE_ACTIVE_WAIT_TYPES = frozenset(
+    {
+        "BACKUPTHREAD",
+        "IO_COMPLETION",
+        "ASYNC_IO_COMPLETION",
+        "WRITELOG",
+        "PAGEIOLATCH_SH",
+        "PAGEIOLATCH_EX",
+    }
+)
+
+
+def _narrow_restore_dmv_rows(rows: List[Tuple[Any, ...]]) -> List[Tuple[Any, ...]]:
+    """Drop idle RESTORE coordinator rows when a worker session is visible in the DMV."""
+    if len(rows) <= 1:
+        return rows
+    with_progress = [r for r in rows if float(r[2] or 0) > 0.0]
+    if with_progress:
+        return with_progress
+    active = [
+        r
+        for r in rows
+        if str(r[4] or "").upper() in _RESTORE_ACTIVE_WAIT_TYPES
+    ]
+    if active:
+        return active
+    non_sleep = [r for r in rows if str(r[4] or "").upper() != "SLEEP_TASK"]
+    if non_sleep:
+        return non_sleep
+    return rows
+
+
+def _pick_best_restore_request_row(
+    rows: List[Tuple[Any, ...]],
+    database: str,
+    preferred_spid: Optional[int] = None,
+) -> Optional[Tuple[Any, ...]]:
+    """
+    Choose the active RESTORE row when DMV shows multiple sessions (e.g. 0% + real %).
+
+    SQL Server often has two rows: ODBC session at 0% / SLEEP_TASK and a worker at real %
+    / BACKUPTHREAD. ``preferred_spid`` (``@@SPID`` on the RESTORE connection) is **not** used
+    for ranking — it is usually the idle coordinator.
+
+    Prefer highest ``percent_complete``, then target DB context, then longest elapsed time.
+    """
+    if not rows:
+        return None
+    rows, _sql_matched = _filter_restore_rows_for_database(list(rows), database)
+    rows = _narrow_restore_dmv_rows(rows)
+    db_key = (database or "").strip().lower()
+
+    def _score(row: Tuple[Any, ...]) -> Tuple[float, int, int]:
+        pct = float(row[2]) if row[2] is not None else 0.0
+        elapsed = int(row[7]) if len(row) > 7 and row[7] is not None else 0
+        db_ctx = (str(row[6] or "") if len(row) > 6 else "").lower()
+        db_match = 1 if db_key and db_ctx == db_key else 0
+        return (pct, db_match, elapsed)
+
+    return max(rows, key=_score)
+
+
+def _fetch_restore_dmv_rows(cur) -> List[Tuple[Any, ...]]:
+    cur.execute(_RESTORE_DMV_SQL)
+    return list(cur.fetchall() or [])
+
+
+def _count_blob_restore_sessions_for_database(cur, database: str) -> int:
+    try:
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM sys.dm_exec_requests r
+            CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+            WHERE r.command LIKE 'RESTORE%'
+              AND t.text LIKE '%https://%.bak%'
+              AND t.text LIKE '%' + ? + '%'
+            """,
+            (database,),
+        )
+        cnt = cur.fetchone()
+        return int(cnt[0]) if cnt and cnt[0] is not None else 0
+    except Exception:
+        return 0
+
+
+def _snapshot_from_targeted_blob_status_row(
+    database: str,
+    row: Tuple[Any, ...],
+) -> RestoreServerSnapshot:
+    """Map the optimized blob-restore status query row to ``RestoreServerSnapshot``."""
+    snap = RestoreServerSnapshot(database=database, status_source="blob_url_worker")
+    snap.state_desc = str(row[2] or "UNKNOWN")
+    snap.overall_phase = str(row[3] or "")
+    snap.command = "RESTORE DATABASE"
+    worker_status = row[4]
+    worker_wait = row[5]
+    worker_spid = row[6] if len(row) > 6 else None
+    snap.request_status = str(worker_status or "")
+    snap.wait_type = str(worker_wait or "")
+    if worker_spid is not None:
+        snap.session_id = int(worker_spid)
+
+    state_u = snap.state_desc.upper()
+    raw_pct = float(row[1]) if row[1] is not None else None
+    if worker_status is not None and raw_pct is not None:
+        snap.percent_complete = raw_pct
+    elif state_u == "ONLINE" and worker_status is not None:
+        snap.percent_complete = raw_pct if raw_pct is not None else 100.0
+    elif state_u == "ONLINE":
+        # DB existed ONLINE before RESTORE — query's ISNULL(...,100) is not real progress.
+        snap.percent_complete = None
+        if "Complete and Ready" in snap.overall_phase:
+            snap.overall_phase = "Waiting for RESTORE to start…"
+    elif state_u == "RECOVERING":
+        snap.percent_complete = None
+    elif state_u == "RESTORING" and worker_status is None:
+        snap.percent_complete = None
+    elif "Not Found" in snap.overall_phase:
+        snap.percent_complete = None
+    elif worker_status is not None and raw_pct is not None:
+        snap.percent_complete = raw_pct
+    else:
+        snap.percent_complete = None
+    return snap
+
+
+def _fetch_targeted_blob_restore_snapshot(
+    cur,
+    database: str,
+) -> Optional[RestoreServerSnapshot]:
+    """Run parent/child BackupURL restore status query for ``RESTORE FROM URL``."""
+    if not (database or "").strip():
+        return None
+    try:
+        cur.execute(_TARGETED_BLOB_RESTORE_STATUS_SQL, (database.strip(),))
+        row = cur.fetchone()
+        if not row:
+            return None
+        snap = _snapshot_from_targeted_blob_status_row(database, row)
+        snap.blob_restore_session_count = _count_blob_restore_sessions_for_database(
+            cur, database
+        )
+        return snap
+    except Exception:
+        return None
+
+
+def _fetch_restore_server_snapshot(
+    cur,
+    database: str,
+    *,
+    preferred_spid: Optional[int] = None,
+) -> Tuple[RestoreServerSnapshot, int]:
+    targeted = _fetch_targeted_blob_restore_snapshot(cur, database)
+    if targeted is not None:
+        n_blob = _count_blob_restore_sessions_for_database(cur, database)
+        targeted.blob_restore_session_count = n_blob
+        return targeted, n_blob
+
+    snap = RestoreServerSnapshot(database=database, status_source="dmv")
+    try:
+        cur.execute("SELECT state_desc FROM sys.databases WHERE name = ?", (database,))
+        row = cur.fetchone()
+        if row and row[0]:
+            snap.state_desc = str(row[0])
+    except Exception:
+        pass
+    try:
+        rows = _fetch_restore_dmv_rows(cur)
+        row = _pick_best_restore_request_row(rows, database, preferred_spid)
+        if row:
+            snap.session_id = int(row[0]) if row[0] is not None else None
+            snap.command = str(row[1] or "")
+            snap.percent_complete = float(row[2]) if row[2] is not None else None
+            snap.request_status = str(row[3] or "")
+            snap.wait_type = str(row[4] or "")
+            if row[5] is not None:
+                snap.est_minutes_remaining = float(row[5])
+        return snap, len(rows)
+    except Exception:
+        pass
+    return snap, 0
+
+
+def watch_restore_on_sql_server(
+    *,
+    connect_kwargs: Dict[str, Any],
+    database: str,
+    log: Callable[[str], None],
+    stop_event: threading.Event,
+    poll_sec: float = 5.0,
+    on_snapshot: Optional[Callable[[RestoreServerSnapshot], None]] = None,
+    get_preferred_spid: Optional[Callable[[], Optional[int]]] = None,
+) -> str:
+    """
+    Poll SQL Server until the database is ONLINE/SUSPECT or ``stop_event`` is set.
+
+    Use when the ODBC restore client disconnects but work may continue on the server.
+    Returns the last ``state_desc`` observed.
+    """
+    try:
+        from ..utils.database import connect_to_database
+    except ImportError:
+        from src.utils.database import connect_to_database
+
+    last_line = ""
+    last_state = ""
+    logged_multi = False
+    seen_restore_activity = False
+    conn = None
+    try:
+        conn = connect_to_database(**connect_kwargs)
+        try:
+            conn.timeout = 30
+        except Exception:
+            pass
+        cur = conn.cursor()
+        while not stop_event.is_set():
+            pref = get_preferred_spid() if get_preferred_spid else None
+            snap, n_restore = _fetch_restore_server_snapshot(
+                cur,
+                database,
+                preferred_spid=pref,
+            )
+            if not logged_multi and (
+                n_restore > 1 or snap.status_source == "blob_url_worker"
+            ):
+                logged_multi = True
+                if snap.status_source == "blob_url_worker":
+                    log(
+                        f"  [server status] Using blob URL worker query for [{database}] "
+                        f"({snap.overall_phase or 'status'}"
+                        + (
+                            f", SPID {snap.session_id}"
+                            if snap.session_id is not None
+                            else ""
+                        )
+                        + ")."
+                    )
+                else:
+                    scoped, by_sql = _filter_restore_rows_for_database(
+                        _fetch_restore_dmv_rows(cur), database
+                    )
+                    scope_note = (
+                        f"{len(scoped)} session(s) match RESTORE T-SQL for [{database}]"
+                        if by_sql
+                        else f"could not match RESTORE T-SQL for [{database}] — "
+                        "using best-effort % among all RESTORE sessions on this instance"
+                    )
+                    log(
+                        f"  [server status] {n_restore} RESTORE DMV row(s) on instance — {scope_note}; "
+                        f"tracking SPID {snap.session_id or pref} at "
+                        f"{snap.percent_complete or 0:.1f}%."
+                    )
+            line = snap.format_status_line()
+            if pref and snap.session_id and snap.session_id != pref:
+                line = f"{line} (ODBC SPID {pref})"
+            state_u = (snap.state_desc or "").upper()
+            if line != last_line:
+                log(f"  [server status] {line}")
+                last_line = line
+            if state_u != last_state:
+                last_state = state_u
+            if snap.indicates_active_restore():
+                seen_restore_activity = True
+            if on_snapshot:
+                try:
+                    if snap.is_misleading_complete_reading():
+                        waiting = RestoreServerSnapshot(
+                            database=snap.database,
+                            state_desc=snap.state_desc,
+                            overall_phase="Waiting for RESTORE to start…",
+                            status_source=snap.status_source,
+                            blob_restore_session_count=snap.blob_restore_session_count,
+                        )
+                        on_snapshot(waiting)
+                    else:
+                        on_snapshot(snap)
+                except Exception:
+                    pass
+            if state_u == "ONLINE":
+                if seen_restore_activity and not snap.indicates_active_restore():
+                    snap.percent_complete = 100.0
+                    snap.overall_phase = "3 - Complete and Ready"
+                    if on_snapshot:
+                        try:
+                            on_snapshot(snap)
+                        except Exception:
+                            pass
+                    log(f"  [server status] {database} is ONLINE on SQL Server.")
+                    return snap.state_desc
+            if state_u in ("SUSPECT", "EMERGENCY", "OFFLINE"):
+                log(f"  [server status] {database} entered {snap.state_desc} — restore may have failed.")
+                return snap.state_desc
+            stop_event.wait(poll_sec)
+    except Exception as exc:
+        log(f"  (server status monitor unavailable: {exc})")
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+    return last_state or "UNKNOWN"
+
+
+def _odbc_restore_disconnect_may_be_false_failure(err: str) -> bool:
+    """ODBC lost the RESTORE session though work may have finished on SQL (common on Azure SQL MI)."""
+    low = (err or "").lower()
+    markers = (
+        "42036",
+        "3013",
+        "terminating abnormally",
+        "operation has been cancelled",
+        "restore managed database",
+        "hyt00",
+        "query timeout expired",
+        "communication link failure",
+        "connection is broken",
+        "connection was killed",
+    )
+    return any(m in low for m in markers)
+
+
+def _fetch_database_state_desc(cur, database: str) -> Optional[str]:
+    try:
+        cur.execute("SELECT state_desc FROM sys.databases WHERE name = ?", (database,))
+        row = cur.fetchone()
+        return str(row[0]) if row and row[0] else None
+    except Exception:
+        return None
+
+
+def _verify_database_state_with_new_connection(
+    connect_kwargs: Dict[str, Any],
+    database: str,
+) -> Optional[str]:
+    try:
+        from ..utils.database import connect_to_database
+    except ImportError:
+        from src.utils.database import connect_to_database
+
+    conn = None
+    try:
+        conn = connect_to_database(**connect_kwargs)
+        cur = conn.cursor()
+        return _fetch_database_state_desc(cur, database)
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _resolve_restore_after_odbc_error(
+    connect_kwargs: Dict[str, Any],
+    database: str,
+    err_text: str,
+    log: Callable[[str], None],
+) -> Optional[str]:
+    """
+    If ODBC reports cancel/3013 but the database is already ONLINE, return ``success``.
+
+    Returns ``client_lost`` when RESTORE likely still running; ``None`` if still a real failure.
+    """
+    if not _odbc_restore_disconnect_may_be_false_failure(err_text):
+        return None
+    state = (_verify_database_state_with_new_connection(connect_kwargs, database) or "").upper()
+    if state == "ONLINE":
+        log(
+            "ODBC reported an error on the RESTORE connection, but "
+            f"[{database}] is ONLINE on SQL Server — treating restore as successful."
+        )
+        return "success"
+    if state in ("RESTORING", "RECOVERING"):
+        log(
+            f"ODBC connection ended ({err_text[:120]}…) but [{database}] is {state} on the server — "
+            "restore may still be in progress."
+        )
+        return "client_lost"
+    return None
 
 
 def _get_spid(cur) -> Optional[int]:
@@ -61,7 +772,8 @@ def _get_spid(cur) -> Optional[int]:
 def _monitor_request_progress(
     *,
     connect_kwargs: Dict[str, Any],
-    spid: int,
+    database: str,
+    odbc_spid: Optional[int],
     log,
     stop_event: "threading.Event",
     poll_sec: float = 5.0,
@@ -69,10 +781,8 @@ def _monitor_request_progress(
 ) -> None:
     """Best-effort progress monitor.
 
-    Opens a SECOND connection and polls ``sys.dm_exec_requests`` for the restore's SPID,
-    logging ``percent_complete`` and the estimated completion time while the RESTORE runs on
-    the main connection. Never raises into the caller; if the monitor cannot connect it simply
-    logs a note and returns (the restore itself is unaffected).
+    Polls all RESTORE rows in ``sys.dm_exec_requests`` and uses the active worker session
+    (highest %, BACKUPTHREAD — not the ODBC coordinator at 0% / SLEEP_TASK).
     """
     try:
         from ..utils.database import connect_to_database
@@ -82,43 +792,103 @@ def _monitor_request_progress(
         except ImportError:
             from utils.database import connect_to_database
 
-    query = (
-        "SELECT r.percent_complete, r.command, "
-        "DATEADD(second, r.estimated_completion_time/1000, GETDATE()) AS est_completion, "
-        "r.total_elapsed_time "
-        "FROM sys.dm_exec_requests r "
-        "WHERE r.session_id = ? "
-        "AND r.command IN ("
-        + ",".join("'" + c + "'" for c in _PROGRESS_COMMANDS)
-        + ")"
+    est_query = (
+        "SELECT DATEADD(second, r.estimated_completion_time/1000, GETDATE()) "
+        "FROM sys.dm_exec_requests r WHERE r.session_id = ?"
     )
 
     mconn = None
     try:
         mconn = connect_to_database(**connect_kwargs)
         try:
-            mconn.timeout = 30
+            mconn.timeout = 0
         except Exception:
             pass
         mcur = mconn.cursor()
         last_pct = -1.0
+        last_wait = ""
+        last_tracked_spid: Optional[int] = None
         while not stop_event.is_set():
             try:
-                mcur.execute(query, spid)
-                row = mcur.fetchone()
-                if row and row[0] is not None:
-                    pct = float(row[0])
-                    cmd = row[1]
-                    est = row[2]
-                    if pct >= 0 and (pct - last_pct >= 0.5 or pct >= 100.0):
-                        est_s = est.strftime("%Y-%m-%d %H:%M:%S") if hasattr(est, "strftime") else str(est)
-                        log(f"  [progress] {cmd}: {pct:.1f}% complete (est. finish {est_s})")
-                        last_pct = pct
-                        if progress_callback:
-                            try:
-                                progress_callback(pct)
-                            except Exception:
-                                pass
+                snap = _fetch_targeted_blob_restore_snapshot(mcur, database)
+                from_targeted_snap = False
+                if (
+                    snap is not None
+                    and snap.percent_complete is not None
+                    and not snap.is_misleading_complete_reading()
+                    and "Not Found" not in (snap.overall_phase or "")
+                ):
+                    from_targeted_snap = True
+                    pct = float(snap.percent_complete)
+                    sid = snap.session_id
+                    cmd = snap.command or "RESTORE DATABASE"
+                    req_status = snap.request_status
+                    wait_type = snap.wait_type
+                    phase = snap.overall_phase
+                else:
+                    snap = None
+                    rows = _fetch_restore_dmv_rows(mcur)
+                    row = _pick_best_restore_request_row(rows, database)
+                    if not row or row[2] is None:
+                        stop_event.wait(poll_sec)
+                        continue
+                    pct = float(row[2])
+                    sid = int(row[0]) if row[0] is not None else None
+                    cmd = str(row[1] or "RESTORE DATABASE")
+                    req_status = str(row[3] or "")
+                    wait_type = str(row[4] or "")
+                    phase = ""
+                if sid is not None and sid != last_tracked_spid:
+                    note = (
+                        f"  [progress] Tracking worker SPID {sid} for {database}"
+                        + (f" (ODBC session was SPID {odbc_spid})" if odbc_spid else "")
+                        + (" via blob URL query." if phase else ".")
+                    )
+                    log(note)
+                    last_tracked_spid = sid
+                if pct >= 100.0 and sid is None:
+                    stop_event.wait(poll_sec)
+                    continue
+                if from_targeted_snap and snap is not None and snap.is_misleading_complete_reading():
+                    stop_event.wait(poll_sec)
+                    continue
+                wait_changed = bool(wait_type and wait_type != last_wait)
+                if pct >= 0 and (
+                    pct - last_pct >= 0.1
+                    or (pct >= 100.0 and sid is not None)
+                    or wait_changed
+                ):
+                    if wait_type:
+                        last_wait = wait_type
+                    est_s = ""
+                    if sid is not None:
+                        try:
+                            mcur.execute(est_query, sid)
+                            est_row = mcur.fetchone()
+                            est = est_row[0] if est_row else None
+                            est_s = (
+                                est.strftime("%Y-%m-%d %H:%M:%S")
+                                if hasattr(est, "strftime")
+                                else str(est)
+                            )
+                        except Exception:
+                            est_s = "—"
+                    extra = ""
+                    if phase:
+                        extra = f" | {phase}"
+                    if req_status or wait_type:
+                        extra += f" | {req_status} | wait {wait_type}"
+                    log(
+                        f"  [progress] SPID {sid}: {cmd}: {pct:.1f}% complete"
+                        + (f" (est. finish {est_s})" if est_s else "")
+                        + extra
+                    )
+                    last_pct = pct
+                    if progress_callback:
+                        try:
+                            progress_callback(pct)
+                        except Exception:
+                            pass
             except Exception:
                 # Transient DMV/read errors should not stop monitoring.
                 pass
@@ -382,8 +1152,7 @@ def _prepare_blob_restore_urls(
         log("Single-file backup (no stripes detected)")
 
     restore_urls = [f"{acct_url}/{container}/{p}" for p in stripe_paths]
-    for u in restore_urls:
-        log(f"Restore URL: {u}")
+    _log_restore_urls(log, restore_urls)
 
     ctx: Dict[str, Any] = {
         "acct_url": acct_url,
@@ -543,7 +1312,7 @@ def run_test_blob_headeronly_via_sql_odbc(
             timeout=120,
             logger=logger,
         )
-        conn.timeout = 600
+        conn.timeout = 0
         conn.autocommit = True
         cur = conn.cursor()
 
@@ -562,31 +1331,15 @@ def run_test_blob_headeronly_via_sql_odbc(
                     pass
                 return result
 
-        cred_bracket = credential_name.replace("]", "]]")
-        log("Creating SQL Server credential for blob container (same as full restore)...")
-        drop_sql = (
-            "IF EXISTS (SELECT 1 FROM sys.credentials WHERE name = N'"
-            + _esc_sql(credential_name)
-            + "') DROP CREDENTIAL ["
-            + cred_bracket
-            + "]"
+        _ensure_sql_blob_credential(
+            cur,
+            credential_name=credential_name,
+            blob_auth_mode=blob_auth_mode,
+            sas_token=sas_token,
+            log=log,
+            mi_credential_sql=_mi_credential_sql,
+            esc_sql=_esc_sql,
         )
-        try:
-            cur.execute(drop_sql)
-        except Exception:
-            pass
-
-        if blob_auth_mode == "managed_identity":
-            create_cred_sql = _mi_credential_sql(credential_name)
-            log("CREATE CREDENTIAL (IDENTITY = 'Managed Identity').")
-        else:
-            create_cred_sql = (
-                f"CREATE CREDENTIAL [{cred_bracket}] "
-                f"WITH IDENTITY = N'SHARED ACCESS SIGNATURE', "
-                f"SECRET = N'{_esc_sql(sas_token or '')}'"
-            )
-            log("CREATE CREDENTIAL (SHARED ACCESS SIGNATURE).")
-        cur.execute(create_cred_sql)
 
         url_clauses = ", ".join(f"URL = N'{_esc_sql(u)}'" for u in restore_urls)
         header_sql = f"RESTORE HEADERONLY FROM {url_clauses}"
@@ -642,6 +1395,149 @@ def run_test_blob_headeronly_via_sql_odbc(
         return result
 
 
+_ABORT_BLOB_RESTORE_ON_STOP_SQL = """
+DECLARE @DBName NVARCHAR(128) = ?;
+DECLARE @BackupURL NVARCHAR(MAX);
+DECLARE @KillSQL NVARCHAR(MAX) = N'';
+
+SELECT TOP 1
+    @BackupURL = SUBSTRING(
+        t.text,
+        CHARINDEX('https://', t.text),
+        CHARINDEX('.bak', t.text) - CHARINDEX('https://', t.text) + 4
+    )
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.command LIKE 'RESTORE%'
+  AND t.text LIKE '%' + @DBName + '%';
+
+IF @BackupURL IS NOT NULL
+BEGIN
+    SELECT @KillSQL = @KillSQL + N'KILL ' + CAST(r.session_id AS NVARCHAR(10)) + N'; '
+    FROM sys.dm_exec_requests r
+    CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+    WHERE r.command LIKE 'RESTORE%'
+      AND t.text LIKE '%' + @BackupURL + '%';
+
+    IF LEN(@KillSQL) > 0
+        EXEC sp_executesql @KillSQL;
+
+    WAITFOR DELAY '00:00:05';
+END
+
+IF EXISTS (SELECT 1 FROM sys.databases WHERE name = @DBName)
+BEGIN
+    BEGIN TRY
+        DECLARE @DropSQL NVARCHAR(MAX) = N'DROP DATABASE ' + QUOTENAME(@DBName) + N';';
+        EXEC sp_executesql @DropSQL;
+    END TRY
+    BEGIN CATCH
+        -- Rollback may have already removed the database.
+    END CATCH
+END
+"""
+
+
+def run_abort_blob_restore_on_sql_server(
+    *,
+    server: str,
+    database: str,
+    auth: str,
+    user: Optional[str],
+    password: Optional[str],
+    log_callback: Optional[Callable[[str], None]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> Dict[str, Any]:
+    """
+    Stop an in-flight blob RESTORE: KILL all sessions on the same backup URL, then DROP DB.
+
+    Matches the operational script used for Azure SQL MI blob restores (parent URL + workers).
+    """
+    log = log_callback or (lambda m: None)
+    result: Dict[str, Any] = {"status": "error", "database": database, "killed_sessions": 0}
+
+    db_name = (database or "").strip()
+    if not db_name:
+        result["error"] = "Database name is required to stop restore."
+        log(result["error"])
+        return result
+    if re.search(r"[\];'\"\\]", db_name):
+        result["error"] = "Invalid database name."
+        log(result["error"])
+        return result
+
+    try:
+        from ..utils.database import connect_to_database, pick_sql_driver
+    except ImportError:
+        from src.utils.database import connect_to_database, pick_sql_driver
+
+    killed_before = 0
+    conn = None
+    try:
+        driver = pick_sql_driver(logger)
+        conn = connect_to_database(
+            server=server,
+            db="master",
+            user=user or "",
+            driver=driver,
+            auth=auth or "windows",
+            password=password,
+            timeout=120,
+            logger=logger,
+        )
+        conn.autocommit = True
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM sys.dm_exec_requests r
+            CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+            WHERE r.command LIKE 'RESTORE%'
+              AND t.text LIKE '%' + ? + '%'
+            """,
+            (db_name,),
+        )
+        row = cur.fetchone()
+        killed_before = int(row[0]) if row and row[0] is not None else 0
+
+        if killed_before:
+            log(
+                f"Stop: terminating {killed_before} RESTORE session(s) for [{db_name}] "
+                "(all sessions on the same blob .bak URL)…"
+            )
+        else:
+            log(f"Stop: no active RESTORE session found for [{db_name}] in DMV.")
+
+        log("Stop: running KILL + 5s wait + DROP DATABASE on SQL Server…")
+        cur.execute(_ABORT_BLOB_RESTORE_ON_STOP_SQL, (db_name,))
+
+        cur.execute("SELECT DB_ID(?)", (db_name,))
+        still_there = cur.fetchone()
+        if still_there and still_there[0] is not None:
+            log(f"Stop: [{db_name}] still exists on the instance (DROP may have failed).")
+            result["status"] = "partial"
+            result["error"] = f"Database {db_name} could not be dropped."
+        else:
+            log(f"Stop: [{db_name}] removed — restore aborted and storage cleared on SQL Server.")
+            result["status"] = "success"
+
+        result["killed_sessions"] = killed_before
+        cur.close()
+        conn.close()
+        return result
+    except Exception as exc:
+        err = redact_sensitive_text(str(exc))
+        result["error"] = err
+        log(f"Stop/abort on SQL Server failed: {err}")
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+        return result
+
+
 def run_restore_from_blob(
     server: str,
     database: str,
@@ -658,6 +1554,7 @@ def run_restore_from_blob(
     progress_callback: Optional[Any] = None,
     cancel_event: Optional[Any] = None,
     on_connect: Optional[Any] = None,
+    on_restore_spid: Optional[Callable[[int], None]] = None,
 ) -> Dict[str, Any]:
     """
     Restore a SQL Server database from one or more .bak stripes in Azure Blob.
@@ -741,7 +1638,7 @@ def run_restore_from_blob(
             timeout=120,
             logger=logger,
         )
-        conn.timeout = 7200
+        conn.timeout = 0
         conn.autocommit = True
         cur = conn.cursor()
 
@@ -782,32 +1679,17 @@ def run_restore_from_blob(
                     pass
                 return result
 
-        cred_bracket = credential_name.replace("]", "]]")
-
-        log("Creating SQL Server credential for blob container...")
-        drop_sql = (
-            "IF EXISTS (SELECT 1 FROM sys.credentials WHERE name = N'"
-            + _esc_sql(credential_name)
-            + "') DROP CREDENTIAL ["
-            + cred_bracket
-            + "]"
+        _warn_if_restore_in_progress(cur, log, database)
+        _ensure_sql_blob_credential(
+            cur,
+            credential_name=credential_name,
+            blob_auth_mode=blob_auth_mode,
+            sas_token=sas_token,
+            log=log,
+            mi_credential_sql=_mi_credential_sql,
+            esc_sql=_esc_sql,
         )
-        try:
-            cur.execute(drop_sql)
-        except Exception:
-            pass
-
-        if blob_auth_mode == "managed_identity":
-            create_cred_sql = _mi_credential_sql(credential_name)
-            log("Credential created (IDENTITY = 'Managed Identity'). Running RESTORE ...")
-        else:
-            create_cred_sql = (
-                f"CREATE CREDENTIAL [{cred_bracket}] "
-                f"WITH IDENTITY = N'SHARED ACCESS SIGNATURE', "
-                f"SECRET = N'{_esc_sql(sas_token)}'"
-            )
-            log("Credential created (SAS). Running RESTORE DATABASE ... FROM URL ...")
-        cur.execute(create_cred_sql)
+        log("Running RESTORE DATABASE … FROM URL …")
 
         url_clauses = ", ".join(f"URL = N'{_esc_sql(u)}'" for u in restore_urls)
         if target_managed_instance:
@@ -818,23 +1700,29 @@ def run_restore_from_blob(
         # Start a best-effort progress monitor on a second connection (polls percent_complete).
         stop_event = threading.Event()
         monitor: Optional[threading.Thread] = None
+        monitor_connect_kwargs = dict(
+            server=server,
+            db="master",
+            user=user or "",
+            driver=driver,
+            auth=auth or "windows",
+            password=password,
+            timeout=120,
+            logger=logger,
+        )
         spid = _get_spid(cur)
+        if spid and on_restore_spid:
+            try:
+                on_restore_spid(int(spid))
+            except Exception:
+                pass
         if spid:
-            monitor_connect_kwargs = dict(
-                server=server,
-                db="master",
-                user=user or "",
-                driver=driver,
-                auth=auth or "windows",
-                password=password,
-                timeout=60,
-                logger=logger,
-            )
             monitor = threading.Thread(
                 target=_monitor_request_progress,
                 kwargs=dict(
                     connect_kwargs=monitor_connect_kwargs,
-                    spid=spid,
+                    database=database,
+                    odbc_spid=spid,
                     log=log,
                     stop_event=stop_event,
                     poll_sec=5.0,
@@ -842,7 +1730,10 @@ def run_restore_from_blob(
                 ),
                 daemon=True,
             )
-            log(f"Monitoring restore progress (SPID {spid}) — % complete will appear below…")
+            log(
+                f"Monitoring restore progress (ODBC SPID {spid}; "
+                "status from blob URL parent/child DMV query)…"
+            )
             monitor.start()
 
         t0 = time.perf_counter()
@@ -862,6 +1753,28 @@ def run_restore_from_blob(
                 result["status"] = "cancelled"
                 result["error"] = "Restore cancelled by user."
                 log("Restore cancelled by user.")
+                try:
+                    cur.close()
+                    conn.close()
+                except Exception:
+                    pass
+                return result
+            err_text = str(restore_error)
+            resolved = _resolve_restore_after_odbc_error(
+                monitor_connect_kwargs, database, err_text, log
+            )
+            if resolved == "success":
+                try:
+                    cur.close()
+                    conn.close()
+                except Exception:
+                    pass
+                result["status"] = "success"
+                log(f"Restore completed. Database: {database}")
+                return result
+            if resolved == "client_lost":
+                result["status"] = "client_lost"
+                result["error"] = redact_sensitive_text(err_text)
                 try:
                     cur.close()
                     conn.close()
@@ -894,6 +1807,19 @@ def run_restore_from_blob(
                 log(f"(ODBC/SQL raw exception.args) {e.args!r}")
         except Exception:
             pass
+        verify_kw = locals().get("monitor_connect_kwargs")
+        if verify_kw:
+            resolved = _resolve_restore_after_odbc_error(
+                verify_kw, database, err_text, log
+            )
+            if resolved == "success":
+                result["status"] = "success"
+                log(f"Restore completed. Database: {database}")
+                return result
+            if resolved == "client_lost":
+                result["status"] = "client_lost"
+                result["error"] = redact_sensitive_text(err_text)
+                return result
         acct_url_hint = locals().get("acct_url") or ""
         container_hint = locals().get("container") or ""
         try:
@@ -909,6 +1835,12 @@ def run_restore_from_blob(
         if diagnostic:
             result["diagnostic"] = diagnostic.strip()
         log(f"Restore failed: {err_text}")
+        if "hyt00" in err_text.lower() or "query timeout expired" in err_text.lower():
+            log(
+                "ODBC reported a query timeout. A large RESTORE may still be running on the SQL "
+                "instance — check Azure portal activity or sys.dm_exec_requests before retrying. "
+                "Retrying immediately can fail with 'credential already exists' (15530)."
+            )
         if diagnostic:
             log(diagnostic.strip())
         return result

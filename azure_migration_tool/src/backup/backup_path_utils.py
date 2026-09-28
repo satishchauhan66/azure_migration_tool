@@ -49,6 +49,43 @@ def normalize_backup_path(raw: str) -> str:
     return s.replace("/", "\\")
 
 
+# Shared backup root when SQL Server's registry BackupDirectory is a host-local
+# drive path (C:\..., D:\...) that a remote tool host cannot use for browse/upload.
+DEFAULT_SHARED_BACKUP_ROOT = r"\\gpitd-shir01.us.pressganey.com\sqlbackups"
+
+
+def is_unc_backup_path(path: str) -> bool:
+    p = (path or "").strip()
+    return p.startswith("\\\\") or p.startswith("//")
+
+
+def is_windows_drive_backup_path(path: str) -> bool:
+    """True for host-local paths like C:\\Backup or D:\\MSSQL\\Backup."""
+    p = (path or "").strip()
+    return len(p) >= 2 and p[1] == ":" and p[0].isalpha()
+
+
+def resolve_sql_default_backup_path(
+    sql_backup_dir: Optional[str],
+    shared_fallback: str = DEFAULT_SHARED_BACKUP_ROOT,
+) -> Tuple[str, str]:
+    """
+    Prefer SQL Server's default backup directory when it is a UNC path.
+
+    Host-local drive paths look like 'this PC' and are not usable from a remote
+    tool host, so fall back to ``shared_fallback``.
+
+    Returns ``(path, reason)`` where reason is ``sql_unc``, ``sql_local``, or ``fallback``.
+    """
+    path = (sql_backup_dir or "").strip()
+    fallback = (shared_fallback or DEFAULT_SHARED_BACKUP_ROOT).rstrip("\\/")
+    if path and is_unc_backup_path(path):
+        return path.rstrip("\\/"), "sql_unc"
+    if path and is_windows_drive_backup_path(path):
+        return fallback, "sql_local"
+    return fallback, "fallback"
+
+
 def infer_database_name_from_backup_path(backup_path: str) -> Optional[str]:
     """
     Infer backed-up database name from path/filename.
