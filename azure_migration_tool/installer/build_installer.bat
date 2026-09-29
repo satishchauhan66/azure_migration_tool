@@ -24,7 +24,10 @@ if errorlevel 1 (
 cd /d "%APP_DIR%"
 set "MAKENSIS_OPTS="
 if exist "installer\odbc\msodbcsql18_x64.msi" set "MAKENSIS_OPTS=/DHAVE_ODBC %MAKENSIS_OPTS%"
+if exist "installer\azurecli\AzureCLI.msi" set "MAKENSIS_OPTS=/DHAVE_AZURECLI %MAKENSIS_OPTS%"
 if exist "installer\java\bin\java.exe" set "MAKENSIS_OPTS=/DHAVE_JAVA %MAKENSIS_OPTS%"
+if exist "installer\azcopy\azcopy.exe" set "MAKENSIS_OPTS=/DHAVE_AZCOPY %MAKENSIS_OPTS%"
+if exist "installer\tools\SqlCmdLnUtils.msi" set "MAKENSIS_OPTS=/DHAVE_BCP %MAKENSIS_OPTS%"
 REM Get version so setup output is versioned (new file per build)
 for /f "delims=" %%v in ('python -c "import sys; sys.path.insert(0, '.'); from azure_migration_tool import __version__; print(__version__)" 2^>nul') do set "VER=%%v"
 if defined VER set "MAKENSIS_OPTS=/DVERSION=!VER! !MAKENSIS_OPTS!"

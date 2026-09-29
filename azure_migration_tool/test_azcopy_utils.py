@@ -143,9 +143,24 @@ class TestEnsureAzcopyReady(unittest.TestCase):
             "logged_in": False,
             "user": "",
         }
+        _mod._azcopy_entra_session_ready = False
         msg = ensure_azcopy_ready_for_upload("managed_identity")
         self.assertIsNotNone(msg)
         self.assertIn("signed in", msg.lower())
+
+    @mock.patch.object(_mod, "run_azcopy_smoke_check", return_value=None)
+    @mock.patch.object(_mod, "get_azure_cli_account")
+    @mock.patch.object(_mod, "find_azcopy_executable", return_value="C:\\AzCopy\\azcopy.exe")
+    def test_mi_requires_azure_cli(self, _mock_az, mock_cli, _smoke):
+        mock_cli.return_value = {
+            "installed": False,
+            "logged_in": False,
+            "user": "",
+        }
+        _mod._azcopy_entra_session_ready = False
+        msg = ensure_azcopy_ready_for_upload("managed_identity")
+        self.assertIsNotNone(msg)
+        self.assertIn("Azure CLI", msg)
 
     @mock.patch.object(_mod, "prepare_azcopy_entra_auth", return_value=None)
     @mock.patch.object(_mod, "run_azcopy_smoke_check", return_value=None)
@@ -195,8 +210,13 @@ class TestFormatStatus(unittest.TestCase):
 
 
 class TestInstallInstructions(unittest.TestCase):
-    def test_contains_winget(self):
-        self.assertIn("winget", install_instructions())
+    @mock.patch.object(_mod, "find_az_cli_executable", return_value=None)
+    @mock.patch.object(_mod, "find_azcopy_executable", return_value=r"C:\App\tools\azcopy\azcopy.exe")
+    def test_requires_azure_cli_when_missing(self, _find_az, _find_cli):
+        text = install_instructions()
+        self.assertIn("Azure CLI", text)
+        self.assertIn("winget install Microsoft.AzureCLI", text)
+        self.assertIn("azcopy.exe", text.lower())
 
 
 if __name__ == "__main__":

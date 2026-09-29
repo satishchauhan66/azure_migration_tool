@@ -45,6 +45,8 @@
 !endif
 ; Bundled ODBC Driver 18 x64 MSI (optional - install runs it during setup)
 !define ODBC_MSI           "odbc\msodbcsql18_x64.msi"
+; Bundled Azure CLI MSI (az login for AzCopy Entra uploads) - run download_azure_cli.ps1
+!define AZURECLI_MSI       "azurecli\AzureCLI.msi"
 ; Bundled Java (Eclipse Temurin 17) for DB2/JDBC - run installer\download_java.ps1 to populate
 !define JAVA_DIR           "java"
 ; SQL Server Command Line Utilities (bcp.exe) - run installer\build_installer.ps1 to download MSI
@@ -76,9 +78,9 @@ Unicode True
 !define MUI_ABORTWARNING
 !define MUI_BRANDINGTEXT "Developed by 66Degrees"
 !define MUI_WELCOMEPAGE_TITLE "Welcome to ${PRODUCT_NAME} Setup"
-!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and optional components.$\r$\n$\r$\nYou can install for the current user only, or for all users (requires administrator).$\r$\n$\r$\nIncluded: application; AzCopy (blob upload); BCP/SQL Command Line tools (if bundled); ODBC Driver 18 (all-users); Java 17 for DB2/JDBC if bundled.$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar).$\r$\n$\r$\nClick Next to continue."
+!define MUI_WELCOMEPAGE_TEXT "This will install ${PRODUCT_NAME} and optional components.$\r$\n$\r$\nYou can install for the current user only, or for all users (requires administrator).$\r$\n$\r$\nIncluded: application; AzCopy (blob upload); Azure CLI (az login for blob auth); BCP/SQL Command Line tools (if bundled); ODBC Driver 18 (all-users); Java 17 for DB2/JDBC if bundled.$\r$\nThe app exe already contains the DB2 JDBC driver (db2jcc4.jar).$\r$\n$\r$\nClick Next to continue."
 !define MUI_FINISHPAGE_TITLE "Completing ${PRODUCT_NAME} Setup"
-!define MUI_FINISHPAGE_TEXT "${PRODUCT_NAME} has been installed.$\r$\n$\r$\nPer-user installs do not run the ODBC MSI automatically; install Microsoft ODBC Driver 18 for SQL Server separately if needed.$\r$\n$\r$\nDeveloped by 66Degrees."
+!define MUI_FINISHPAGE_TEXT "${PRODUCT_NAME} has been installed.$\r$\n$\r$\nPer-user installs may skip machine-wide MSIs (ODBC / Azure CLI); use All users install or install those tools separately if needed.$\r$\n$\r$\nAfter setup, open the app and click Sign in to Azure (uses Azure CLI / browser).$\r$\n$\r$\nDeveloped by 66Degrees."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "Run ${PRODUCT_NAME} now"
 
@@ -175,6 +177,27 @@ Section "MainSection" SEC01
   ${endif}
   !endif
 
+  ; Azure CLI: required for AzCopy Entra (AZCLI) blob uploads — machine-wide MSI
+  !ifdef HAVE_AZURECLI
+  ${if} $MultiUser.InstallMode == "AllUsers"
+    SetOutPath "$INSTDIR\azurecli"
+    File "${AZURECLI_MSI}"
+    DetailPrint "Installing Microsoft Azure CLI (az) for blob upload sign-in..."
+    ExecWait '"$SYSDIR\msiexec.exe" /i "$INSTDIR\azurecli\AzureCLI.msi" /quiet /norestart'
+    SetOutPath "$INSTDIR"
+  ${else}
+    ; Per-user mode: still attempt MSI (may prompt elevation / fail without admin)
+    SetOutPath "$INSTDIR\azurecli"
+    File "${AZURECLI_MSI}"
+    DetailPrint "Installing Microsoft Azure CLI (az) — may require administrator approval..."
+    ExecWait '"$SYSDIR\msiexec.exe" /i "$INSTDIR\azurecli\AzureCLI.msi" /quiet /norestart' $0
+    ${if} $0 != 0
+      DetailPrint "Azure CLI MSI returned $0. Install manually: winget install Microsoft.AzureCLI"
+    ${endif}
+    SetOutPath "$INSTDIR"
+  ${endif}
+  !endif
+
   !ifdef HAVE_JAVA
   DetailPrint "Installing bundled Java (for DB2/JDBC)..."
   SetOutPath "$INSTDIR"
@@ -242,6 +265,8 @@ Section "Uninstall"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$INSTDIR\odbc\msodbcsql18_x64.msi"
   RMDir "$INSTDIR\odbc"
+  Delete "$INSTDIR\azurecli\AzureCLI.msi"
+  RMDir "$INSTDIR\azurecli"
   Delete "$INSTDIR\tools\SqlCmdLnUtils.msi"
   Delete "$INSTDIR\tools\azcopy\azcopy.exe"
   RMDir "$INSTDIR\tools\azcopy"

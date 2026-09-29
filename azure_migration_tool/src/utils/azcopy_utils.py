@@ -39,6 +39,18 @@ MAX_PARALLEL_ENTRA_FILE_UPLOADS = 4
 _azcopy_entra_lock = threading.Lock()
 _azcopy_entra_session_ready = False
 
+
+def mark_azcopy_entra_session_ready() -> None:
+    """Mark that AzCopy already has an Entra login cache for this process."""
+    global _azcopy_entra_session_ready
+    with _azcopy_entra_lock:
+        _azcopy_entra_session_ready = True
+
+
+def is_azcopy_entra_session_ready() -> bool:
+    with _azcopy_entra_lock:
+        return bool(_azcopy_entra_session_ready)
+
 _AZ_CLI_WIN_CANDIDATES = (
     r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd",
     r"C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd",
@@ -247,33 +259,43 @@ def format_azure_tools_status() -> str:
 
 def install_instructions() -> str:
     bundled = find_azcopy_executable()
-    azcopy_line = (
-        "AzCopy is bundled with the Azure Migration Tool installer (tools\\azcopy).\n"
-        if bundled
-        else "Re-run the Azure Migration Tool Setup installer, or:\n"
-        "  winget install Microsoft.Azure.AzCopy\n"
-    )
+    az = find_az_cli_executable()
+    if bundled:
+        azcopy_line = f"AzCopy is available with this app:\n  {bundled}\n"
+    else:
+        azcopy_line = (
+            "AzCopy was not found next to this app.\n"
+            "Re-run the Azure Migration Tool Setup installer, or:\n"
+            "  winget install Microsoft.Azure.AzCopy\n"
+        )
+    if az:
+        cli_line = f"Azure CLI is installed:\n  {az}\nClick 'Sign in to Azure' (browser / az login).\n"
+    else:
+        cli_line = (
+            "Azure CLI (az) is required for Azure AD blob uploads.\n"
+            "Re-run Setup (All users) so it installs Azure CLI, or:\n"
+            "  winget install Microsoft.AzureCLI\n"
+            "Then restart this app and click 'Sign in to Azure'.\n"
+        )
     return (
         azcopy_line
-        + "\nFor Azure AD blob upload mode, Azure CLI is also required:\n"
-        "  winget install Microsoft.AzureCLI\n"
-        "Then click 'Sign in to Azure' in this app (or run: az login --use-device-code).\n"
-        "Restart the app after installing so PATH is refreshed."
+        + "\n"
+        + cli_line
+        + "\nOr use Step 3 connection-string / account-key mode (no Azure sign-in needed)."
     )
 
 
 def run_az_login(
     log: Optional[Callable[[str], None]] = None,
     *,
-    use_device_code: bool = True,
+    use_device_code: bool = False,
     on_device_code: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """
     Run ``az login``. Returns True when an account is available afterward.
 
-    Device code is default so GUI apps without a console still work; output is
-    written to ``log``. Set ``use_device_code=False`` to open the system browser
-    in a new console window (Windows).
+    Default is interactive browser login (new console on Windows). Set
+    ``use_device_code=True`` only when a headless device-code flow is required.
     """
     _log = log or (lambda _m: None)
     az = find_az_cli_executable()
@@ -305,7 +327,7 @@ def run_az_login(
                 _log(f"az login failed (exit {rc}).")
                 return False
         else:
-            _log("Opening a console window for az login (complete sign-in there)...")
+            _log("Opening a console window for az login (complete sign-in in the browser)...")
             flags = subprocess.CREATE_NEW_CONSOLE if sys.platform.startswith("win") else 0
             proc = subprocess.Popen(
                 _az_cli_command("login"),
@@ -476,12 +498,15 @@ def prepare_azcopy_entra_auth(
     """
     One-time Entra ID setup for AzCopy uploads on this process.
 
+    Requires Azure CLI (``az login``) then ``azcopy login --login-type AZCLI``.
     Returns an error message, or None when ready.
     """
     global _azcopy_entra_session_ready
     with _azcopy_entra_lock:
         if _azcopy_entra_session_ready:
             return None
+        if not find_azcopy_executable():
+            return "AzCopy is not installed.\n\n" + install_instructions()
         cli_err = ensure_azure_cli_login_for_azcopy(log, auto_login=auto_login)
         if cli_err:
             return cli_err
@@ -741,12 +766,12 @@ def ensure_azure_cli_login_for_azcopy(
         _log(f"Azure CLI session OK ({cli.get('user')})")
         return None
     if auto_login:
-        _log("Azure CLI not signed in — starting az login for AzCopy...")
-        if run_az_login(_log, use_device_code=True):
+        _log("Azure CLI not signed in — starting az login (browser) for AzCopy...")
+        if run_az_login(_log, use_device_code=False):
             return None
         return (
             "Azure CLI sign-in failed. Click 'Sign in to Azure' in Step 3, "
-            "or run: az login --use-device-code"
+            "or run: az login"
         )
     return (
         "Azure CLI is not signed in. AzCopy uploads in Managed Identity / Azure AD mode "

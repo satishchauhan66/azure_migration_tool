@@ -719,8 +719,8 @@ class BackupRestoreTab:
             az_tools,
             text=(
                 "Managed Identity / Azure AD uploads need Azure CLI signed in on THIS host "
-                "(the CDC / app server). Install: winget install Microsoft.AzureCLI "
-                "and winget install Microsoft.Azure.AzCopy"
+                "(the CDC / app server). Setup installs Azure CLI when you use All users; "
+                "then click Sign in to Azure (browser az login). AzCopy is bundled with the app."
             ),
             fg="gray",
             wraplength=650,
@@ -2658,8 +2658,8 @@ class BackupRestoreTab:
                     pass
 
     def _sign_in_azure_for_upload(self) -> None:
-        """Run az login (device code) from the app and refresh status."""
-        self._run_azure_cli_sign_in(use_device_code=True)
+        """Run az login (browser) from the app and refresh status."""
+        self._run_azure_cli_sign_in(use_device_code=False)
 
     def _sign_in_azure_browser_window(self) -> None:
         """Open a console window for interactive az login (browser)."""
@@ -2676,13 +2676,14 @@ class BackupRestoreTab:
         if not find_az_cli_executable():
             messagebox.showerror(
                 "Azure CLI required",
-                install_instructions(),
+                "Azure AD blob upload uses Azure CLI (az login).\n\n"
+                + install_instructions(),
             )
             self._refresh_local_azure_tools_status()
             return
 
         self.local_az_signin_btn.config(state=tk.DISABLED)
-        self.local_azure_tools_status_var.set("Signing in to Azure...")
+        self.local_azure_tools_status_var.set("Signing in to Azure (Azure CLI / browser)...")
 
         def log(msg: str) -> None:
             self.frame.after(
@@ -2722,12 +2723,12 @@ class BackupRestoreTab:
                             "Azure CLI sign-in completed. You can upload to blob now.",
                         ),
                     )
-                elif use_device_code:
+                else:
                     self.frame.after(
                         0,
                         lambda: messagebox.showerror(
                             "Azure sign-in",
-                            "Sign-in did not complete. See the Log panel for the device code / errors.",
+                            "Sign-in did not complete. See the Log panel, or run: az login",
                         ),
                     )
             except Exception as exc:

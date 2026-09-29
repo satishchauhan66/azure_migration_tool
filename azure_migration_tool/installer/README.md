@@ -45,12 +45,15 @@ This folder contains a **separate installer flow** that does not change the exis
 | **ODBC Driver 18** | Place `msodbcsql18_x64.msi` in `installer/odbc/` or let `build_installer.ps1` download it | SQL Server / Azure SQL |
 | **Java 17** | Run `.\installer\download_java.ps1` then build, or use `.\installer\build_installer.ps1 -IncludeJava` | DB2 Compare (Schema/Data) tabs |
 | **AzCopy v10** | Downloaded automatically by `build_installer.ps1`, or run `.\installer\download_azcopy.ps1` | Local Backup → Blob upload (required) |
+| **Azure CLI** | Downloaded automatically by `build_installer.ps1`, or run `.\installer\download_azure_cli.ps1` | `az login` for Azure AD / Managed Identity blob uploads |
 
 **ODBC:** The folder `installer/odbc/` can contain `msodbcsql18_x64.msi`. If present, the installer bundles it and runs it during setup. Download from https://go.microsoft.com/fwlink/?linkid=2249006 or let `build_installer.ps1` download it.
 
 **Java:** Run `.\installer\download_java.ps1` to download Eclipse Temurin 17 and extract to `installer/java/`. If `installer/java/bin/java.exe` exists at build time, the installer bundles it so the app finds it next to the exe (no separate Java install on the target PC). Or use `.\installer\build_installer.ps1 -IncludeJava` to download Java and then build.
 
-**AzCopy:** `build_installer.ps1` downloads AzCopy v10 into `installer/azcopy/` and installs it under `$INSTDIR\tools\azcopy\azcopy.exe`. The PyInstaller exe also embeds the same folder when present at build time. **Azure CLI** is not bundled; users still need `az login` for Azure AD blob auth (or use connection-string / account key mode).
+**AzCopy:** `build_installer.ps1` downloads AzCopy v10 into `installer/azcopy/` and installs it under `$INSTDIR\tools\azcopy\azcopy.exe`. The PyInstaller exe also embeds the same folder when present at build time.
+
+**Azure CLI:** `build_installer.ps1` downloads `AzureCLI.msi` into `installer/azurecli/` and the setup runs it (machine-wide) so `az` is on PATH for Azure AD blob uploads. Prefer **All users** install. After setup, open the app and click **Sign in to Azure** (browser `az login`).
 
 ## Optional: run the helper script
 
