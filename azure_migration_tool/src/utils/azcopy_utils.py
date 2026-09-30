@@ -51,6 +51,14 @@ def is_azcopy_entra_session_ready() -> bool:
     with _azcopy_entra_lock:
         return bool(_azcopy_entra_session_ready)
 
+
+def clear_azcopy_entra_session() -> None:
+    """Forget AzCopy Entra session so the next upload runs azcopy login again."""
+    global _azcopy_entra_session_ready
+    with _azcopy_entra_lock:
+        _azcopy_entra_session_ready = False
+
+
 _AZ_CLI_WIN_CANDIDATES = (
     r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd",
     r"C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd",
@@ -285,17 +293,51 @@ def install_instructions() -> str:
     )
 
 
+def run_az_logout(log: Optional[Callable[[str], None]] = None) -> bool:
+    """Run ``az logout`` and clear local AzCopy Entra session state."""
+    _log = log or (lambda _m: None)
+    clear_azcopy_entra_session()
+    az = find_az_cli_executable()
+    if not az:
+        _log("Azure CLI (az) is not installed.")
+        return False
+    before = get_azure_cli_account()
+    if not before.get("logged_in"):
+        _log("Azure CLI: already signed out.")
+        return True
+    try:
+        rc, stdout, stderr = _run_cmd(_az_cli_command("logout"), timeout=120)
+        for line in (stdout + "\n" + stderr).splitlines():
+            line = line.strip()
+            if line:
+                _log(line)
+        if rc != 0:
+            _log(f"az logout failed (exit {rc}).")
+            return False
+    except Exception as exc:
+        _log(f"az logout error: {exc}")
+        return False
+    after = get_azure_cli_account()
+    if after.get("logged_in"):
+        _log("Azure CLI still reports a signed-in account after logout.")
+        return False
+    _log("[OK] Signed out of Azure CLI.")
+    return True
+
+
 def run_az_login(
     log: Optional[Callable[[str], None]] = None,
     *,
     use_device_code: bool = False,
     on_device_code: Optional[Callable[[str], None]] = None,
+    force: bool = False,
 ) -> bool:
     """
     Run ``az login``. Returns True when an account is available afterward.
 
     Default is interactive browser login (new console on Windows). Set
     ``use_device_code=True`` only when a headless device-code flow is required.
+    With ``force=True``, always opens sign-in even if a session already exists.
     """
     _log = log or (lambda _m: None)
     az = find_az_cli_executable()
@@ -305,7 +347,7 @@ def run_az_login(
         return False
 
     before = get_azure_cli_account()
-    if before.get("logged_in"):
+    if before.get("logged_in") and not force:
         _log(f"Already signed in: {before.get('user')}")
         return True
 
@@ -347,6 +389,23 @@ def run_az_login(
         return True
     _log("Sign-in did not complete. Try again or run 'az login' in a terminal.")
     return False
+
+
+def run_az_relogin(
+    log: Optional[Callable[[str], None]] = None,
+    *,
+    use_device_code: bool = False,
+    on_device_code: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Sign out of Azure CLI, then run interactive ``az login`` (for MFA / token refresh)."""
+    _log = log or (lambda _m: None)
+    run_az_logout(_log)
+    return run_az_login(
+        _log,
+        use_device_code=use_device_code,
+        on_device_code=on_device_code,
+        force=True,
+    )
 
 
 def build_blob_destination_url(

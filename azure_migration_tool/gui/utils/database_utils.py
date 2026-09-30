@@ -292,16 +292,13 @@ def connect_with_msal_cache(
     Raises:
         Exception: If connection fails
     """
-    # Validate server name
-    if not server or not server.strip():
-        raise ValueError("Server name cannot be empty")
-    
-    server = server.strip()
+    try:
+        from src.utils.sql_server_name import validate_sql_server_name
+    except ImportError:
+        from azure_migration_tool.src.utils.sql_server_name import validate_sql_server_name
+
+    server = validate_sql_server_name(server)
     auth = (auth or "").strip().lower()
-    
-    # Validate server doesn't look like an email domain
-    if "@" in server or (server.endswith(".com") and len(server.split(".")) < 3):
-        raise ValueError(f"Invalid server name: '{server}'. Server name appears to be an email domain, not a SQL Server address.")
     
     # Pick driver if not provided
     if not driver:
@@ -442,6 +439,13 @@ def list_databases(
     Raises:
         Exception: If connection fails
     """
+    try:
+        from src.utils.sql_server_name import validate_sql_server_name
+    except ImportError:
+        from azure_migration_tool.src.utils.sql_server_name import validate_sql_server_name
+
+    server = validate_sql_server_name(server)
+
     # Connect to master database to list all databases
     try:
         # Try to use the utility function
@@ -477,18 +481,9 @@ def list_databases(
                 if not driver:
                     raise RuntimeError("No SQL Server ODBC driver found")
             
-            # Validate server name before connecting
-            if not server or not server.strip():
-                raise ValueError("Server name cannot be empty")
-            
-            # Validate server doesn't look like an email domain
-            server_clean = server.strip()
-            if "@" in server_clean or (server_clean.endswith(".com") and len(server_clean.split(".")) < 3):
-                raise ValueError(f"Invalid server name: '{server_clean}'. Server name appears to be an email domain, not a SQL Server address.")
-            
             # Connect to master database
             conn = connect_to_database(
-                server=server_clean,
+                server=server,
                 db="master",  # Connect to master to list all databases
                 user=user,
                 driver=driver,

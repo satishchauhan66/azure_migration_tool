@@ -20,14 +20,17 @@ sys.path.insert(0, str(parent_dir))
 from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
 
 try:
+    from gui.widgets.searchable_picker import SearchablePicker as _ArmPicker
+except ImportError:
+    from azure_migration_tool.gui.widgets.searchable_picker import SearchablePicker as _ArmPicker
+
+try:
     from gui.tabs.mi_pitr_restore_tab import (
-        _ArmPicker,
         _combo_values_from_subscriptions,
         _mi_instance_label,
     )
 except ImportError:
     from azure_migration_tool.gui.tabs.mi_pitr_restore_tab import (
-        _ArmPicker,
         _combo_values_from_subscriptions,
         _mi_instance_label,
     )

@@ -21,6 +21,13 @@ from gui.utils.server_config import (
 )
 from gui.utils.database_utils import list_databases
 try:
+    from src.utils.sql_server_name import sanitize_sql_server_name, validate_sql_server_name
+except ImportError:
+    from azure_migration_tool.src.utils.sql_server_name import (
+        sanitize_sql_server_name,
+        validate_sql_server_name,
+    )
+try:
     from gui.utils import input_history as input_history_mod
 except ImportError:
     try:
@@ -32,6 +39,14 @@ try:
 except ImportError:
     def add_tooltip(widget, text, delay_ms=500):
         pass
+try:
+    from gui.widgets.searchable_picker import enable_combobox_typeahead
+except ImportError:
+    try:
+        from azure_migration_tool.gui.widgets.searchable_picker import enable_combobox_typeahead
+    except ImportError:
+        def enable_combobox_typeahead(combo, **kwargs):  # type: ignore[misc]
+            return lambda: None
 
 # User-friendly display labels (internal value -> display text)
 DB_TYPE_DISPLAY = {"sqlserver": "SQL Server / Azure SQL", "db2": "IBM DB2"}
@@ -136,6 +151,13 @@ class ConnectionWidget:
         self.server_combo.bind("<<ComboboxSelected>>", self._on_server_selected)
         self.server_combo.bind("<FocusOut>", self._on_server_focus_out)
         self.server_combo.configure(postcommand=self._refresh_server_list)
+        self._server_full_values: tuple = ()
+        self._db_full_values: tuple = ()
+        self._schema_full_values: tuple = ()
+        self._user_full_values: tuple = ()
+        enable_combobox_typeahead(
+            self.server_combo, get_full_values=lambda: self._server_full_values
+        )
         
         # Save/Delete buttons for server
         btn_frame = ttk.Frame(server_frame)
@@ -170,6 +192,7 @@ class ConnectionWidget:
             postcommand=self._on_database_dropdown_open  # Load when dropdown arrow is clicked
         )
         self.db_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        enable_combobox_typeahead(self.db_combo, get_full_values=lambda: self._db_full_values)
         # Only bind to dropdown open, not to click/focus - let user type freely
         # Remove aggressive validation on click/focus
         
@@ -193,6 +216,9 @@ class ConnectionWidget:
             postcommand=self._on_schema_dropdown_open
         )
         self.schema_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        enable_combobox_typeahead(
+            self.schema_combo, get_full_values=lambda: self._schema_full_values
+        )
         self._ref_schema_btn = ttk.Button(schema_frame, text="Refresh", width=8, command=self._refresh_schemas)
         self._ref_schema_btn.pack(side=tk.LEFT, padx=(5, 0))
         add_tooltip(self._ref_schema_btn, "Refresh list of schemas")
@@ -220,6 +246,9 @@ class ConnectionWidget:
             postcommand=self._on_user_combo_postcommand,
         )
         self.user_combo.grid(row=row_start+6, column=1, pady=5, padx=5, sticky=tk.EW)
+        enable_combobox_typeahead(
+            self.user_combo, get_full_values=lambda: self._user_full_values
+        )
         
         # Password row (hidden when Windows auth is selected)
         self.password_label = tk.Label(self.frame, text="Password:")
@@ -381,7 +410,8 @@ class ConnectionWidget:
                 
                 def update_ui():
                     self._record_input_history_success()
-                    self.schema_combo['values'] = schemas
+                    self._schema_full_values = tuple(schemas or [])
+                    self.schema_combo['values'] = self._schema_full_values
                     # Restore previous value or set to user's ID
                     if current_schema and current_schema in schemas:
                         self.schema_var.set(current_schema)
@@ -475,14 +505,16 @@ class ConnectionWidget:
                 continue
             seen.add(tl)
             merged.append(t)
-        self.server_combo["values"] = tuple(merged) if merged else ()
+        self._server_full_values = tuple(merged) if merged else ()
+        self.server_combo["values"] = self._server_full_values
         if current_value and current_value in merged:
             self.server_var.set(current_value)
 
     def _on_user_combo_postcommand(self):
         if input_history_mod:
             try:
-                self.user_combo["values"] = tuple(input_history_mod.get_usernames())
+                self._user_full_values = tuple(input_history_mod.get_usernames())
+                self.user_combo["values"] = self._user_full_values
             except Exception:
                 pass
 
@@ -554,9 +586,11 @@ class ConnectionWidget:
             print(f"DEBUG: Loaded saved server config - Server: '{server}', Auth: '{auth}', User: '{user}', DB Type: '{db_type}', Database: '{database}', Schema: '{schema}'")
     
     def _on_server_focus_out(self, event=None):
-        """Handle server field focus out - allow manual entry."""
-        # Allow user to type in server name manually
-        pass
+        """Normalize server text when the user leaves the field (trim, strip tcp:/port)."""
+        raw = self.server_var.get() or ""
+        cleaned = sanitize_sql_server_name(raw)
+        if cleaned != raw:
+            self.server_var.set(cleaned)
     
     def _on_database_dropdown_open(self):
         """Called when dropdown arrow is clicked - load databases if needed."""
@@ -595,7 +629,9 @@ class ConnectionWidget:
         """Connect to server and populate database list."""
         # Get values and ensure they're not empty
         db_type = self.db_type_var.get()
-        server = (self.server_var.get() or "").strip()
+        server = sanitize_sql_server_name(self.server_var.get() or "")
+        if server != (self.server_var.get() or ""):
+            self.server_var.set(server)
         auth = (self.auth_var.get() or "entra_mfa").strip()
         user = (self.user_var.get() or "").strip()
         password = (self.password_var.get() or "").strip()
@@ -625,12 +661,14 @@ class ConnectionWidget:
                 messagebox.showwarning("Warning", "Password is required for DB2 connection.")
                 return
         else:
-            # SQL Server validation
-            # Validate server name doesn't look like an email domain
-            if "@" in server or server.endswith(".com") and "." not in server.split(".")[0]:
-                messagebox.showerror("Error", f"Invalid server name: '{server}'. Please enter a valid SQL Server address.")
+            try:
+                server = validate_sql_server_name(server)
+                if server != (self.server_var.get() or ""):
+                    self.server_var.set(server)
+            except ValueError as exc:
+                messagebox.showerror("Error", str(exc))
                 return
-            
+
             # Validate auth requirements
             if auth in ["entra_mfa", "entra_password", "sql"] and not user:
                 messagebox.showwarning("Warning", f"User is required for {auth} authentication.")
@@ -780,13 +818,10 @@ class ConnectionWidget:
             
             # Update the values list
             if databases:
-                # IMPORTANT: Set values using configure method
-                # Clear any existing values first to force refresh
+                self._db_full_values = tuple(databases)
                 self.db_combo.configure(values=[])
                 self.frame.update_idletasks()
-                
-                # Now set the new values
-                self.db_combo.configure(values=databases)
+                self.db_combo.configure(values=list(self._db_full_values))
                 print(f"DEBUG: Database combobox values set: {self.db_combo['values']}")
                 
                 # Ensure state is normal (editable) so user can type or select
@@ -812,6 +847,7 @@ class ConnectionWidget:
                 actual_values = self.db_combo['values']
                 print(f"DEBUG: Verified combobox has {len(actual_values)} values after update")
             else:
+                self._db_full_values = ()
                 self.db_combo.configure(values=[])
                 self.db_combo.config(state="normal")
                 print("DEBUG: No databases found, cleared values")

@@ -326,16 +326,17 @@ def connect_to_database(
     Returns:
         pyodbc.Connection object
     """
-    # Validate inputs
-    if not server or not server.strip():
-        raise ValueError(f"Server name cannot be empty. Received: '{server}'")
-    
-    server = server.strip()
+    try:
+        from src.utils.sql_server_name import validate_sql_server_name
+    except ImportError:
+        from azure_migration_tool.src.utils.sql_server_name import validate_sql_server_name
+
+    try:
+        server = validate_sql_server_name(server)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+
     auth = (auth or "").strip().lower()
-    
-    # Validate server doesn't look like an email domain
-    if "@" in server or (server.endswith(".com") and len(server.split(".")) < 3):
-        raise ValueError(f"Invalid server name: '{server}'. Server name appears to be an email domain, not a SQL Server address.")
     
     # Use TrustServerCertificate=yes for Windows auth (on-prem SQL Server often has untrusted certs; matches SSMS behavior)
     trust_cert = "yes" if auth == "windows" else "no"
