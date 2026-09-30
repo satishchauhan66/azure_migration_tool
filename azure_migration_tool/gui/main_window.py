@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import os
 import threading
+import webbrowser
 
 # Add parent directories to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -143,6 +144,16 @@ class MainWindow:
         
         # Show welcome once for new users (after a short delay so window is visible)
         self.root.after(800, self._maybe_show_welcome)
+
+        self._staged_update_version: str | None = None
+        self._staged_update_exe: Path | None = None
+
+        # Restore a previously downloaded build (silent update applies on exit)
+        self.root.after(1200, self._restore_staged_update_from_disk)
+
+        # Check GitHub for a newer build (background download; no modal prompts)
+        if not os.environ.get("AZURE_MIGRATION_TOOL_SKIP_UPDATE_CHECK"):
+            self.root.after(3000, lambda: self._check_for_updates_async(interactive=False))
     
     def _on_tab_changed(self, event=None):
         """Create tab content when a tab is selected for the first time."""
@@ -280,6 +291,7 @@ class MainWindow:
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Getting started", command=lambda: messagebox.showinfo("Getting started", 
             "1. Create or open a project (Projects tab).\n2. Go to Full Migration tab.\n3. Enter source and destination databases.\n4. Click Run."))
+        help_menu.add_command(label="Check for updates...", command=lambda: self._check_for_updates_async(interactive=True))
         help_menu.add_command(label="About", command=self._show_about)
         
     def _new_project(self):
@@ -404,12 +416,186 @@ class MainWindow:
         else:
             messagebox.showerror("Error", "Log Console module not available.")
         
-    def _show_about(self):
-        """Show about dialog."""
+    def _get_app_version(self) -> str:
         try:
             from azure_migration_tool import __version__
+            return __version__
         except ImportError:
-            __version__ = "1.0"
+            return "1.0"
+
+    def _import_app_update(self):
+        try:
+            from src.utils import app_update as mod
+        except ImportError:
+            from azure_migration_tool.src.utils import app_update as mod
+        return mod
+
+    def _restore_staged_update_from_disk(self) -> None:
+        mod = self._import_app_update()
+        if mod.running_exe_path() is None:
+            return
+        ready = mod.get_ready_staged_exe(self._get_app_version())
+        if ready:
+            self._register_staged_update(ready[0], ready[1])
+            self.update_status(f"Update v{ready[0]} ready — applies when you exit.")
+
+    def _register_staged_update(self, version: str, exe_path: Path) -> None:
+        self._staged_update_version = version
+        self._staged_update_exe = Path(exe_path)
+
+    def _on_update_download_progress(self, downloaded: int, total: int) -> None:
+        if total > 0:
+            pct = min(100, int(downloaded * 100 / total))
+            message = f"Downloading update in background… {pct}%"
+        else:
+            message = "Downloading update in background…"
+        self.root.after(0, lambda m=message: self.update_status(m))
+
+    def _on_staged_update_ready(self, version: str, exe_path: Path) -> None:
+        self._register_staged_update(version, exe_path)
+        self.update_status(f"Update v{version} ready — applies when you exit.")
+        mod = self._import_app_update()
+        if mod.auto_restart_after_download():
+            self.root.after(1500, self._quit_for_pending_update)
+
+    def _start_background_download(self, info) -> None:
+        def worker() -> None:
+            mod = self._import_app_update()
+            try:
+                path = mod.download_and_stage_update(
+                    info,
+                    progress_callback=self._on_update_download_progress,
+                )
+                self.root.after(0, lambda: self._on_staged_update_ready(info.latest_version, path))
+            except Exception as exc:
+                if info.release_page_url:
+                    self.root.after(
+                        0,
+                        lambda: self.update_status(f"Background update failed: {exc}"),
+                    )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_staged_update_on_exit(self) -> None:
+        mod = self._import_app_update()
+        target = mod.running_exe_path()
+        if target is None:
+            return
+        if self._staged_update_exe is None:
+            ready = mod.get_ready_staged_exe(self._get_app_version())
+            if ready:
+                self._register_staged_update(ready[0], ready[1])
+        if self._staged_update_exe is None:
+            return
+        mod.spawn_apply_update_when_process_exits(
+            os.getpid(),
+            target,
+            self._staged_update_exe,
+            restart=True,
+        )
+
+    def _quit_for_pending_update(self) -> None:
+        """Close the app so the staged build can replace the running exe."""
+        try:
+            self._cleanup_spark()
+        except Exception:
+            pass
+        self._apply_staged_update_on_exit()
+        self.root.quit()
+        self.root.destroy()
+        os._exit(0)
+
+    def _check_for_updates_async(self, interactive: bool = False) -> None:
+        """Fetch latest GitHub release; silent background download when possible."""
+        current = self._get_app_version()
+
+        def worker() -> None:
+            mod = self._import_app_update()
+            info = mod.check_for_update(current, repo=mod.resolve_github_repo())
+            if info is None:
+                if interactive:
+                    self.root.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "Update check",
+                            "Could not reach GitHub to check for updates.\n\n"
+                            "Check your network connection, or open Releases in your browser later.",
+                        ),
+                    )
+                return
+
+            if interactive:
+                if info.is_update_available:
+                    self.root.after(0, lambda: self._prompt_update(info))
+                else:
+                    self.root.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "No updates",
+                            f"You are running the latest release (v{current}).",
+                        ),
+                    )
+                return
+
+            if not mod.auto_update_allowed():
+                return
+
+            ready = mod.get_ready_staged_exe(current)
+            if ready:
+                self.root.after(0, lambda r=ready: self._on_staged_update_ready(r[0], r[1]))
+                return
+
+            if not mod.should_silent_download(info):
+                return
+
+            try:
+                path = mod.download_and_stage_update(
+                    info,
+                    progress_callback=self._on_update_download_progress,
+                )
+                self.root.after(
+                    0,
+                    lambda: self._on_staged_update_ready(info.latest_version, path),
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _prompt_update(self, info) -> None:
+        """Manual update check — prefer silent download when a portable exe exists."""
+        mod = self._import_app_update()
+
+        if info.can_apply_silently and mod.running_exe_path() is not None:
+            message = (
+                f"Version {info.latest_version} is available "
+                f"(you have {info.current_version}).\n\n"
+                "Install in the background when you close the app?"
+            )
+        else:
+            message = (
+                f"Version {info.latest_version} is available "
+                f"(you have {info.current_version}).\n\n"
+                "Open the download page in your browser?"
+            )
+
+        choice = messagebox.askyesnocancel("Update available", message, icon="info")
+        if choice is True:
+            if info.can_apply_silently and mod.running_exe_path() is not None:
+                self.update_status("Downloading update in background…")
+                self._start_background_download(info)
+            else:
+                url = info.download_url or info.release_page_url
+                try:
+                    webbrowser.open(url)
+                except Exception as exc:
+                    messagebox.showerror("Update", f"Could not open browser:\n{exc}")
+        elif choice is False:
+            mod.write_dismissed_update_version(info.latest_version)
+
+    def _show_about(self):
+        """Show about dialog."""
+        __version__ = self._get_app_version()
         about_text = f"""Azure Migration Tool v{__version__}
 
 A comprehensive tool for SQL Server/Azure SQL migrations.
@@ -438,13 +624,14 @@ Features:
             self._cleanup_spark()
         except Exception as e:
             print(f"Cleanup error: {e}")
-        
+
+        self._apply_staged_update_on_exit()
+
         # Destroy all windows and exit
         self.root.quit()
         self.root.destroy()
-        
+
         # Force exit to kill any remaining background processes
-        import os
         os._exit(0)
     
     def _cleanup_spark(self):

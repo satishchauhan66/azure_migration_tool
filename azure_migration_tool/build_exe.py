@@ -275,6 +275,7 @@ a = Analysis(
         "utils.adf_client", "utils.keyvault_client",
         "utils.driver_utils", "utils.identity_cdc",
         "src.utils.config", "src.utils.logging", "src.utils.azure_compat",
+        "src.utils.app_update",
         # External modules (Legacy tabs: no PySpark, no db2_azure_validation)
         "jaydebeapi", "jpype1", "jpype", "jpype.imports", "pyodbc", "pandas",
         "openpyxl", "requests", "msal",

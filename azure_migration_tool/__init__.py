@@ -4,5 +4,6 @@
 
 __version__ = "1.5.0"
 __author__ = "66Degrees"
+__github_repo__ = "satishchauhan66/azure_migration_tool"
 
 
