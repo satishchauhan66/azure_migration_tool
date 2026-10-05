@@ -273,6 +273,11 @@ class MainWindow:
         tools_menu.add_command(label="ADF Migration...", command=self._open_adf_migration)
         tools_menu.add_command(label="Data Migration...", command=self._open_data_migration)
         tools_menu.add_command(label="MI PITR Restore...", command=self._open_mi_pitr_restore)
+        tools_menu.add_command(label="Local Backup (multiple DBs)...", command=self._open_local_backup_bulk)
+        tools_menu.add_command(
+            label="Restore from Blob (multiple DBs)...",
+            command=self._open_restore_from_blob_bulk,
+        )
         tools_menu.add_separator()
         tools_menu.add_command(label="Legacy Data Validation...", command=self._open_legacy_data_window)
         tools_menu.add_command(label="Compare DB2 (Schema)...", command=self._open_compare_db2_window)
@@ -352,6 +357,22 @@ class MainWindow:
             "azure_migration_tool.gui.tabs.mi_pitr_restore_tab",
             "MiPitrRestoreTab",
             "MI PITR Restore",
+        )
+
+    def _open_local_backup_bulk(self):
+        """Open Local Backup for multiple databases (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.local_backup_bulk_tool_tab",
+            "LocalBackupBulkToolTab",
+            "Local Backup (multiple databases)",
+        )
+
+    def _open_restore_from_blob_bulk(self):
+        """Open Restore from Blob for multiple databases (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.restore_from_blob_bulk_tool_tab",
+            "RestoreFromBlobBulkToolTab",
+            "Restore from Blob (multiple databases)",
         )
 
     def _open_identity_cdc_experiment(self):

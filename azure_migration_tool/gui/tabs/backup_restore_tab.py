@@ -501,6 +501,12 @@ class BackupRestoreTab:
         self.local_server_var.trace_add("write", self._schedule_local_stripe_refresh)
         self.local_db_var.trace_add("write", self._schedule_local_stripe_refresh)
 
+        self._create_local_backup_shared_sections(parent)
+
+    def _create_local_backup_shared_sections(
+        self, parent, *, blob_prefix: str = "local"
+    ) -> None:
+        """Step 2–3, actions, and log (shared by Local Backup tab and bulk tool)."""
         # Step 2: Backup folder on the SQL Server host (not necessarily this PC)
         step2 = ttk.LabelFrame(parent, text="Step 2: Backup path (SQL Server / UNC)", padding=10)
         step2.pack(fill=tk.X, padx=5, pady=5)
@@ -577,7 +583,7 @@ class BackupRestoreTab:
         self._create_blob_auth_widgets(
             self.local_step3_frame,
             save_command=self._save_bak_blob_settings,
-            prefix="local",
+            prefix=blob_prefix,
             show_browse_azure=True,
         )
 
@@ -1107,7 +1113,7 @@ class BackupRestoreTab:
 
     def _on_blob_auth_mode_change(self, *_):
         """Show/hide credential fields in every blob-auth section (backup + restore)."""
-        for prefix in ("bak", "local", "restore"):
+        for prefix in ("bak", "local", "restore", "bulk"):
             self._apply_blob_auth_visibility(prefix)
         self._update_local_az_signin_visibility()
 
@@ -1885,7 +1891,7 @@ class BackupRestoreTab:
 
     def _local_set_busy(self, busy: bool) -> None:
         st = tk.DISABLED if busy else tk.NORMAL
-        for attr in ("local_backup_btn", "local_upload_btn"):
+        for attr in ("local_backup_btn", "local_upload_btn", "local_restore_all_blob_btn"):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.config(state=st)
@@ -1931,6 +1937,24 @@ class BackupRestoreTab:
             return False, "Container name is required in Step 3 (or in the storage URL path)."
         return True, ""
 
+    def _cancel_bulk_auto_restore_prompt(self) -> None:
+        """Close/cancel any pending post-upload auto-restore countdown."""
+        after_id = getattr(self, "_bulk_auto_restore_after_id", None)
+        if after_id is not None:
+            try:
+                self.frame.after_cancel(after_id)
+            except Exception:
+                pass
+            self._bulk_auto_restore_after_id = None
+        dlg = getattr(self, "_bulk_auto_restore_dialog", None)
+        if dlg is not None:
+            try:
+                if dlg.winfo_exists():
+                    dlg.destroy()
+            except Exception:
+                pass
+            self._bulk_auto_restore_dialog = None
+
     def _cancel_local_auto_upload_prompt(self) -> None:
         """Close/cancel any pending post-backup auto-upload countdown."""
         after_id = getattr(self, "_local_auto_upload_after_id", None)
@@ -1948,6 +1972,16 @@ class BackupRestoreTab:
             except Exception:
                 pass
             self._local_auto_upload_dialog = None
+        self._cancel_bulk_auto_restore_prompt()
+
+    def _bulk_auto_countdown_seconds(self) -> int:
+        raw = getattr(self, "bulk_auto_countdown_var", None)
+        if raw is None:
+            return 10
+        try:
+            return max(1, int((raw.get() or "10").strip()))
+        except ValueError:
+            return 10
 
     def _prompt_auto_upload_after_backup(self, summary: str, countdown_sec: int = 10) -> None:
         """
@@ -2079,6 +2113,161 @@ class BackupRestoreTab:
         dlg.protocol("WM_DELETE_WINDOW", _cancel)
 
         # Center over parent
+        dlg.update_idletasks()
+        try:
+            px = parent.winfo_rootx() + max(0, (parent.winfo_width() - dlg.winfo_width()) // 2)
+            py = parent.winfo_rooty() + max(0, (parent.winfo_height() - dlg.winfo_height()) // 3)
+            dlg.geometry(f"+{px}+{py}")
+        except Exception:
+            pass
+
+        _tick()
+
+    def _prompt_auto_upload_after_bulk_backup(
+        self,
+        summary: str,
+        runs: List[Dict[str, Any]],
+        countdown_sec: int = 10,
+    ) -> None:
+        """After bulk local backup: prompt to upload every completed database run."""
+        if not runs:
+            messagebox.showinfo("Bulk backup", summary)
+            return
+        self._cancel_local_auto_upload_prompt()
+        ready, reason = self._local_blob_upload_config_ready()
+        n_db = len(runs)
+        file_count = sum(len(r.get("files") or []) for r in runs)
+        bulk_summary = (
+            f"{summary}\n\n"
+            f"Ready to upload {n_db} database(s), {file_count} .bak file(s) to Blob."
+        )
+        if not ready:
+            messagebox.showinfo(
+                "Bulk backup complete",
+                bulk_summary
+                + "\n\nUpload to Blob was not started automatically:\n"
+                + f"{reason}\n\n"
+                "Complete Step 3 (Azure Blob destination), then click "
+                "'2. Upload all to Blob'.",
+            )
+            return
+
+        if countdown_sec is None or countdown_sec < 1:
+            countdown_sec = self._bulk_auto_countdown_seconds()
+        parent = self.frame.winfo_toplevel()
+        dlg = tk.Toplevel(parent)
+        self._local_auto_upload_dialog = dlg
+        dlg.title("Bulk backup complete — upload starting")
+        dlg.transient(parent)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        body = ttk.Frame(dlg, padding=14)
+        body.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            body,
+            text=bulk_summary,
+            justify=tk.LEFT,
+            wraplength=520,
+            anchor=tk.W,
+        ).pack(anchor=tk.W)
+
+        status_var = tk.StringVar()
+        status_lbl = tk.Label(
+            body,
+            textvariable=status_var,
+            justify=tk.LEFT,
+            wraplength=520,
+            fg="#1a5276",
+            anchor=tk.W,
+        )
+        status_lbl.pack(anchor=tk.W, pady=(12, 0))
+
+        btn_row = ttk.Frame(body)
+        btn_row.pack(fill=tk.X, pady=(14, 0))
+
+        state = {"seconds": max(1, int(countdown_sec)), "done": False}
+        runs_snapshot = list(runs)
+
+        def _close_dialog() -> None:
+            self._local_auto_upload_after_id = None
+            self._local_auto_upload_dialog = None
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        def _cancel() -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            after_id = self._local_auto_upload_after_id
+            if after_id is not None:
+                try:
+                    self.frame.after_cancel(after_id)
+                except Exception:
+                    pass
+                self._local_auto_upload_after_id = None
+            _close_dialog()
+            self.local_backup_log.insert(
+                tk.END,
+                "Auto upload cancelled — click '2. Upload all to Blob' when ready.\n",
+            )
+            self.local_backup_log.see(tk.END)
+
+        def _start_upload(now: bool = False) -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            after_id = self._local_auto_upload_after_id
+            if after_id is not None:
+                try:
+                    self.frame.after_cancel(after_id)
+                except Exception:
+                    pass
+                self._local_auto_upload_after_id = None
+            _close_dialog()
+            still_ready, why = self._local_blob_upload_config_ready()
+            if not still_ready:
+                messagebox.showwarning(
+                    "Upload not started",
+                    f"Blob configuration is no longer complete:\n{why}",
+                )
+                return
+            note = "Upload now" if now else "Countdown finished"
+            self.local_backup_log.insert(
+                tk.END,
+                f"{note} — starting upload of {len(runs_snapshot)} database(s) to Blob…\n",
+            )
+            self.local_backup_log.see(tk.END)
+            self._start_local_upload_multiple_runs_to_blob(runs_snapshot)
+
+        def _tick() -> None:
+            if state["done"] or not dlg.winfo_exists():
+                return
+            secs = state["seconds"]
+            if secs <= 0:
+                _start_upload(now=False)
+                return
+            status_var.set(
+                f"Upload {n_db} database(s) to Blob starts automatically in {secs} second(s).\n"
+                "Click Cancel to skip — use button '2. Upload all to Blob' later."
+            )
+            state["seconds"] = secs - 1
+            self._local_auto_upload_after_id = self.frame.after(1000, _tick)
+
+        ttk.Button(btn_row, text="Upload now", command=lambda: _start_upload(now=True), width=14).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(btn_row, text="Cancel upload", command=_cancel, width=14).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        dlg.protocol("WM_DELETE_WINDOW", _cancel)
+
         dlg.update_idletasks()
         try:
             px = parent.winfo_rootx() + max(0, (parent.winfo_width() - dlg.winfo_width()) // 2)
@@ -2368,6 +2557,225 @@ class BackupRestoreTab:
                     self.frame.after(0, lambda m=summary: messagebox.showinfo("Upload complete", m))
                 else:
                     summary = f"Upload finished with issues: {uploaded} succeeded, {failed} failed."
+                    if cancelled:
+                        summary += " (stopped)"
+                    self.frame.after(0, lambda m=summary: messagebox.showerror("Upload result", m))
+            except Exception as e:
+                log(f"ERROR: {str(e)}")
+                self.frame.after(0, lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x)))
+            finally:
+                tracker = self._local_upload_tracker
+                if tracker is not None:
+                    tracker.completed_files = max(tracker.completed_files, uploaded)
+                    if failed == 0 and uploaded >= tracker.total_files:
+                        tracker.azcopy_percent = 100.0
+                    if failed == 0 and uploaded > 0:
+                        tracker.set_phase("Complete")
+                    elif uploaded > 0:
+                        tracker.set_phase("Finished with errors")
+                    else:
+                        tracker.set_phase("Failed")
+                    self.frame.after(0, self._refresh_local_upload_status)
+                self.frame.after(0, lambda: self._local_set_busy(False))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_local_upload_multiple_runs_to_blob(self, runs: List[Dict[str, Any]]) -> None:
+        """Upload one or more per-database backup runs (correct structured blob paths per DB)."""
+        try:
+            from src.backup.local_backup_and_upload import (
+                run_blob_upload_preflight,
+                upload_existing_bak_files_parallel,
+            )
+        except ImportError:
+            try:
+                from azure_migration_tool.src.backup.local_backup_and_upload import (
+                    run_blob_upload_preflight,
+                    upload_existing_bak_files_parallel,
+                )
+            except ImportError:
+                run_blob_upload_preflight = None
+                upload_existing_bak_files_parallel = None
+        if not upload_existing_bak_files_parallel or not run_blob_upload_preflight:
+            messagebox.showerror("Error", "Local backup module not available (need azure-storage-blob).")
+            return
+
+        normalized_runs: List[Dict[str, Any]] = []
+        for spec in runs or []:
+            files = [f for f in (spec.get("files") or []) if f and str(f).strip()]
+            if not files:
+                continue
+            normalized_runs.append(
+                {
+                    "database": (spec.get("database") or "").strip(),
+                    "files": files,
+                    "run_id": (spec.get("run_id") or "").strip(),
+                }
+            )
+        if not normalized_runs:
+            messagebox.showerror("Error", "No .bak files to upload from the completed backups.")
+            return
+
+        all_paths: List[str] = []
+        for spec in normalized_runs:
+            all_paths.extend(spec["files"])
+
+        blob_auth_mode = self.blob_auth_mode_var.get() or "connection_string"
+        conn_str = (self.blob_conn_var.get() or "").strip()
+        storage_account_url = (self.blob_account_url_var.get() or "").strip()
+        container = (self.blob_container_var.get() or "").strip()
+        blob_folder = (self.local_blob_folder_var.get() or "").strip()
+        structured_blob_paths = self.local_structured_blob_paths_var.get()
+
+        try:
+            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
+        except Exception as e:
+            messagebox.showerror("Error", _compact_dialog_error(str(e)))
+            return
+
+        if blob_auth_mode == "managed_identity":
+            if not storage_account_url:
+                messagebox.showerror("Error", "Storage account URL is required for Managed Identity mode.")
+                return
+            storage_account_url = _normalize_blob_account_url_for_gui(storage_account_url)
+        elif not conn_str:
+            messagebox.showerror("Error", "Blob connection string is required (connection-string mode).")
+            return
+        if not container:
+            messagebox.showerror(
+                "Error",
+                "Container name is required. Enter it in Step 3 or include it in the storage URL path.",
+            )
+            return
+
+        self._local_stop_event.clear()
+        self._local_set_busy(True)
+        self.local_upload_status_var.set("Upload: preflight…")
+        max_parallel = self._local_parallel_upload_worker_count()
+        total_runs = len(normalized_runs)
+
+        def run() -> None:
+            uploaded = 0
+            failed = 0
+            last_url = ""
+
+            def log(msg: str) -> None:
+                self.frame.after(0, lambda m=msg: self.local_backup_log.insert(tk.END, m + "\n"))
+                self.frame.after(0, lambda: self.local_backup_log.see(tk.END))
+                tracker = self._local_upload_tracker
+                if tracker is not None:
+                    tracker.note_log_line(str(msg))
+                self.frame.after(0, self._refresh_local_upload_status)
+
+            try:
+                pre = run_blob_upload_preflight(
+                    all_paths,
+                    blob_auth_mode=blob_auth_mode,
+                    blob_connection_string=conn_str,
+                    blob_account_url=storage_account_url,
+                    blob_container=container,
+                    log=log,
+                )
+                if not pre.get("ok"):
+                    err = pre.get("message") or "Upload preflight failed."
+                    self.frame.after(0, lambda: messagebox.showerror("Upload preflight", err))
+                    return
+                readable = {
+                    os.path.normpath(os.path.expanduser(p))
+                    for p in (pre.get("files") or [])
+                }
+
+                try:
+                    from src.utils.blob_upload_progress import BlobUploadStatusTracker
+                except ImportError:
+                    from azure_migration_tool.src.utils.blob_upload_progress import (
+                        BlobUploadStatusTracker,
+                    )
+                self._local_upload_tracker = BlobUploadStatusTracker(
+                    total_files=len(readable),
+                    total_bytes=int(pre.get("total_bytes") or 0),
+                )
+                self._local_upload_tracker.set_phase("Uploading")
+                self.frame.after(0, self._refresh_local_upload_status)
+
+                def on_azcopy_line(line: str) -> None:
+                    tracker = self._local_upload_tracker
+                    if tracker is not None:
+                        tracker.note_log_line(line)
+                    self.frame.after(0, self._refresh_local_upload_status)
+
+                def on_file_finished(ok: bool) -> None:
+                    tracker = self._local_upload_tracker
+                    if tracker is not None:
+                        tracker.note_file_finished(ok)
+                    self.frame.after(0, self._refresh_local_upload_status)
+
+                log(
+                    f"=== Uploading {len(readable)} file(s) across "
+                    f"{total_runs} database(s) to Blob ==="
+                )
+
+                for run_idx, spec in enumerate(normalized_runs, start=1):
+                    if self._local_stop_event.is_set():
+                        break
+                    database = spec["database"]
+                    run_id = spec["run_id"]
+                    run_files = [
+                        p
+                        for p in spec["files"]
+                        if os.path.normpath(os.path.expanduser(p)) in readable
+                    ]
+                    if not run_files:
+                        log(f"--- [{run_idx}/{total_runs}] {database}: skipped (no readable files) ---")
+                        failed += len(spec["files"])
+                        continue
+                    log(f"--- [{run_idx}/{total_runs}] {database}: {len(run_files)} file(s) ---")
+                    batch = upload_existing_bak_files_parallel(
+                        local_file_paths=run_files,
+                        max_parallel_uploads=max_parallel,
+                        cancel_event=self._local_stop_event,
+                        blob_auth_mode=blob_auth_mode,
+                        blob_connection_string=conn_str,
+                        blob_account_url=storage_account_url,
+                        blob_container=container,
+                        blob_folder=blob_folder,
+                        database=database,
+                        run_id=run_id,
+                        structured_blob_paths=structured_blob_paths,
+                        delete_local_after_upload=self.local_delete_after_upload_var.get(),
+                        require_azcopy=True,
+                        log=log,
+                        on_azcopy_line=on_azcopy_line,
+                        on_file_finished=on_file_finished,
+                    )
+                    uploaded += int(batch.get("uploaded", 0))
+                    failed += int(batch.get("failed", 0))
+                    if batch.get("blob_url"):
+                        last_url = batch["blob_url"]
+
+                cancelled = self._local_stop_event.is_set()
+                if cancelled and uploaded == 0:
+                    self.frame.after(0, lambda: messagebox.showinfo("Cancelled", "Upload was stopped."))
+                elif failed == 0 and uploaded > 0:
+                    summary = (
+                        f"Upload completed!\n\n{uploaded} file(s) from {total_runs} database(s) "
+                        f"uploaded to container '{container}'."
+                        + (f"\n\nLast blob URL:\n{last_url}" if last_url else "")
+                    )
+
+                    def _upload_done() -> None:
+                        prompted = self._on_bulk_blob_upload_finished(
+                            normalized_runs, uploaded, failed
+                        )
+                        if not prompted:
+                            messagebox.showinfo("Upload complete", summary)
+
+                    self.frame.after(0, _upload_done)
+                else:
+                    summary = (
+                        f"Upload finished with issues: {uploaded} succeeded, {failed} failed "
+                        f"across {total_runs} database(s)."
+                    )
                     if cancelled:
                         summary += " (stopped)"
                     self.frame.after(0, lambda m=summary: messagebox.showerror("Upload result", m))
@@ -3011,12 +3419,27 @@ class BackupRestoreTab:
 
     def _restore_blob_tab_set_busy(self, busy: bool) -> None:
         st = tk.DISABLED if busy else tk.NORMAL
-        self.restore_from_blob_btn.config(state=st)
-        self.test_restore_blob_sdk_btn.config(state=st)
-        self.test_restore_blob_sql_headeronly_btn.config(state=st)
+        for attr in (
+            "restore_from_blob_btn",
+            "test_restore_blob_sdk_btn",
+            "test_restore_blob_sql_headeronly_btn",
+        ):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.config(state=st)
         stop_btn = getattr(self, "restore_blob_stop_btn", None)
         if stop_btn is not None:
             stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
+
+    def _set_restore_operation_busy(self, busy: bool) -> None:
+        """Disable controls during bulk/single restore (works on main tab and tool windows)."""
+        if getattr(self, "restore_from_blob_btn", None) is not None:
+            self._restore_blob_tab_set_busy(busy)
+        elif hasattr(self, "_local_set_busy"):
+            self._local_set_busy(busy)
+            restore_btn = getattr(self, "local_restore_all_blob_btn", None)
+            if restore_btn is not None:
+                restore_btn.config(state=tk.DISABLED if busy else tk.NORMAL)
     def _stop_restore_blob_process(self) -> None:
         ctx = self._restore_blob_abort_context
         db_name = (ctx or {}).get("database") or (
@@ -3525,6 +3948,359 @@ class BackupRestoreTab:
                 )
             finally:
                 self.frame.after(0, lambda: self._restore_blob_tab_set_busy(False))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_bulk_blob_upload_finished(
+        self,
+        runs: List[Dict[str, Any]],
+        uploaded: int,
+        failed: int,
+    ) -> bool:
+        """Hook after multi-DB blob upload; return True if a follow-up UI prompt was shown."""
+        return False
+
+    def _bulk_restore_jobs_from_backup_runs(
+        self, runs: List[Dict[str, Any]]
+    ) -> List[Dict[str, str]]:
+        """Map local backup runs to blob paths (same layout as upload step)."""
+        try:
+            from src.backup.local_backup_and_upload import build_blob_upload_path
+        except ImportError:
+            from azure_migration_tool.src.backup.local_backup_and_upload import (
+                build_blob_upload_path,
+            )
+        blob_folder = ""
+        if hasattr(self, "local_blob_folder_var"):
+            blob_folder = (self.local_blob_folder_var.get() or "").strip()
+        structured = True
+        if hasattr(self, "local_structured_blob_paths_var"):
+            structured = bool(self.local_structured_blob_paths_var.get())
+        jobs: List[Dict[str, str]] = []
+        for spec in runs or []:
+            database = (spec.get("database") or "").strip()
+            files = [f for f in (spec.get("files") or []) if f]
+            if not database or not files:
+                continue
+            blob_path = build_blob_upload_path(
+                local_filename=Path(files[0]).name,
+                blob_folder=blob_folder,
+                database=database,
+                run_id=(spec.get("run_id") or "").strip(),
+                structured_layout=structured,
+            )
+            jobs.append({"database": database, "blob_path": blob_path})
+        return jobs
+
+    def _restore_blob_storage_inputs(self) -> Optional[dict]:
+        """Blob auth/container for restore (no backup file path)."""
+        conn_str = (self.blob_conn_var.get() or "").strip()
+        container = (self.blob_container_var.get() or "").strip()
+        blob_auth_mode = self.blob_auth_mode_var.get() or "connection_string"
+        storage_account_url = (self.blob_account_url_var.get() or "").strip()
+        try:
+            container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
+        except Exception as e:
+            messagebox.showerror("Error", _compact_dialog_error(str(e)))
+            return None
+        if blob_auth_mode == "connection_string" and not conn_str:
+            messagebox.showerror("Error", "Blob connection string is required (Connection String mode).")
+            return None
+        if blob_auth_mode == "managed_identity" and not storage_account_url:
+            messagebox.showerror("Error", "Storage account URL is required (Managed Identity mode).")
+            return None
+        if not container:
+            messagebox.showerror(
+                "Error",
+                "Container name is required. Enter container field or include it in storage URL path.",
+            )
+            return None
+        return {
+            "conn_str": conn_str,
+            "container": container,
+            "blob_auth_mode": blob_auth_mode,
+            "storage_account_url": storage_account_url,
+        }
+
+    def _restore_target_server_ready(self) -> Tuple[bool, str]:
+        server = (self.main_window.shared_dest_server.get() or "").strip()
+        if not server:
+            return (
+                False,
+                "Target SQL Server is required (set server on Restore from Blob Step 2 "
+                "or Step 4 on the bulk backup tool).",
+            )
+        return True, ""
+
+    def _restore_blob_managed_instance_for_server(self, server: str) -> bool:
+        mi_var = getattr(self, "restore_blob_managed_instance_var", None)
+        if mi_var is not None:
+            return bool(mi_var.get())
+        return _is_azure_sql_managed_instance_host(server)
+
+    def _append_restore_log(self, msg: str) -> None:
+        log_widget = getattr(self, "restore_from_blob_log", None) or getattr(
+            self, "local_backup_log", None
+        )
+        if log_widget is None:
+            return
+        log_widget.insert(tk.END, msg + "\n")
+        log_widget.see(tk.END)
+
+    def _prompt_auto_restore_after_bulk_blob(
+        self,
+        summary: str,
+        jobs: List[Dict[str, str]],
+        countdown_sec: Optional[int] = None,
+    ) -> None:
+        """After bulk upload: offer timed auto-restore of every uploaded database."""
+        if not jobs:
+            return
+        self._cancel_bulk_auto_restore_prompt()
+        ready, reason = self._restore_target_server_ready()
+        n_db = len(jobs)
+        bulk_summary = (
+            f"{summary}\n\n"
+            f"Ready to restore {n_db} database(s) from Blob to the target SQL Server."
+        )
+        if not ready:
+            messagebox.showinfo(
+                "Upload complete",
+                bulk_summary
+                + "\n\nRestore from Blob was not started automatically:\n"
+                + f"{reason}\n\n"
+                "Set the target server in Step 4, then click '3. Restore all from Blob'.",
+            )
+            return
+        storage = self._restore_blob_storage_inputs()
+        if not storage:
+            return
+
+        secs = countdown_sec if countdown_sec is not None else self._bulk_auto_countdown_seconds()
+        parent = self.frame.winfo_toplevel()
+        dlg = tk.Toplevel(parent)
+        self._bulk_auto_restore_dialog = dlg
+        dlg.title("Upload complete — restore starting")
+        dlg.transient(parent)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        body = ttk.Frame(dlg, padding=14)
+        body.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            body,
+            text=bulk_summary,
+            justify=tk.LEFT,
+            wraplength=520,
+            anchor=tk.W,
+        ).pack(anchor=tk.W)
+
+        status_var = tk.StringVar()
+        tk.Label(
+            body,
+            textvariable=status_var,
+            justify=tk.LEFT,
+            wraplength=520,
+            fg="#1a5276",
+            anchor=tk.W,
+        ).pack(anchor=tk.W, pady=(12, 0))
+
+        btn_row = ttk.Frame(body)
+        btn_row.pack(fill=tk.X, pady=(14, 0))
+
+        state = {"seconds": max(1, int(secs)), "done": False}
+        jobs_snapshot = list(jobs)
+
+        def _close_dialog() -> None:
+            self._bulk_auto_restore_after_id = None
+            self._bulk_auto_restore_dialog = None
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        def _cancel() -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            after_id = self._bulk_auto_restore_after_id
+            if after_id is not None:
+                try:
+                    self.frame.after_cancel(after_id)
+                except Exception:
+                    pass
+                self._bulk_auto_restore_after_id = None
+            _close_dialog()
+            self._append_restore_log(
+                "Auto restore cancelled — click '3. Restore all from Blob' when ready."
+            )
+
+        def _start_restore(now: bool = False) -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            after_id = self._bulk_auto_restore_after_id
+            if after_id is not None:
+                try:
+                    self.frame.after_cancel(after_id)
+                except Exception:
+                    pass
+                self._bulk_auto_restore_after_id = None
+            _close_dialog()
+            still_ready, why = self._restore_target_server_ready()
+            if not still_ready:
+                messagebox.showwarning("Restore not started", why)
+                return
+            note = "Restore now" if now else "Countdown finished"
+            self._append_restore_log(
+                f"{note} — starting restore of {len(jobs_snapshot)} database(s) from Blob…"
+            )
+            self._start_restore_multiple_from_blob(jobs_snapshot)
+
+        def _tick() -> None:
+            if state["done"] or not dlg.winfo_exists():
+                return
+            remaining = state["seconds"]
+            if remaining <= 0:
+                _start_restore(now=False)
+                return
+            status_var.set(
+                f"Restore {n_db} database(s) from Blob starts automatically in {remaining} second(s).\n"
+                "Click Cancel to skip — use button '3. Restore all from Blob' later."
+            )
+            state["seconds"] = remaining - 1
+            self._bulk_auto_restore_after_id = self.frame.after(1000, _tick)
+
+        ttk.Button(btn_row, text="Restore now", command=lambda: _start_restore(now=True), width=14).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(btn_row, text="Cancel restore", command=_cancel, width=14).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        dlg.protocol("WM_DELETE_WINDOW", _cancel)
+        dlg.update_idletasks()
+        try:
+            px = parent.winfo_rootx() + max(0, (parent.winfo_width() - dlg.winfo_width()) // 2)
+            py = parent.winfo_rooty() + max(0, (parent.winfo_height() - dlg.winfo_height()) // 3)
+            dlg.geometry(f"+{px}+{py}")
+        except Exception:
+            pass
+        _tick()
+
+    def _start_restore_multiple_from_blob(self, jobs: List[Dict[str, str]]) -> None:
+        """Sequential RESTORE FROM URL for multiple databases."""
+        try:
+            from src.restore.restore_from_blob import run_restore_from_blob
+        except ImportError:
+            try:
+                from azure_migration_tool.src.restore.restore_from_blob import (
+                    run_restore_from_blob,
+                )
+            except ImportError:
+                run_restore_from_blob = None
+        if not run_restore_from_blob:
+            messagebox.showerror(
+                "Error", "Restore module not available. Install: pip install azure-storage-blob"
+            )
+            return
+
+        normalized: List[Dict[str, str]] = []
+        for job in jobs or []:
+            database = (job.get("database") or "").strip()
+            blob_path = (job.get("blob_path") or "").strip()
+            if database and blob_path:
+                normalized.append({"database": database, "blob_path": blob_path})
+        if not normalized:
+            messagebox.showerror("Error", "No restore jobs (database + blob path required).")
+            return
+
+        storage = self._restore_blob_storage_inputs()
+        if not storage:
+            return
+        ready, reason = self._restore_target_server_ready()
+        if not ready:
+            messagebox.showerror("Error", reason)
+            return
+
+        server = (self.main_window.shared_dest_server.get() or "").strip()
+        target_mi = self._restore_blob_managed_instance_for_server(server)
+        self._restore_blob_stop_event.clear()
+        self._set_restore_operation_busy(True)
+
+        total = len(normalized)
+
+        def log(msg: str) -> None:
+            self.frame.after(0, lambda m=msg: self._append_restore_log(m))
+
+        def run() -> None:
+            ok_count = 0
+            fail_count = 0
+            try:
+                log(f"=== Restore from Blob: {total} database(s) → {server} ===")
+                for idx, job in enumerate(normalized, start=1):
+                    if self._restore_blob_stop_event.is_set():
+                        log("Stopped by user.")
+                        break
+                    database = job["database"]
+                    blob_path = job["blob_path"]
+                    log(f"--- [{idx}/{total}] {database} ---")
+                    log(f"  Blob: {storage['container']}/{blob_path}")
+                    def _set_restore_progress(d=database, i=idx, t=total) -> None:
+                        if hasattr(self, "bulk_progress_var"):
+                            self.bulk_progress_var.set(f"{i} / {t} — restoring {d}")
+
+                    self.frame.after(0, _set_restore_progress)
+                    summary = self._run_with_auto_reauth(
+                        lambda db=database, bp=blob_path: run_restore_from_blob(
+                            server=server,
+                            database=db,
+                            auth=self.main_window.shared_dest_auth.get() or "windows",
+                            user=self.main_window.shared_dest_user.get() or None,
+                            password=self.main_window.shared_dest_password.get() or None,
+                            blob_connection_string=storage["conn_str"],
+                            container=storage["container"],
+                            blob_path=bp,
+                            log_callback=log,
+                            target_managed_instance=target_mi,
+                            blob_auth_mode=storage["blob_auth_mode"],
+                            storage_account_url=storage["storage_account_url"],
+                            cancel_event=self._restore_blob_stop_event,
+                        ),
+                        auth=self.main_window.shared_dest_auth.get() or "windows",
+                        user=self.main_window.shared_dest_user.get() or "",
+                        log=log,
+                    )
+                    status = (summary or {}).get("status", "failed")
+                    if status in ("success", "client_lost"):
+                        ok_count += 1
+                        log(f"✓ {database}: restore finished ({status})")
+                    else:
+                        fail_count += 1
+                        err = (summary or {}).get("error") or "Unknown error"
+                        log(f"✗ {database}: {err}")
+                summary_msg = f"Bulk restore finished.\n\nSucceeded: {ok_count}\nFailed: {fail_count}"
+                if fail_count:
+                    self.frame.after(0, lambda m=summary_msg: messagebox.showwarning("Bulk restore", m))
+                elif ok_count:
+                    self.frame.after(0, lambda m=summary_msg: messagebox.showinfo("Bulk restore", m))
+            except Exception as e:
+                log(f"ERROR: {e}")
+                self.frame.after(
+                    0, lambda x=str(e): messagebox.showerror("Error", _compact_dialog_error(x))
+                )
+            finally:
+                if hasattr(self, "bulk_progress_var"):
+                    self.frame.after(
+                        0,
+                        lambda o=ok_count, f=fail_count: self.bulk_progress_var.set(
+                            f"Restore done — {o} OK, {f} failed"
+                        ),
+                    )
+                self.frame.after(0, lambda: self._set_restore_operation_busy(False))
 
         threading.Thread(target=run, daemon=True).start()
 

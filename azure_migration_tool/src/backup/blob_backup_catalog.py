@@ -144,3 +144,12 @@ def build_backup_list_display(blobs: Iterable[Any]) -> Tuple[List[str], Dict[str
 def list_all_container_blobs(container_client) -> List[Any]:
     """List every blob in a container (handles pagination)."""
     return list(container_client.list_blobs(name_starts_with=None))
+
+
+def latest_backup_blob_path_for_database(blobs: Iterable[Any], db_name: str) -> Optional[str]:
+    """Return blob path for the newest backup row for a database (structured run_id sort)."""
+    matched = backup_blobs_for_database(blobs, db_name)
+    labels, label_to_path = build_backup_list_display(matched)
+    if not labels:
+        return None
+    return label_to_path.get(labels[0])
