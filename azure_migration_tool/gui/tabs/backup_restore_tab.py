@@ -594,27 +594,13 @@ class BackupRestoreTab:
         ).pack(anchor=tk.W)
         az_btn_row = ttk.Frame(self.local_az_signin_frame)
         az_btn_row.pack(anchor=tk.W, pady=(4, 0))
-        self.local_az_signin_btn = ttk.Button(
+        self.local_az_auth_btn = ttk.Button(
             az_btn_row,
             text="Sign in",
-            command=self._sign_in_azure_for_upload,
+            command=self._toggle_local_azure_auth,
             width=12,
         )
-        self.local_az_signin_btn.pack(side=tk.LEFT)
-        self.local_az_signout_btn = ttk.Button(
-            az_btn_row,
-            text="Sign out",
-            command=self._sign_out_azure_for_upload,
-            width=12,
-        )
-        self.local_az_signout_btn.pack(side=tk.LEFT, padx=(6, 0))
-        self.local_az_relogin_btn = ttk.Button(
-            az_btn_row,
-            text="Sign in again",
-            command=self._relogin_azure_for_upload,
-            width=14,
-        )
-        self.local_az_relogin_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self.local_az_auth_btn.pack(side=tk.LEFT)
         self.frame.after(500, self._refresh_local_azure_tools_status)
         
         self.local_blob_folder_row = ttk.Frame(self.local_step3_frame)
@@ -2425,31 +2411,47 @@ class BackupRestoreTab:
         status_var.set(format_azure_tools_status())
         self._enable_local_azure_signin_buttons()
 
+    def _azure_cli_logged_in(self) -> bool:
+        try:
+            try:
+                from src.utils.azcopy_utils import azure_cli_logged_in
+            except ImportError:
+                from azure_migration_tool.src.utils.azcopy_utils import azure_cli_logged_in
+            return azure_cli_logged_in()
+        except Exception:
+            return False
+
+    def _update_local_azure_auth_button(self) -> None:
+        btn = getattr(self, "local_az_auth_btn", None)
+        if btn is None:
+            return
+        try:
+            btn.configure(text="Sign out" if self._azure_cli_logged_in() else "Sign in")
+        except tk.TclError:
+            pass
+
     def _enable_local_azure_signin_buttons(self) -> None:
-        for attr in (
-            "local_az_signin_btn",
-            "local_az_signout_btn",
-            "local_az_relogin_btn",
-        ):
-            btn = getattr(self, attr, None)
-            if btn is not None:
-                try:
-                    btn.config(state=tk.NORMAL)
-                except tk.TclError:
-                    pass
+        btn = getattr(self, "local_az_auth_btn", None)
+        if btn is not None:
+            try:
+                btn.config(state=tk.NORMAL)
+            except tk.TclError:
+                pass
+        self._update_local_azure_auth_button()
 
     def _disable_local_azure_signin_buttons(self) -> None:
-        for attr in (
-            "local_az_signin_btn",
-            "local_az_signout_btn",
-            "local_az_relogin_btn",
-        ):
-            btn = getattr(self, attr, None)
-            if btn is not None:
-                try:
-                    btn.config(state=tk.DISABLED)
-                except tk.TclError:
-                    pass
+        btn = getattr(self, "local_az_auth_btn", None)
+        if btn is not None:
+            try:
+                btn.config(state=tk.DISABLED)
+            except tk.TclError:
+                pass
+
+    def _toggle_local_azure_auth(self) -> None:
+        if self._azure_cli_logged_in():
+            self._sign_out_azure_for_upload()
+        else:
+            self._run_azure_cli_sign_in(use_device_code=False, relogin=False)
 
     def _clear_pc_azure_blob_session(self, log: Optional[Callable[[str], None]] = None) -> None:
         """Clear Browse Azure credential cache and Azure CLI / AzCopy session."""
@@ -2469,14 +2471,6 @@ class BackupRestoreTab:
                 _log("Cleared Azure credential cache.")
             except Exception as exc:
                 _log(f"(warn) Could not clear credential cache: {exc}")
-
-    def _sign_in_azure_for_upload(self) -> None:
-        """Run az login (browser) from the app and refresh status."""
-        self._run_azure_cli_sign_in(use_device_code=False, relogin=False)
-
-    def _relogin_azure_for_upload(self) -> None:
-        """Sign out and sign in again (for MFA / invalid_grant)."""
-        self._run_azure_cli_sign_in(use_device_code=False, relogin=True)
 
     def _sign_out_azure_for_upload(self) -> None:
         self._disable_local_azure_signin_buttons()
@@ -2520,7 +2514,13 @@ class BackupRestoreTab:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _run_azure_cli_sign_in(self, *, use_device_code: bool, relogin: bool = False) -> None:
+    def _run_azure_cli_sign_in(
+        self,
+        *,
+        use_device_code: bool,
+        relogin: bool = False,
+        log_widget: Optional[Any] = None,
+    ) -> None:
         try:
             from src.utils.azcopy_utils import find_az_cli_executable, install_instructions
         except ImportError:
@@ -2537,15 +2537,23 @@ class BackupRestoreTab:
             self._refresh_local_azure_tools_status()
             return
 
-        self._disable_local_azure_signin_buttons()
-        self.local_azure_tools_status_var.set("Signing in...")
+        log_target = log_widget or self.local_backup_log
+        for_local_tab = log_widget is None
+
+        if for_local_tab:
+            self._disable_local_azure_signin_buttons()
+            self.local_azure_tools_status_var.set("Signing in...")
+        else:
+            btn = getattr(self, "restore_azure_auth_btn", None)
+            if btn is not None:
+                btn.config(state=tk.DISABLED)
 
         def log(msg: str) -> None:
             self.frame.after(
                 0,
                 lambda m=msg: (
-                    self.local_backup_log.insert(tk.END, m + "\n"),
-                    self.local_backup_log.see(tk.END),
+                    log_target.insert(tk.END, m + "\n"),
+                    log_target.see(tk.END),
                 ),
             )
 
@@ -2580,7 +2588,10 @@ class BackupRestoreTab:
                         use_device_code=use_device_code,
                         on_device_code=on_device_code if use_device_code else None,
                     )
-                self.frame.after(0, self._refresh_local_azure_tools_status)
+                if for_local_tab:
+                    self.frame.after(0, self._refresh_local_azure_tools_status)
+                else:
+                    self.frame.after(0, self._update_restore_azure_auth_button)
                 if ok:
                     self.frame.after(
                         0,
@@ -2606,7 +2617,16 @@ class BackupRestoreTab:
                     ),
                 )
             finally:
-                self.frame.after(0, self._enable_local_azure_signin_buttons)
+                def _finish_auth_ui() -> None:
+                    if for_local_tab:
+                        self._enable_local_azure_signin_buttons()
+                    else:
+                        btn = getattr(self, "restore_azure_auth_btn", None)
+                        if btn is not None:
+                            btn.config(state=tk.NORMAL)
+                        self._update_restore_azure_auth_button()
+
+                self.frame.after(0, _finish_auth_ui)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2727,20 +2747,14 @@ class BackupRestoreTab:
         self.test_restore_blob_sql_headeronly_btn.pack(side=tk.LEFT, padx=5)
         # Always enabled — recovers the UI if a previous sign-in left the buttons disabled,
         # and forces a fresh Azure sign-in.
-        self.restore_reauth_btn = ttk.Button(
+        self.restore_azure_auth_btn = ttk.Button(
             btn_frame,
-            text="Sign in again",
-            command=self._reauth_restore_from_blob,
-            width=14,
+            text="Sign in",
+            command=self._toggle_azure_auth_restore_blob,
+            width=12,
         )
-        self.restore_reauth_btn.pack(side=tk.LEFT, padx=5)
-        self.restore_signout_btn = ttk.Button(
-            btn_frame,
-            text="Sign out",
-            command=self._sign_out_azure_restore_blob,
-            width=10,
-        )
-        self.restore_signout_btn.pack(side=tk.LEFT, padx=5)
+        self.restore_azure_auth_btn.pack(side=tk.LEFT, padx=5)
+        self.frame.after(500, self._update_restore_azure_auth_button)
         self.restore_blob_stop_btn = ttk.Button(
             btn_frame,
             text="Stop",
@@ -3003,8 +3017,6 @@ class BackupRestoreTab:
         stop_btn = getattr(self, "restore_blob_stop_btn", None)
         if stop_btn is not None:
             stop_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
-        # restore_reauth_btn is intentionally left enabled so the user can always sign in again.
-
     def _stop_restore_blob_process(self) -> None:
         ctx = self._restore_blob_abort_context
         db_name = (ctx or {}).get("database") or (
@@ -3121,6 +3133,25 @@ class BackupRestoreTab:
         self.restore_disk_progress_var.set(pct)
         self.restore_disk_progress_label.config(text=text if text is not None else f"{pct:.1f}%")
 
+    def _update_restore_azure_auth_button(self) -> None:
+        btn = getattr(self, "restore_azure_auth_btn", None)
+        if btn is None:
+            return
+        try:
+            btn.configure(text="Sign out" if self._azure_cli_logged_in() else "Sign in")
+        except tk.TclError:
+            pass
+
+    def _toggle_azure_auth_restore_blob(self) -> None:
+        if self._azure_cli_logged_in():
+            self._sign_out_azure_restore_blob()
+        else:
+            self._run_azure_cli_sign_in(
+                use_device_code=False,
+                relogin=False,
+                log_widget=self.restore_from_blob_log,
+            )
+
     def _sign_out_azure_restore_blob(self) -> None:
         """Sign out of Azure CLI and clear this-PC blob credentials."""
 
@@ -3128,7 +3159,9 @@ class BackupRestoreTab:
             self.frame.after(0, lambda m=msg: self.restore_from_blob_log.insert(tk.END, m + "\n"))
             self.frame.after(0, lambda: self.restore_from_blob_log.see(tk.END))
 
-        self.restore_signout_btn.config(state=tk.DISABLED)
+        btn = getattr(self, "restore_azure_auth_btn", None)
+        if btn is not None:
+            btn.config(state=tk.DISABLED)
 
         def run():
             try:
@@ -3146,53 +3179,12 @@ class BackupRestoreTab:
                     messagebox.showinfo("Signed out", "Azure CLI sign-out complete.")
                 else:
                     messagebox.showwarning("Sign-out", "Sign-out did not complete. See the log.")
-                self.restore_signout_btn.config(state=tk.NORMAL)
+                btn = getattr(self, "restore_azure_auth_btn", None)
+                if btn is not None:
+                    btn.config(state=tk.NORMAL)
+                self._update_restore_azure_auth_button()
 
             self.frame.after(0, finish)
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _reauth_restore_from_blob(self) -> None:
-        """Recover the UI and force a fresh Azure sign-in for the selected auth type."""
-        # If a previous operation hung during sign-in and left the action buttons disabled,
-        # clicking this un-sticks them.
-        self._restore_blob_tab_set_busy(False)
-        auth = (self.restore_blob_auth_var.get() or "windows").strip()
-        user = (self.restore_blob_user_var.get() or "").strip()
-        self.restore_reauth_btn.config(state=tk.DISABLED)
-
-        def log(msg):
-            self.frame.after(0, lambda m=msg: self.restore_from_blob_log.insert(tk.END, m + "\n"))
-            self.frame.after(0, lambda: self.restore_from_blob_log.see(tk.END))
-
-        def run():
-            try:
-                ok = self._try_reauth_azure(auth, user, log)
-                if ok:
-                    self.frame.after(
-                        0,
-                        lambda: messagebox.showinfo(
-                            "Re-authenticated",
-                            "Azure sign-in refreshed. Run the restore or tests again now.",
-                        ),
-                    )
-                else:
-                    self.frame.after(
-                        0,
-                        lambda: messagebox.showerror(
-                            "Re-authenticate",
-                            "Could not complete sign-in. See the Log for details and next steps "
-                            "(if blocked by Conditional Access / error 53003, use SQL Server login).",
-                        ),
-                    )
-            except Exception as e:
-                log(f"[X] Re-authenticate error: {e}")
-                self.frame.after(
-                    0,
-                    lambda x=str(e): messagebox.showerror("Re-authenticate failed", _compact_dialog_error(x)),
-                )
-            finally:
-                self.frame.after(0, lambda: self.restore_reauth_btn.config(state=tk.NORMAL))
 
         threading.Thread(target=run, daemon=True).start()
 

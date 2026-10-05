@@ -201,6 +201,11 @@ def _extract_device_code_message(stdout: str, stderr: str) -> str:
     return "\n".join(lines[:6])
 
 
+def azure_cli_logged_in() -> bool:
+    """True when ``az account show`` reports a signed-in user."""
+    return bool(get_azure_cli_account().get("logged_in"))
+
+
 def get_azure_cli_account() -> Dict[str, Any]:
     """
     Return Azure CLI status: installed, logged_in, user, subscription, tenant.

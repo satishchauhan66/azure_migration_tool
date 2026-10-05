@@ -157,6 +157,7 @@ class AzureBlobBrowser(tk.Toplevel):
         self._cont_choices: Tuple[str, ...] = ()
 
         self._build_ui(default_mode)
+        self.after(0, self._update_auth_toggle_button)
         self.after(100, self._kick_off_login)
 
     def _build_ui(self, default_mode: str) -> None:
@@ -166,14 +167,10 @@ class AzureBlobBrowser(tk.Toplevel):
         tk.Label(auth_row, textvariable=self.signed_in_var, anchor=tk.W).pack(
             side=tk.LEFT, fill=tk.X, expand=True
         )
-        self._signin_btn = ttk.Button(
-            auth_row, text="Sign in again", width=12, command=self._on_sign_in_clicked
+        self._auth_toggle_btn = ttk.Button(
+            auth_row, text="Sign in", width=12, command=self._on_auth_toggle_clicked
         )
-        self._signin_btn.pack(side=tk.RIGHT, padx=(4, 0))
-        self._signout_btn = ttk.Button(
-            auth_row, text="Sign out", width=10, command=self._on_sign_out_clicked
-        )
-        self._signout_btn.pack(side=tk.RIGHT, padx=(4, 0))
+        self._auth_toggle_btn.pack(side=tk.RIGHT, padx=(4, 0))
         self._auth_busy = False
 
         row = ttk.Frame(self)
@@ -261,13 +258,36 @@ class AzureBlobBrowser(tk.Toplevel):
     def _set_status(self, msg: str) -> None:
         self.status_var.set(msg or "")
 
-    def _set_auth_buttons_enabled(self, enabled: bool) -> None:
-        state = tk.NORMAL if enabled else tk.DISABLED
+    def _azure_cli_logged_in(self) -> bool:
         try:
-            self._signin_btn.configure(state=state)
-            self._signout_btn.configure(state=state)
+            try:
+                from src.utils.azcopy_utils import azure_cli_logged_in
+            except ImportError:
+                from azure_migration_tool.src.utils.azcopy_utils import azure_cli_logged_in
+            return azure_cli_logged_in()
+        except Exception:
+            return False
+
+    def _update_auth_toggle_button(self) -> None:
+        if self._auth_busy:
+            return
+        text = "Sign out" if self._azure_cli_logged_in() else "Sign in"
+        try:
+            self._auth_toggle_btn.configure(text=text)
         except tk.TclError:
             pass
+
+    def _set_auth_toggle_enabled(self, enabled: bool) -> None:
+        try:
+            self._auth_toggle_btn.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+        except tk.TclError:
+            pass
+
+    def _on_auth_toggle_clicked(self) -> None:
+        if self._azure_cli_logged_in():
+            self._on_sign_out_clicked()
+        else:
+            self._on_sign_in_clicked()
 
     def _reset_pickers(self) -> None:
         self._subs = []
@@ -289,7 +309,7 @@ class AzureBlobBrowser(tk.Toplevel):
         if self._auth_busy:
             return
         self._auth_busy = True
-        self._set_auth_buttons_enabled(False)
+        self._set_auth_toggle_enabled(False)
         self.signed_in_var.set("Signing out...")
         self._set_status("")
 
@@ -310,7 +330,7 @@ class AzureBlobBrowser(tk.Toplevel):
 
             def finish() -> None:
                 self._auth_busy = False
-                self._set_auth_buttons_enabled(True)
+                self._set_auth_toggle_enabled(True)
                 self._reset_pickers()
                 if ok:
                     self.signed_in_var.set("Signed out")
@@ -319,6 +339,7 @@ class AzureBlobBrowser(tk.Toplevel):
                     self.signed_in_var.set("Sign-out may have failed")
                     if err:
                         self._set_status(err[:400])
+                self._update_auth_toggle_button()
 
             self.after(0, finish)
 
@@ -328,19 +349,19 @@ class AzureBlobBrowser(tk.Toplevel):
         if self._auth_busy:
             return
         self._auth_busy = True
-        self._set_auth_buttons_enabled(False)
+        self._set_auth_toggle_enabled(False)
         self.signed_in_var.set("Signing in...")
         self._set_status("Complete sign-in in the browser window if one opens.")
 
         def run() -> None:
             try:
                 try:
-                    from src.utils.azcopy_utils import run_az_relogin
+                    from src.utils.azcopy_utils import run_az_login
                 except ImportError:
-                    from azure_migration_tool.src.utils.azcopy_utils import run_az_relogin
+                    from azure_migration_tool.src.utils.azcopy_utils import run_az_login
                 clear_azure_credential_cache()
                 self._credential = None
-                ok = run_az_relogin()
+                ok = run_az_login(force=True)
             except Exception as exc:
                 ok = False
                 err = str(exc)
@@ -349,10 +370,11 @@ class AzureBlobBrowser(tk.Toplevel):
 
             def after_login() -> None:
                 self._auth_busy = False
-                self._set_auth_buttons_enabled(True)
+                self._set_auth_toggle_enabled(True)
+                self._update_auth_toggle_button()
                 if not ok:
                     self.signed_in_var.set("Sign-in failed")
-                    self._set_status(err[:400] if err else "Try Sign out, then Sign in again.")
+                    self._set_status(err[:400] if err else "Sign-in did not complete.")
                     return
                 self._kick_off_login()
 
@@ -361,7 +383,7 @@ class AzureBlobBrowser(tk.Toplevel):
         threading.Thread(target=run, daemon=True).start()
 
     def _kick_off_login(self) -> None:
-        self._set_auth_buttons_enabled(False)
+        self._set_auth_toggle_enabled(False)
         threading.Thread(target=self._login_and_load_subs, daemon=True).start()
 
     def _login_and_load_subs(self) -> None:
@@ -393,7 +415,8 @@ class AzureBlobBrowser(tk.Toplevel):
 
     def _fatal_missing_deps(self, msg: str) -> None:
         self.signed_in_var.set("Missing dependencies")
-        self._set_auth_buttons_enabled(True)
+        self._set_auth_toggle_enabled(True)
+        self._update_auth_toggle_button()
         messagebox.showerror("Browse Azure", msg)
         self.destroy()
 
@@ -401,8 +424,9 @@ class AzureBlobBrowser(tk.Toplevel):
         clear_azure_credential_cache()
         self._credential = None
         self.signed_in_var.set("Could not load subscriptions")
-        self._set_status("Use Sign out, then Sign in (MFA) and retry.")
-        self._set_auth_buttons_enabled(True)
+        self._set_status("Click Sign out, then Sign in to refresh your session.")
+        self._set_auth_toggle_enabled(True)
+        self._update_auth_toggle_button()
         short = (msg or "").strip()
         if len(short) > 600:
             short = short[:600] + "..."
@@ -413,7 +437,8 @@ class AzureBlobBrowser(tk.Toplevel):
         )
 
     def _populate_subs(self, user: str) -> None:
-        self._set_auth_buttons_enabled(True)
+        self._set_auth_toggle_enabled(True)
+        self._update_auth_toggle_button()
         self.signed_in_var.set(f"Signed in as: {user}")
         if not self._subs:
             self._set_status("No subscriptions visible to this user.")
