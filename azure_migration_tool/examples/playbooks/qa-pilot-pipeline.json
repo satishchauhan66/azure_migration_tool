@@ -1,0 +1,44 @@
+{
+  "playbook_id": "qa-pilot-pipeline",
+  "name": "QA pilot — resolve, prepare, run",
+  "description": "Infer QA from database name, merge org defaults, run backup → blob → restore.",
+  "variables": {
+    "database": "SampleApp_ss_sld_db22q",
+    "source_server": "SOURCE-SQL\\INSTANCE",
+    "restore_user": "you@example.com"
+  },
+  "steps": [
+    {
+      "id": "resolve_env",
+      "tool": "resolve_environment",
+      "args": { "database": "{{vars.database}}" },
+      "save_as": "env"
+    },
+    {
+      "id": "prepare_job",
+      "tool": "prepare_job_payload",
+      "args": {
+        "job_json": {
+          "environment": "{{steps.env.environment}}",
+          "source": {
+            "server": "{{vars.source_server}}",
+            "databases": ["{{vars.database}}"]
+          },
+          "restore_target": {
+            "auth": "entra_mfa",
+            "user": "{{vars.restore_user}}"
+          },
+          "blob": { "use_profile": true },
+          "steps": { "backup": true, "upload": true, "restore": true }
+        }
+      },
+      "save_as": "prepared"
+    },
+    {
+      "id": "run_pipeline",
+      "tool": "run_bulk_job_json",
+      "args": { "job_json": "{{steps.prepared.effective_job}}" },
+      "save_as": "run"
+    }
+  ]
+}

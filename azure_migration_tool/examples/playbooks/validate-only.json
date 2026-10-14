@@ -1,0 +1,16 @@
+{
+  "playbook_id": "validate-only",
+  "name": "Validate job file (no run)",
+  "description": "AgentOps gate: validate a worker JSON job before execution.",
+  "variables": {
+    "job_path": "C:\\\\path\\\\to\\\\job.json"
+  },
+  "steps": [
+    {
+      "id": "validate",
+      "tool": "validate_job",
+      "args": { "job_path": "{{vars.job_path}}" },
+      "save_as": "validation"
+    }
+  ]
+}

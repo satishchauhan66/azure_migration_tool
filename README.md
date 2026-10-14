@@ -46,6 +46,15 @@ pip install -r azure_migration_tool/requirements.txt
 python -m azure_migration_tool.main
 ```
 
+## Headless worker (agents / Cursor MCP)
+
+To run **local backup (multiple DBs) → upload to blob → restore on target** without the GUI, use the worker CLI or MCP server. See [docs/worker/HEADLESS_WORKER.md](docs/worker/HEADLESS_WORKER.md).
+
+```powershell
+python -m azure_migration_tool.worker validate --job path\to\job.json
+python -m azure_migration_tool.worker run --job path\to\job.json
+```
+
 Or run `main.py` from the `azure_migration_tool` folder.
 
 ## Testing Legacy Data Validation (DB2 → Azure SQL)

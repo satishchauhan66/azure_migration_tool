@@ -1,0 +1,20 @@
+{
+  "playbook_id": "post-run-brief",
+  "name": "Export migration brief after run",
+  "description": "Write redacted brief from result JSON for agents/PMs.",
+  "variables": {
+    "result_path": "C:\\\\MigrationProjects\\\\my-run\\\\worker_jobs\\\\job_result.json",
+    "brief_path": "C:\\\\MigrationProjects\\\\my-run\\\\migration_brief.md"
+  },
+  "steps": [
+    {
+      "id": "brief",
+      "tool": "export_migration_brief",
+      "args": {
+        "output_path": "{{vars.brief_path}}",
+        "result_path": "{{vars.result_path}}"
+      },
+      "save_as": "brief"
+    }
+  ]
+}

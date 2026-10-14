@@ -28,6 +28,14 @@ except ImportError:
     from azure_migration_tool.gui.widgets.connection_widget import ConnectionWidget
 
 try:
+    from gui.widgets.bulk_pipeline_status import BulkPipelineStatusPanel, make_ui_progress_callback
+except ImportError:
+    from azure_migration_tool.gui.widgets.bulk_pipeline_status import (
+        BulkPipelineStatusPanel,
+        make_ui_progress_callback,
+    )
+
+try:
     from gui.utils.database_utils import list_databases
 except ImportError:
     from azure_migration_tool.gui.utils.database_utils import list_databases
@@ -64,29 +72,30 @@ class LocalBackupBulkToolTab(BackupRestoreTab):
         ).pack(pady=(0, 8))
 
         self._create_bulk_local_step1(scrollable_frame)
-        self._create_local_backup_shared_sections(scrollable_frame, blob_prefix="bulk")
         self._create_bulk_restore_target_section(scrollable_frame)
+        self._bulk_pipeline_panel = BulkPipelineStatusPanel(scrollable_frame)
+        self._create_local_backup_shared_sections(scrollable_frame, blob_prefix="bulk")
 
         self.local_backup_btn.configure(
-            text="1. Backup selected databases",
+            text="Run pipeline",
             command=self._start_bulk_local_create_backup,
-            width=28,
+            width=18,
         )
-        self.local_upload_btn.configure(text="2. Upload all to Blob", width=24)
+        self.local_upload_btn.configure(text="Upload only (session)", width=20)
         btn_row = self.local_backup_btn.master
         self.local_restore_all_blob_btn = ttk.Button(
             btn_row,
-            text="3. Restore all from Blob",
+            text="Restore only (session)",
             command=self._start_bulk_restore_from_completed_runs,
-            width=24,
+            width=20,
         )
         self.local_restore_all_blob_btn.pack(side=tk.LEFT, padx=5)
-        self.bulk_progress_var = tk.StringVar(value="")
         tk.Label(
-            scrollable_frame,
-            textvariable=self.bulk_progress_var,
-            anchor=tk.W,
-        ).pack(fill=tk.X, padx=8, pady=(0, 4))
+            btn_row,
+            text="Each DB: backup → upload → restore as soon as the prior step finishes.",
+            fg="gray",
+        ).pack(side=tk.LEFT, padx=(12, 0))
+        self.bulk_progress_var = tk.StringVar(value="")
 
         self._bulk_completed_runs: List[Dict[str, Any]] = []
 
@@ -96,7 +105,7 @@ class LocalBackupBulkToolTab(BackupRestoreTab):
     def _create_bulk_restore_target_section(self, parent) -> None:
         step4 = ttk.LabelFrame(
             parent,
-            text="Step 4: Restore from Blob (after upload, optional)",
+            text="Pipeline options (per database, no wait for other DBs)",
             padding=10,
         )
         step4.pack(fill=tk.X, padx=5, pady=5)
@@ -130,34 +139,23 @@ class LocalBackupBulkToolTab(BackupRestoreTab):
         self.bulk_auto_upload_after_backup_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             step4,
-            text="After backup completes, prompt to upload all databases to Blob (countdown)",
+            text="Step 2 — Upload to blob immediately after that database’s backup",
             variable=self.bulk_auto_upload_after_backup_var,
         ).grid(row=opt_row + 1, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
         self.bulk_auto_restore_after_upload_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             step4,
-            text="After upload completes, prompt to restore all databases from Blob (countdown)",
+            text="Step 3 — Restore immediately after that database’s upload",
             variable=self.bulk_auto_restore_after_upload_var,
         ).grid(row=opt_row + 2, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
-        countdown_row = ttk.Frame(step4)
-        countdown_row.grid(row=opt_row + 3, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
-        tk.Label(countdown_row, text="Auto-step countdown (seconds):").pack(side=tk.LEFT)
         self.bulk_auto_countdown_var = tk.StringVar(value="10")
-        ttk.Combobox(
-            countdown_row,
-            textvariable=self.bulk_auto_countdown_var,
-            values=("5", "10", "15", "30", "60"),
-            width=6,
-            state="readonly",
-        ).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(
             step4,
-            text="Manual steps anytime: use buttons 1 · Backup, 2 · Upload all to Blob, "
-            "3 · Restore all from Blob below.",
+            text="Use Upload only / Restore only for databases already finished in this session.",
             fg="gray",
             wraplength=680,
             justify=tk.LEFT,
-        ).grid(row=opt_row + 4, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
+        ).grid(row=opt_row + 3, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
     def _create_bulk_local_step1(self, parent) -> None:
         step1 = ttk.LabelFrame(parent, text="Step 1: SQL Server and databases", padding=10)
@@ -327,15 +325,17 @@ class LocalBackupBulkToolTab(BackupRestoreTab):
 
     def _start_bulk_local_create_backup(self) -> None:
         try:
-            from src.backup.local_backup_and_upload import run_local_backup_and_upload
+            from src.orchestration.bulk_local_blob_pipeline import (
+                run_bulk_local_backup_blob_restore_job,
+            )
         except ImportError:
             try:
-                from azure_migration_tool.src.backup.local_backup_and_upload import (
-                    run_local_backup_and_upload,
+                from azure_migration_tool.src.orchestration.bulk_local_blob_pipeline import (
+                    run_bulk_local_backup_blob_restore_job,
                 )
             except ImportError:
-                run_local_backup_and_upload = None
-        if not run_local_backup_and_upload:
+                run_bulk_local_backup_blob_restore_job = None
+        if not run_bulk_local_backup_blob_restore_job:
             messagebox.showerror("Error", "Local backup module not available.")
             return
 
@@ -360,7 +360,17 @@ class LocalBackupBulkToolTab(BackupRestoreTab):
         self._bulk_completed_runs = []
         self._local_set_busy(True)
         self.local_backup_log.delete("1.0", tk.END)
-        self.bulk_progress_var.set(f"0 / {len(databases)}")
+        auto_upload = bool(self.bulk_auto_upload_after_backup_var.get())
+        auto_restore = auto_upload and bool(self.bulk_auto_restore_after_upload_var.get())
+        self._bulk_pipeline_panel.reset(
+            databases,
+            do_backup=True,
+            do_upload=auto_upload,
+            do_restore=auto_restore,
+        )
+        self.local_upload_status_var.set(
+            f"Pipeline running — up to {self._bulk_parallel_databases()} databases in parallel"
+        )
 
         def log(msg: str) -> None:
             self.frame.after(
@@ -371,87 +381,79 @@ class LocalBackupBulkToolTab(BackupRestoreTab):
                 ),
             )
 
-        def _store_conn(conn) -> None:
-            self._local_active_conn = conn
+        progress_cb = make_ui_progress_callback(
+            self._bulk_pipeline_panel,
+            lambda fn: self.frame.after(0, fn),
+        )
 
         def run() -> None:
-            ok_count = 0
-            fail_count = 0
-            successful_runs: List[Dict[str, Any]] = []
-            total = len(databases)
-
-            for idx, database in enumerate(databases, start=1):
-                if self._local_stop_event.is_set():
-                    log("Stopped by user.")
-                    break
-                self.frame.after(
-                    0,
-                    lambda i=idx, t=total, d=database: self.bulk_progress_var.set(
-                        f"{i - 1} / {t} — backing up {d}"
-                    ),
-                )
-                log(f"--- [{idx}/{total}] {database} ---")
-                self.frame.after(0, lambda d=database: self.local_db_var.set(d))
-                stripes = self._resolve_local_backup_stripes()
-                try:
-                    result = run_local_backup_and_upload(
-                        server=server,
-                        database=database,
-                        auth=self.local_auth_var.get() or "windows",
-                        user=self.local_user_var.get() or "",
-                        password=self.local_password_var.get() or "",
-                        local_backup_path=local_path,
-                        compression=self.local_compression_var.get(),
-                        skip_upload=True,
-                        structured_local_paths=self.local_structured_paths_var.get(),
-                        stripes=stripes,
-                        cancel_event=self._local_stop_event,
-                        on_connect=_store_conn,
-                        log=log,
+            if auto_upload and self._pipeline_storage_dict() is None:
+                self.frame.after(0, lambda: self._local_set_busy(False))
+                return
+            if auto_restore:
+                ready, reason = self._restore_target_server_ready()
+                if not ready:
+                    self.frame.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "Restore target",
+                            reason + "\n\nUncheck auto-restore or set Step 4 target server.",
+                        ),
                     )
-                except Exception as exc:
-                    log(f"ERROR: {exc}")
-                    fail_count += 1
-                    continue
-                finally:
-                    self._local_active_conn = None
+                    self.frame.after(0, lambda: self._local_set_busy(False))
+                    return
 
-                if result.get("cancelled"):
-                    log("Cancelled during backup.")
-                    break
-                if result.get("success"):
-                    ok_count += 1
-                    files = result.get("local_files") or ([result.get("local_file", "")])
-                    files = [f for f in files if f]
-                    if files:
-                        successful_runs.append(
-                            {
-                                "database": database,
-                                "files": files,
-                                "run_id": (result.get("run_id") or "").strip(),
-                            }
-                        )
-                    try:
-                        from gui.utils.local_backup_settings import save_stripe_preference
-                    except ImportError:
-                        from azure_migration_tool.gui.utils.local_backup_settings import (
-                            save_stripe_preference,
-                        )
-                    val = (self.local_stripes_var.get() or "Auto").strip()
-                    mode = "auto" if val.lower() == "auto" else "manual"
-                    save_stripe_preference(
-                        server,
-                        database,
-                        mode=mode,
-                        stripes_value=val,
-                        last_auto_stripes=int(result.get("stripes") or 1),
-                    )
-                else:
-                    fail_count += 1
-                    log(f"Failed: {result.get('message', 'Unknown error')}")
+            val = (self.local_stripes_var.get() or "Auto").strip()
+            stripes_job = "auto" if val.lower() == "auto" else val
+            job: Dict[str, Any] = {
+                "_run_origin": "gui-bulk",
+                "pipeline": {"max_parallel_databases": self._bulk_parallel_databases()},
+                "steps": {
+                    "backup": True,
+                    "upload": auto_upload,
+                    "restore": auto_restore,
+                },
+                "source": {
+                    "server": server,
+                    "auth": self.local_auth_var.get() or "windows",
+                    "user": self.local_user_var.get() or "",
+                    "password": self.local_password_var.get() or "",
+                    "databases": databases,
+                },
+                "local_backup": {
+                    "path": local_path,
+                    "compression": self.local_compression_var.get(),
+                    "structured_paths": self.local_structured_paths_var.get(),
+                    "stripes": stripes_job,
+                },
+                "blob": self._gui_blob_job_section(),
+                "restore_target": self._pipeline_restore_target() if auto_restore else {},
+            }
+            log(
+                f"=== Per-database pipeline: {len(databases)} DB(s), "
+                f"up to {self._bulk_parallel_databases()} in parallel ==="
+            )
+            summary = run_bulk_local_backup_blob_restore_job(
+                job,
+                log=log,
+                cancel_event=self._local_stop_event,
+                progress_callback=progress_cb,
+            )
+            successful_runs: List[Dict[str, Any]] = list(summary.get("backup_runs") or [])
+            backup_step = (summary.get("steps") or {}).get("backup") or {}
+            ok_count = int(backup_step.get("ok") or len(successful_runs))
+            fail_count = int(backup_step.get("failed") or 0)
+            if summary.get("errors"):
+                for err in summary["errors"][:20]:
+                    log(f"ERROR: {err}")
 
             def done() -> None:
-                self.bulk_progress_var.set(f"Done — {ok_count} OK, {fail_count} failed")
+                pipe_rows = ((summary.get("steps") or {}).get("pipeline") or {}).get("databases")
+                if pipe_rows:
+                    self._bulk_pipeline_panel.apply_pipeline_rows(pipe_rows)
+                self.local_upload_status_var.set(
+                    f"Pipeline done — backup OK: {ok_count}, failed: {fail_count}"
+                )
                 self._bulk_completed_runs = list(successful_runs)
                 if successful_runs:
                     try:
@@ -466,24 +468,16 @@ class LocalBackupBulkToolTab(BackupRestoreTab):
                         + (f"  (+{len(successful_runs) - 1} more DB)" if len(successful_runs) > 1 else "")
                     )
                     self._refresh_local_upload_status()
-                summary = f"Backups finished.\n\nSucceeded: {ok_count}\nFailed: {fail_count}"
-                auto_upload = bool(
-                    ok_count
-                    and successful_runs
-                    and self.bulk_auto_upload_after_backup_var.get()
-                )
-                if fail_count and ok_count:
-                    messagebox.showwarning("Bulk backup", summary)
+                msg = f"Backups finished.\n\nSucceeded: {ok_count}\nFailed: {fail_count}"
+                if job["steps"].get("upload"):
+                    st = (summary.get("status") or "finished").replace("_", " ")
+                    messagebox.showinfo("Pipeline", f"Finished with status: {st}")
+                elif fail_count and ok_count:
+                    messagebox.showwarning("Bulk backup", msg)
                 elif fail_count:
-                    messagebox.showwarning("Bulk backup", summary)
-                elif ok_count and not auto_upload:
-                    messagebox.showinfo("Bulk backup", summary)
-                if auto_upload:
-                    self._prompt_auto_upload_after_bulk_backup(
-                        summary,
-                        successful_runs,
-                        countdown_sec=self._bulk_auto_countdown_seconds(),
-                    )
+                    messagebox.showwarning("Bulk backup", msg)
+                elif ok_count:
+                    messagebox.showinfo("Bulk backup", msg)
                 self._local_set_busy(False)
 
             self.frame.after(0, done)

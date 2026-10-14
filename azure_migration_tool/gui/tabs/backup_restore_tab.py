@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from pathlib import Path
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import sys
 import os
@@ -682,10 +683,18 @@ class BackupRestoreTab:
             width=20
         ).pack(side=tk.LEFT, padx=5)
 
+        if blob_prefix == "bulk":
+            panel = getattr(self, "_bulk_pipeline_panel", None)
+            if panel is not None:
+                panel.pack(fill=tk.BOTH, expand=True, padx=5, pady=(8, 4))
+
         # Log
-        log_frame = ttk.LabelFrame(parent, text="Log", padding=10)
+        log_title = "Pipeline log" if blob_prefix == "bulk" else "Log"
+        log_frame = ttk.LabelFrame(parent, text=log_title, padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.local_upload_status_var = tk.StringVar(value="Upload: idle")
+        self.local_upload_status_var = tk.StringVar(
+            value="Ready — run pipeline to start" if blob_prefix == "bulk" else "Upload: idle"
+        )
         tk.Label(
             log_frame,
             textvariable=self.local_upload_status_var,
@@ -2710,48 +2719,70 @@ class BackupRestoreTab:
                         tracker.note_file_finished(ok)
                     self.frame.after(0, self._refresh_local_upload_status)
 
+                try:
+                    from src.orchestration.bulk_local_blob_pipeline import upload_single_backup_run
+                except ImportError:
+                    from azure_migration_tool.src.orchestration.bulk_local_blob_pipeline import (
+                        upload_single_backup_run,
+                    )
+                storage_dict = {
+                    "blob_auth_mode": blob_auth_mode,
+                    "conn_str": conn_str,
+                    "storage_account_url": storage_account_url,
+                    "container": container,
+                    "blob_folder": blob_folder,
+                    "structured_blob_paths": structured_blob_paths,
+                    "delete_local_after_upload": self.local_delete_after_upload_var.get(),
+                    "max_parallel_uploads": max_parallel,
+                }
+                parallel = min(self._bulk_parallel_databases(), total_runs)
                 log(
                     f"=== Uploading {len(readable)} file(s) across "
-                    f"{total_runs} database(s) to Blob ==="
+                    f"{total_runs} database(s) (up to {parallel} DBs in parallel) ==="
                 )
+                upload_lock = threading.Lock()
 
-                for run_idx, spec in enumerate(normalized_runs, start=1):
-                    if self._local_stop_event.is_set():
-                        break
+                def upload_one(spec: Dict[str, Any], run_idx: int) -> Tuple[int, int, str]:
                     database = spec["database"]
-                    run_id = spec["run_id"]
                     run_files = [
                         p
                         for p in spec["files"]
                         if os.path.normpath(os.path.expanduser(p)) in readable
                     ]
                     if not run_files:
-                        log(f"--- [{run_idx}/{total_runs}] {database}: skipped (no readable files) ---")
-                        failed += len(spec["files"])
-                        continue
-                    log(f"--- [{run_idx}/{total_runs}] {database}: {len(run_files)} file(s) ---")
-                    batch = upload_existing_bak_files_parallel(
-                        local_file_paths=run_files,
-                        max_parallel_uploads=max_parallel,
+                        with upload_lock:
+                            log(f"--- [{run_idx}/{total_runs}] {database}: skipped (no readable files) ---")
+                        return 0, len(spec["files"]), ""
+
+                    def db_log(msg: str) -> None:
+                        with upload_lock:
+                            log(f"[{database}] {msg}")
+
+                    db_log(f"upload {len(run_files)} file(s)")
+                    ok, err = upload_single_backup_run(
+                        spec,
+                        storage_dict,
                         cancel_event=self._local_stop_event,
-                        blob_auth_mode=blob_auth_mode,
-                        blob_connection_string=conn_str,
-                        blob_account_url=storage_account_url,
-                        blob_container=container,
-                        blob_folder=blob_folder,
-                        database=database,
-                        run_id=run_id,
-                        structured_blob_paths=structured_blob_paths,
-                        delete_local_after_upload=self.local_delete_after_upload_var.get(),
-                        require_azcopy=True,
-                        log=log,
-                        on_azcopy_line=on_azcopy_line,
-                        on_file_finished=on_file_finished,
+                        log=db_log,
                     )
-                    uploaded += int(batch.get("uploaded", 0))
-                    failed += int(batch.get("failed", 0))
-                    if batch.get("blob_url"):
-                        last_url = batch["blob_url"]
+                    if ok:
+                        return len(run_files), 0, ""
+                    db_log(err or "upload failed")
+                    return 0, len(run_files), ""
+
+                with ThreadPoolExecutor(max_workers=parallel) as pool:
+                    futures = [
+                        pool.submit(upload_one, spec, run_idx)
+                        for run_idx, spec in enumerate(normalized_runs, start=1)
+                    ]
+                    for fut in as_completed(futures):
+                        if self._local_stop_event.is_set():
+                            break
+                        up, fail, url = fut.result()
+                        uploaded += up
+                        failed += fail
+                        if url:
+                            last_url = url
 
                 cancelled = self._local_stop_event.is_set()
                 if cancelled and uploaded == 0:
@@ -3992,6 +4023,54 @@ class BackupRestoreTab:
             jobs.append({"database": database, "blob_path": blob_path})
         return jobs
 
+    def _bulk_parallel_databases(self) -> int:
+        try:
+            try:
+                from gui.utils.org_settings import load_org_settings
+            except ImportError:
+                from azure_migration_tool.gui.utils.org_settings import load_org_settings
+            raw = load_org_settings().get("bulk_parallel_databases")
+            if raw is not None:
+                return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+        return 4
+
+    def _gui_blob_job_section(self) -> Dict[str, Any]:
+        return {
+            "use_saved_settings": False,
+            "auth_mode": self.blob_auth_mode_var.get() or "connection_string",
+            "connection_string": (self.blob_conn_var.get() or "").strip(),
+            "storage_account_url": (self.blob_account_url_var.get() or "").strip(),
+            "container": (self.blob_container_var.get() or "").strip(),
+            "folder": (self.local_blob_folder_var.get() or "").strip(),
+            "structured_paths": self.local_structured_blob_paths_var.get(),
+            "delete_local_after_upload": self.local_delete_after_upload_var.get(),
+            "max_parallel_uploads": self._local_parallel_upload_worker_count(),
+        }
+
+    def _pipeline_restore_target(self) -> Dict[str, Any]:
+        server = (self.main_window.shared_dest_server.get() or "").strip()
+        return {
+            "server": server,
+            "auth": self.main_window.shared_dest_auth.get() or "entra_mfa",
+            "user": self.main_window.shared_dest_user.get() or "",
+            "password": self.main_window.shared_dest_password.get() or "",
+            "target_managed_instance": self._restore_blob_managed_instance_for_server(server),
+        }
+
+    def _pipeline_storage_dict(self) -> Optional[Dict[str, Any]]:
+        base = self._restore_blob_storage_inputs()
+        if not base:
+            return None
+        return {
+            **base,
+            "blob_folder": (self.local_blob_folder_var.get() or "").strip(),
+            "structured_blob_paths": bool(self.local_structured_blob_paths_var.get()),
+            "delete_local_after_upload": bool(self.local_delete_after_upload_var.get()),
+            "max_parallel_uploads": self._local_parallel_upload_worker_count(),
+        }
+
     def _restore_blob_storage_inputs(self) -> Optional[dict]:
         """Blob auth/container for restore (no backup file path)."""
         conn_str = (self.blob_conn_var.get() or "").strip()
@@ -4192,7 +4271,7 @@ class BackupRestoreTab:
         _tick()
 
     def _start_restore_multiple_from_blob(self, jobs: List[Dict[str, str]]) -> None:
-        """Sequential RESTORE FROM URL for multiple databases."""
+        """RESTORE FROM URL for multiple databases (parallel per DB)."""
         try:
             from src.restore.restore_from_blob import run_restore_from_blob
         except ImportError:
@@ -4239,49 +4318,83 @@ class BackupRestoreTab:
         def run() -> None:
             ok_count = 0
             fail_count = 0
-            try:
-                log(f"=== Restore from Blob: {total} database(s) → {server} ===")
-                for idx, job in enumerate(normalized, start=1):
-                    if self._restore_blob_stop_event.is_set():
-                        log("Stopped by user.")
-                        break
-                    database = job["database"]
-                    blob_path = job["blob_path"]
-                    log(f"--- [{idx}/{total}] {database} ---")
-                    log(f"  Blob: {storage['container']}/{blob_path}")
-                    def _set_restore_progress(d=database, i=idx, t=total) -> None:
-                        if hasattr(self, "bulk_progress_var"):
-                            self.bulk_progress_var.set(f"{i} / {t} — restoring {d}")
+            count_lock = threading.Lock()
+            log_lock = threading.Lock()
+            parallel = min(self._bulk_parallel_databases(), total)
 
-                    self.frame.after(0, _set_restore_progress)
-                    summary = self._run_with_auto_reauth(
-                        lambda db=database, bp=blob_path: run_restore_from_blob(
-                            server=server,
-                            database=db,
-                            auth=self.main_window.shared_dest_auth.get() or "windows",
-                            user=self.main_window.shared_dest_user.get() or None,
-                            password=self.main_window.shared_dest_password.get() or None,
-                            blob_connection_string=storage["conn_str"],
-                            container=storage["container"],
-                            blob_path=bp,
-                            log_callback=log,
-                            target_managed_instance=target_mi,
-                            blob_auth_mode=storage["blob_auth_mode"],
-                            storage_account_url=storage["storage_account_url"],
-                            cancel_event=self._restore_blob_stop_event,
-                        ),
+            def tlog(msg: str) -> None:
+                with log_lock:
+                    log(msg)
+
+            def restore_one(idx: int, job_item: Dict[str, str]) -> Optional[bool]:
+                if self._restore_blob_stop_event.is_set():
+                    return None
+                database = job_item["database"]
+                blob_path = job_item["blob_path"]
+                tlog(f"--- [{idx}/{total}] {database} ---")
+                tlog(f"  Blob: {storage['container']}/{blob_path}")
+
+                def _set_restore_progress() -> None:
+                    if hasattr(self, "bulk_progress_var"):
+                        self.bulk_progress_var.set(f"{idx} / {total} — restoring {database}")
+
+                self.frame.after(0, _set_restore_progress)
+                summary = self._run_with_auto_reauth(
+                    lambda db=database, bp=blob_path: run_restore_from_blob(
+                        server=server,
+                        database=db,
                         auth=self.main_window.shared_dest_auth.get() or "windows",
-                        user=self.main_window.shared_dest_user.get() or "",
-                        log=log,
-                    )
-                    status = (summary or {}).get("status", "failed")
-                    if status in ("success", "client_lost"):
-                        ok_count += 1
-                        log(f"✓ {database}: restore finished ({status})")
-                    else:
-                        fail_count += 1
-                        err = (summary or {}).get("error") or "Unknown error"
-                        log(f"✗ {database}: {err}")
+                        user=self.main_window.shared_dest_user.get() or None,
+                        password=self.main_window.shared_dest_password.get() or None,
+                        blob_connection_string=storage["conn_str"],
+                        container=storage["container"],
+                        blob_path=bp,
+                        log_callback=tlog,
+                        target_managed_instance=target_mi,
+                        blob_auth_mode=storage["blob_auth_mode"],
+                        storage_account_url=storage["storage_account_url"],
+                        cancel_event=self._restore_blob_stop_event,
+                    ),
+                    auth=self.main_window.shared_dest_auth.get() or "windows",
+                    user=self.main_window.shared_dest_user.get() or "",
+                    log=tlog,
+                )
+                status = (summary or {}).get("status", "failed")
+                if status in ("success", "client_lost"):
+                    tlog(f"OK {database}: restore finished ({status})")
+                    return True
+                err = (summary or {}).get("error") or "Unknown error"
+                tlog(f"FAIL {database}: {err}")
+                return False
+
+            try:
+                tlog(
+                    f"=== Restore from Blob: {total} database(s) → {server} "
+                    f"(up to {parallel} in parallel) ==="
+                )
+                with ThreadPoolExecutor(max_workers=parallel) as pool:
+                    futures = {
+                        pool.submit(restore_one, idx, job_item): job_item
+                        for idx, job_item in enumerate(normalized, start=1)
+                    }
+                    for fut in as_completed(futures):
+                        if self._restore_blob_stop_event.is_set():
+                            tlog("Stopped by user.")
+                            break
+                        try:
+                            success = fut.result()
+                        except Exception as exc:
+                            with count_lock:
+                                fail_count += 1
+                            tlog(f"ERROR: {exc}")
+                            continue
+                        if success is None:
+                            continue
+                        with count_lock:
+                            if success:
+                                ok_count += 1
+                            else:
+                                fail_count += 1
                 summary_msg = f"Bulk restore finished.\n\nSucceeded: {ok_count}\nFailed: {fail_count}"
                 if fail_count:
                     self.frame.after(0, lambda m=summary_msg: messagebox.showwarning("Bulk restore", m))

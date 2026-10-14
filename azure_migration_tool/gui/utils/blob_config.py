@@ -109,6 +109,15 @@ def _decode_connection_string_from_saved(data: Dict[str, Any]) -> str:
     return plain
 
 
+def blob_settings_configured() -> bool:
+    """True when saved settings are enough for upload/restore blob steps."""
+    conn_s, cont_s, mode_s, url_s = load_blob_settings()
+    mode = (mode_s or "connection_string").strip()
+    if mode == "managed_identity":
+        return bool((url_s or "").strip())
+    return bool((conn_s or "").strip() and (cont_s or "").strip())
+
+
 def load_blob_settings() -> tuple[str, str, str, str]:
     """Return ``(connection_string, container, blob_auth_mode, storage_account_url)``."""
     path = get_blob_settings_path()

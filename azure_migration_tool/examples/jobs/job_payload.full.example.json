@@ -1,0 +1,49 @@
+{
+  "job_id": "optional-correlation-id",
+  "operation": "bulk_local_backup_blob_restore",
+  "environment": "qa",
+  "steps": {
+    "backup": true,
+    "upload": true,
+    "restore": true
+  },
+  "source": {
+    "server": "SOURCE-SQL\\INSTANCE",
+    "auth": "windows",
+    "user": "",
+    "password": "",
+    "databases": ["SampleApp_ss_sld_db22q"],
+    "list_all_databases": false
+  },
+  "local_backup": {
+    "path": "",
+    "compression": true,
+    "structured_paths": true,
+    "stripes": "auto"
+  },
+  "blob": {
+    "use_profile": true,
+    "use_saved_settings": false,
+    "profile": "qa",
+    "auth_mode": "managed_identity",
+    "storage_account_url": "",
+    "connection_string": "",
+    "container": "sqlbackups",
+    "folder": "",
+    "delete_local_after_upload": false,
+    "max_parallel_uploads": "max"
+  },
+  "restore_target": {
+    "server": "",
+    "auth": "entra_mfa",
+    "user": "you@example.com",
+    "password": "",
+    "target_managed_instance": true
+  },
+  "backup_runs": [],
+  "project_path": "",
+  "output": {
+    "project_path": "C:\\MigrationProjects\\my-run",
+    "result_path": "C:\\MigrationProjects\\my-run\\worker_jobs\\result.json"
+  }
+}

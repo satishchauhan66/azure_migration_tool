@@ -154,6 +154,9 @@ class MainWindow:
         # Check GitHub for a newer build (background download; no modal prompts)
         if not os.environ.get("AZURE_MIGRATION_TOOL_SKIP_UPDATE_CHECK"):
             self.root.after(3000, lambda: self._check_for_updates_async(interactive=False))
+
+        self._mcp_url: str | None = None
+        self.root.after(1200, self._start_mcp_server_on_launch)
     
     def _on_tab_changed(self, event=None):
         """Create tab content when a tab is selected for the first time."""
@@ -278,6 +281,15 @@ class MainWindow:
             label="Restore from Blob (multiple DBs)...",
             command=self._open_restore_from_blob_bulk,
         )
+        tools_menu.add_command(
+            label="AgentOps — Run history...",
+            command=self._open_agent_ops_dashboard,
+        )
+        tools_menu.add_command(
+            label="Agent Workflow (backup → blob → restore)...",
+            command=self._open_agent_workflow,
+        )
+        tools_menu.add_command(label="Copy agent MCP URL", command=self._copy_mcp_url)
         tools_menu.add_separator()
         tools_menu.add_command(label="Legacy Data Validation...", command=self._open_legacy_data_window)
         tools_menu.add_command(label="Compare DB2 (Schema)...", command=self._open_compare_db2_window)
@@ -289,7 +301,7 @@ class MainWindow:
             command=self._open_identity_cdc_experiment,
         )
         tools_menu.add_separator()
-        tools_menu.add_command(label="Settings...", command=self._show_settings)
+        tools_menu.add_command(label="Organization setup...", command=self._show_settings)
         
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -316,8 +328,14 @@ class MainWindow:
             tab.browse_project()
         
     def _show_settings(self):
-        """Show settings dialog."""
-        messagebox.showinfo("Settings", "Settings dialog coming soon!")
+        """One-time organization setup wizard."""
+        try:
+            from gui.dialogs.organization_setup_wizard import open_organization_setup_wizard
+        except ImportError:
+            from azure_migration_tool.gui.dialogs.organization_setup_wizard import (
+                open_organization_setup_wizard,
+            )
+        open_organization_setup_wizard(self)
 
     def _open_legacy_data_window(self):
         """Open Legacy Data Validation in a separate window (Tools menu)."""
@@ -374,6 +392,48 @@ class MainWindow:
             "RestoreFromBlobBulkToolTab",
             "Restore from Blob (multiple databases)",
         )
+
+    def _open_agent_ops_dashboard(self):
+        """AgentOps run history dashboard (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.agent_ops_dashboard_tab",
+            "AgentOpsDashboardTab",
+            "AgentOps — Run history",
+        )
+
+    def _open_agent_workflow(self):
+        """Open headless worker job tester (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.agent_workflow_tool_tab",
+            "AgentWorkflowToolTab",
+            "Agent Workflow",
+        )
+
+    def _start_mcp_server_on_launch(self) -> None:
+        try:
+            from src.utils.mcp_autostart import start_mcp_background
+        except ImportError:
+            try:
+                from azure_migration_tool.src.utils.mcp_autostart import start_mcp_background
+            except ImportError:
+                return
+        url, err = start_mcp_background()
+        if url:
+            self._mcp_url = url
+            self.update_status(f"Agent MCP listening — {url}")
+
+    def _copy_mcp_url(self) -> None:
+        if not self._mcp_url:
+            messagebox.showinfo(
+                "Agent MCP",
+                "MCP is not running.\n\n"
+                "Install: pip install -r azure_migration_tool/requirements-mcp.txt\n"
+                "Or set AZURE_MIGRATION_TOOL_DISABLE_MCP=1 to turn off auto-start.",
+            )
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._mcp_url)
+        messagebox.showinfo("Agent MCP", f"Copied to clipboard:\n\n{self._mcp_url}")
 
     def _open_identity_cdc_experiment(self):
         """Open IDENTITY (CDC) in a separate window (Tools > Experiments POC)."""

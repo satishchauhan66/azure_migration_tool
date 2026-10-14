@@ -107,6 +107,10 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Personal / local worker job payloads (keep outside the repo)
+azure_migration_tool/examples/jobs/test_*.json
+azure_migration_tool/examples/jobs/*_local.json
+
 # =============================================================================
 # SENSITIVE / CREDENTIALS / CONFIG (never commit)
 # =============================================================================
