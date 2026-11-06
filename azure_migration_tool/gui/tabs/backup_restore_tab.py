@@ -13,10 +13,12 @@ import subprocess
 import sys
 import os
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 parent_dir = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(parent_dir))
+
+logger = logging.getLogger(__name__)
 
 from gui.widgets.connection_widget import ConnectionWidget
 from gui.utils.canvas_mousewheel import bind_canvas_vertical_scroll
@@ -24,8 +26,6 @@ try:
     from gui.widgets.searchable_picker import SearchablePicker
 except ImportError:
     from azure_migration_tool.gui.widgets.searchable_picker import SearchablePicker
-
-logger = logging.getLogger(__name__)
 
 
 def _compact_dialog_error(msg: str, max_len: int = 600) -> str:
@@ -42,6 +42,61 @@ def _compact_dialog_error(msg: str, max_len: int = 600) -> str:
     if len(m) <= max_len:
         return m
     return m[: max_len].rstrip() + "\n\n(Full message is in the Log panel.)"
+
+
+def _sql_server_database_state_if_exists(
+    *,
+    server: str,
+    database: str,
+    auth: str,
+    user: Optional[str],
+    password: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Return (state_desc, None) if ``database`` exists on ``server`` (query sys.databases).
+    Return (None, None) if it does not exist.
+    Return (None, error_message) on connection/query failure.
+    """
+    db = (database or "").strip()
+    if not db or not (server or "").strip():
+        return None, "Server and database name are required."
+
+    try:
+        from src.utils.database import connect_to_database, pick_sql_driver
+    except ImportError:
+        try:
+            from azure_migration_tool.src.utils.database import connect_to_database, pick_sql_driver
+        except ImportError:
+            return None, "Database module not available."
+
+    conn = None
+    try:
+        driver = pick_sql_driver(logger)
+        conn = connect_to_database(
+            server=(server or "").strip(),
+            db="master",
+            user=(user or "") if auth not in ("windows",) else "",
+            driver=driver,
+            auth=auth or "windows",
+            password=password,
+            timeout=60,
+            logger=logger,
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT state_desc FROM sys.databases WHERE name = ?", (db,))
+        row = cur.fetchone()
+        cur.close()
+        if row and row[0] is not None:
+            return str(row[0]).strip(), None
+        return None, None
+    except Exception as e:
+        return None, _compact_dialog_error(str(e))
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 _AUTH_ERROR_KEYWORDS = (
@@ -266,10 +321,12 @@ class BackupRestoreTab:
         self.blob_auth_mode_var = self.main_window.shared_blob_auth_mode
         self.blob_account_url_var = self.main_window.shared_blob_account_url
 
-        # backup-label -> real blob path (set in _list_restore_backups)
+        # backup-label -> real blob path (set when listing backups from blob)
         self._restore_label_to_path: dict = {}
         self._restore_db_names: Tuple[str, ...] = ()
         self._restore_backup_labels: Tuple[str, ...] = ()
+        self._restore_db_list_inflight: bool = False
+        self._restore_backup_list_inflight: bool = False
 
         # Masked blob connection entries (shared var; may be built twice — backup + restore panes)
         self._blob_conn_entry_widgets: list = []
@@ -3109,12 +3166,10 @@ class BackupRestoreTab:
             width_chars=48,
             get_choices=lambda: self._restore_db_names,
             textvariable=self.restore_db_filter_var,
+            on_before_open=self._on_restore_db_dropdown_open,
         )
         self.restore_db_filter_combo.pack(side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True)
         self.restore_db_filter_combo.bind("<<ComboboxSelected>>", self._on_restore_db_filter_selected)
-        ttk.Button(db_filter_row, text="List databases", command=self._list_restore_databases).pack(
-            side=tk.LEFT, padx=2
-        )
         tk.Label(step1, text="Backup file:").pack(anchor=tk.W, pady=(8, 0))
         list_frame = ttk.Frame(step1)
         list_frame.pack(fill=tk.X, pady=2)
@@ -3122,14 +3177,10 @@ class BackupRestoreTab:
             list_frame,
             width_chars=70,
             get_choices=lambda: self._restore_backup_labels,
+            on_before_open=self._on_restore_backup_dropdown_open,
         )
         self.restore_backups_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.restore_backups_listbox.bind("<<ComboboxSelected>>", self._on_restore_backup_selected)
-        btn_list_frame = ttk.Frame(step1)
-        btn_list_frame.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(btn_list_frame, text="List backups", command=self._list_restore_backups).pack(
-            side=tk.LEFT, padx=5
-        )
         self.restore_blob_path_var = tk.StringVar()
         tk.Label(step1, textvariable=self.restore_blob_path_var, fg="gray").pack(anchor=tk.W, pady=(2, 0))
 
@@ -3258,13 +3309,19 @@ class BackupRestoreTab:
     def _on_restore_db_filter_selected(self, event=None):
         """Sync target database to the selected backup database name."""
         db = (self.restore_db_filter_var.get() or "").strip()
-        if db and not db.startswith("(") and db != "Listing...":
+        if db and not db.startswith("(") and db not in ("Listing...", "(Loading…)"):
             self.restore_blob_db_var.set(db)
 
     def _on_restore_backup_selected(self, event=None):
         """Set blob path when user selects a backup from the list."""
         label = (self.restore_backups_listbox.get() or "").strip()
-        if not label or label.startswith("(") or label.startswith("Error:") or label == "Listing...":
+        if (
+            not label
+            or label.startswith("(")
+            or label.startswith("Error:")
+            or label == "Listing..."
+            or label == "(Loading…)"
+        ):
             return
         # Prefer the lookup map populated during listing; fall back to splitting the label.
         path_map = getattr(self, "_restore_label_to_path", {}) or {}
@@ -3273,8 +3330,25 @@ class BackupRestoreTab:
         if "/" in path:
             self.restore_blob_db_var.set(path.split("/", 1)[0])
 
-    def _list_restore_databases(self):
-        """Discover top-level folder names in container and populate combobox."""
+    def _on_restore_db_dropdown_open(self) -> Optional[bool]:
+        """Refresh database folder list from blob each time the user opens the dropdown."""
+        if self._restore_db_list_inflight:
+            return None
+        return self._list_restore_databases()
+
+    def _on_restore_backup_dropdown_open(self) -> Optional[bool]:
+        """Refresh backup .bak list when opening the dropdown (needs a database folder selected)."""
+        if self._restore_backup_list_inflight:
+            return None
+        return self._list_restore_backups()
+
+    def _list_restore_databases(self) -> Optional[bool]:
+        """Discover top-level folder names in container and populate combobox.
+
+        Returns:
+            None if listing started (or already in flight with current request).
+            False if validation failed — dropdown should stay closed.
+        """
         conn_str = (self.blob_conn_var.get() or "").strip()
         container = (self.blob_container_var.get() or "").strip()
         blob_auth_mode = self.blob_auth_mode_var.get()
@@ -3283,16 +3357,19 @@ class BackupRestoreTab:
             container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
         except Exception as e:
             messagebox.showerror("Error", _compact_dialog_error(str(e)))
-            return
+            return False
         if blob_auth_mode != "managed_identity" and not conn_str:
             messagebox.showerror("Error", "Enter blob connection string first (or switch to Managed Identity).")
-            return
+            return False
         if blob_auth_mode == "managed_identity" and not storage_account_url:
             messagebox.showerror("Error", "Enter storage account URL first.")
-            return
-        self.restore_db_filter_var.set("Listing...")
-        self._restore_db_names = ()
+            return False
+        if self._restore_db_list_inflight:
+            return None
+        self._restore_db_list_inflight = True
+        self._restore_db_names = ("(Loading…)",)
         self.restore_db_filter_combo.refresh_suggestions()
+        self.restore_db_filter_combo.refresh_open_popup()
 
         def run():
             try:
@@ -3316,28 +3393,37 @@ class BackupRestoreTab:
                 )
 
         threading.Thread(target=run, daemon=True).start()
+        return None
 
     def _populate_restore_databases_combo(self, names, error=None):
         """Update database filter picker (called on UI thread)."""
+        self._restore_db_list_inflight = False
         if error:
             self._restore_db_names = ()
             self.restore_db_filter_var.set("")
             self.restore_db_filter_combo.refresh_suggestions()
+            self.restore_db_filter_combo.refresh_open_popup()
             messagebox.showerror("List databases failed", _compact_dialog_error(str(error)))
             return
-        self._restore_db_names = tuple(names or [])
+        self._restore_db_names = tuple(names or ())
         if self._restore_db_names:
             # Leave empty so the dropdown shows every database until the user types/picks.
             self.restore_db_filter_var.set("")
         else:
-            self.restore_db_filter_var.set("(no folders found)")
+            self.restore_db_filter_var.set("")
+            self._restore_db_names = ("(no database folders in container)",)
         self.restore_db_filter_combo.refresh_suggestions()
+        self.restore_db_filter_combo.refresh_open_popup()
 
-    def _list_restore_backups(self):
+    def _list_restore_backups(self) -> Optional[bool]:
         """List .bak blobs under the chosen database folder only.
 
         Striped sets (`<db>_partNNofMM.bak`) are collapsed to a single entry
         showing any one stripe (the restore module discovers siblings).
+
+        Returns:
+            None — started load (dropdown may open).
+            False — validation failed; caller should not open the dropdown.
         """
         conn_str = (self.blob_conn_var.get() or "").strip()
         container = (self.blob_container_var.get() or "").strip()
@@ -3347,20 +3433,25 @@ class BackupRestoreTab:
             container = _resolve_container_for_gui(blob_auth_mode, container, storage_account_url)
         except Exception as e:
             messagebox.showerror("Error", _compact_dialog_error(str(e)))
-            return
-        db_name = (self.restore_db_filter_var.get() or "").strip()
+            return False
         if blob_auth_mode != "managed_identity" and not conn_str:
             messagebox.showerror("Error", "Enter blob connection string first.")
-            return
-        if not db_name or db_name.startswith("(") or db_name == "Listing...":
+            return False
+        db_name = (self.restore_db_filter_var.get() or "").strip()
+        if not db_name or db_name.startswith("(") or db_name == "Listing..." or db_name == "(Loading…)":
             messagebox.showerror(
                 "Error",
-                "Choose a database first: click 'List databases' and pick one (or type the backed-up DB name).",
+                "Choose a database folder first: open the Database dropdown, pick one, "
+                "or type the backed-up database name, then open Backup file.",
             )
-            return
-        self._restore_backup_labels = ()
-        self.restore_backups_listbox.set("Listing...")
+            return False
+        if self._restore_backup_list_inflight:
+            return None
+        self._restore_backup_list_inflight = True
+        self._restore_backup_labels = ("(Loading…)",)
+        self.restore_backups_listbox.set("")
         self.restore_backups_listbox.refresh_suggestions()
+        self.restore_backups_listbox.refresh_open_popup()
         db_name = db_name.strip().rstrip("/")
 
         def run():
@@ -3386,28 +3477,37 @@ class BackupRestoreTab:
                 )
 
         threading.Thread(target=run, daemon=True).start()
+        return None
 
     def _populate_restore_backups_list(self, names, error=None):
         """Update backup picker (called on UI thread)."""
+        self._restore_backup_list_inflight = False
         if error:
             self._restore_backup_labels = ()
             self.restore_backups_listbox.set(f"Error: {_compact_dialog_error(str(error))}")
             self.restore_backups_listbox.refresh_suggestions()
+            self.restore_backups_listbox.refresh_open_popup()
             return
         if not names:
             self._restore_backup_labels = ()
             self.restore_backups_listbox.set("(no .bak files found)")
             self.restore_backups_listbox.refresh_suggestions()
+            self.restore_backups_listbox.refresh_open_popup()
             return
         self._restore_backup_labels = tuple(names)
         self.restore_backups_listbox.set("")
         self.restore_backups_listbox.refresh_suggestions()
+        self.restore_backups_listbox.refresh_open_popup()
 
     def _collect_restore_blob_tab_inputs(self, require_database: bool) -> Optional[dict]:
         """Validate Restore-from-blob tab fields; return dict or None after messagebox."""
         blob_path = (self.restore_blob_path_var.get() or "").strip()
         if not blob_path or blob_path.startswith("(") or blob_path.startswith("Error"):
-            messagebox.showerror("Error", "Select a backup from the list (click 'List backups' then select a .bak).")
+            messagebox.showerror(
+                "Error",
+                "Select a backup: open the Backup file dropdown and pick a .bak "
+                "(the list refreshes each time you open it).",
+            )
             return None
         conn_str = (self.blob_conn_var.get() or "").strip()
         container = (self.blob_container_var.get() or "").strip()
@@ -4117,6 +4217,172 @@ class BackupRestoreTab:
             return bool(mi_var.get())
         return _is_azure_sql_managed_instance_host(server)
 
+    def _prompt_typed_replace_existing_db_for_restore(
+        self,
+        *,
+        parent: tk.Misc,
+        server: str,
+        rows: List[Tuple[str, str]],
+    ) -> bool:
+        """
+        If target database(s) already exist, require explicit confirmation.
+        ``rows`` = list of (database_name, state_desc) — user must type name(s) to proceed.
+        Returns True to continue restore (replace), False to cancel.
+        """
+        if not rows:
+            return True
+        root = parent.winfo_toplevel()
+        dlg = tk.Toplevel(root)
+        dlg.title("Database already exists")
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.resizable(True, True)
+
+        names = [n for n, _ in rows]
+        lines = "\n".join(f"  • [{n}] — current state: {st or 'UNKNOWN'}" for n, st in rows)
+        intro = (
+            "The existing database(s) will be **dropped** on the SQL Server, then RESTORE FROM URL will recreate them.\n"
+            f"Server: {server}\n\n"
+            "Existing target database(s):\n"
+            f"{lines}\n\n"
+            "All data in those databases will be removed before restore.\n\n"
+        )
+        tk.Label(dlg, text=intro, justify=tk.LEFT, wraplength=520).pack(anchor=tk.W, padx=14, pady=(12, 8))
+
+        confirm_var = tk.StringVar()
+        if len(rows) == 1:
+            db0 = names[0]
+            tk.Label(
+                dlg,
+                text=f'Type the database name exactly to confirm replace: "{db0}"',
+                font=("Segoe UI", 9, "bold"),
+            ).pack(anchor=tk.W, padx=14, pady=(0, 4))
+            ent = ttk.Entry(dlg, textvariable=confirm_var, width=56)
+            ent.pack(fill=tk.X, padx=14, pady=(0, 8))
+            ent.focus_set()
+        else:
+            tk.Label(
+                dlg,
+                text="Type each database name on its own line (same names as above, any order):",
+                font=("Segoe UI", 9, "bold"),
+            ).pack(anchor=tk.W, padx=14, pady=(0, 4))
+            txt = scrolledtext.ScrolledText(dlg, height=8, width=64, wrap=tk.WORD)
+            txt.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 8))
+            txt.focus_set()
+
+        btn_row = ttk.Frame(dlg, padding=(14, 0, 14, 12))
+        btn_row.pack(fill=tk.X)
+
+        result = {"ok": False}
+
+        def _cancel() -> None:
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        def _confirm() -> None:
+            if len(rows) == 1:
+                typed = (confirm_var.get() or "").strip()
+                if typed != names[0]:
+                    messagebox.showerror(
+                        "Confirmation failed",
+                        f'The name you typed does not match "{names[0]}".\n\nRestore cancelled.',
+                        parent=dlg,
+                    )
+                    return
+            else:
+                raw = txt.get("1.0", tk.END)
+                got = {line.strip() for line in raw.splitlines() if line.strip()}
+                want = set(names)
+                if got != want:
+                    missing = want - got
+                    extra = got - want
+                    parts = ["Restore cancelled — database names did not match."]
+                    if missing:
+                        parts.append("Missing: " + ", ".join(sorted(missing)))
+                    if extra:
+                        parts.append("Unexpected: " + ", ".join(sorted(extra)))
+                    messagebox.showerror("Confirmation failed", "\n".join(parts), parent=dlg)
+                    return
+            result["ok"] = True
+            _cancel()
+
+        ttk.Button(btn_row, text="Cancel", command=_cancel, width=12).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btn_row, text="Replace and restore", command=_confirm, width=20).pack(side=tk.RIGHT)
+
+        dlg.protocol("WM_DELETE_WINDOW", _cancel)
+        dlg.update_idletasks()
+        try:
+            px = root.winfo_rootx() + max(0, (root.winfo_width() - dlg.winfo_reqwidth()) // 2)
+            py = root.winfo_rooty() + max(0, (root.winfo_height() - dlg.winfo_reqheight()) // 3)
+            dlg.geometry(f"+{px}+{py}")
+        except Exception:
+            pass
+
+        if len(rows) == 1:
+            ent.bind("<Return>", lambda _e: _confirm())
+        else:
+            txt.bind("<Control-Return>", lambda _e: _confirm())
+
+        dlg.wait_window()
+        return bool(result["ok"])
+
+    def _confirm_blob_restore_if_target_databases_exist(
+        self,
+        *,
+        server: str,
+        auth: str,
+        user: Optional[str],
+        password: Optional[str],
+        database_names: List[str],
+    ) -> Tuple[bool, List[str]]:
+        """
+        Query ``sys.databases`` for each name. If any exist, prompt for typed confirmation.
+
+        Returns:
+            (False, []) — user cancelled or existence check failed.
+            (True, []) — proceed; none of the targets existed (no DROP needed).
+            (True, [names]) — user confirmed replace; ``run_restore_from_blob`` should DROP these first.
+        """
+        names_in = [(n or "").strip() for n in database_names if (n or "").strip()]
+        if not names_in:
+            return True, []
+
+        existing: List[Tuple[str, str]] = []
+        for db in names_in:
+            st, err = _sql_server_database_state_if_exists(
+                server=server,
+                database=db,
+                auth=auth,
+                user=user,
+                password=password,
+            )
+            if err is not None:
+                messagebox.showerror(
+                    "Cannot verify target database",
+                    "Could not check whether the target database already exists:\n\n"
+                    + err
+                    + "\n\nFix the connection or cancel the restore.",
+                )
+                return False, []
+            if st is not None:
+                existing.append((db, st))
+
+        if not existing:
+            return True, []
+
+        parent = getattr(self, "frame", None) or self.main_window.root
+        ok = self._prompt_typed_replace_existing_db_for_restore(
+            parent=parent,
+            server=server,
+            rows=existing,
+        )
+        if not ok:
+            return False, []
+        return True, [n for n, _ in existing]
+
     def _append_restore_log(self, msg: str) -> None:
         log_widget = getattr(self, "restore_from_blob_log", None) or getattr(
             self, "local_backup_log", None
@@ -4306,6 +4572,24 @@ class BackupRestoreTab:
             return
 
         server = (self.main_window.shared_dest_server.get() or "").strip()
+        ordered_unique_dbs: List[str] = []
+        seen: Set[str] = set()
+        for j in normalized:
+            dn = j["database"]
+            if dn not in seen:
+                seen.add(dn)
+                ordered_unique_dbs.append(dn)
+        ok_confirm, confirmed_drop_names = self._confirm_blob_restore_if_target_databases_exist(
+            server=server,
+            auth=self.main_window.shared_dest_auth.get() or "windows",
+            user=(self.main_window.shared_dest_user.get() or "").strip() or None,
+            password=self.main_window.shared_dest_password.get() or None,
+            database_names=ordered_unique_dbs,
+        )
+        if not ok_confirm:
+            return
+        confirmed_drop_set = set(confirmed_drop_names)
+
         target_mi = self._restore_blob_managed_instance_for_server(server)
         self._restore_blob_stop_event.clear()
         self._set_restore_operation_busy(True)
@@ -4340,7 +4624,7 @@ class BackupRestoreTab:
 
                 self.frame.after(0, _set_restore_progress)
                 summary = self._run_with_auto_reauth(
-                    lambda db=database, bp=blob_path: run_restore_from_blob(
+                    lambda db=database, bp=blob_path, cds=confirmed_drop_set: run_restore_from_blob(
                         server=server,
                         database=db,
                         auth=self.main_window.shared_dest_auth.get() or "windows",
@@ -4354,6 +4638,7 @@ class BackupRestoreTab:
                         blob_auth_mode=storage["blob_auth_mode"],
                         storage_account_url=storage["storage_account_url"],
                         cancel_event=self._restore_blob_stop_event,
+                        drop_existing_confirmed=(db in cds),
                     ),
                     auth=self.main_window.shared_dest_auth.get() or "windows",
                     user=self.main_window.shared_dest_user.get() or "",
@@ -4432,6 +4717,17 @@ class BackupRestoreTab:
         p = self._collect_restore_blob_tab_inputs(require_database=True)
         if not p:
             return
+
+        ok_confirm, confirmed_drop_names = self._confirm_blob_restore_if_target_databases_exist(
+            server=p["server"],
+            auth=self.restore_blob_auth_var.get() or "windows",
+            user=(self.restore_blob_user_var.get() or "").strip() or None,
+            password=self.restore_blob_password_var.get() or None,
+            database_names=[p["database"]],
+        )
+        if not ok_confirm:
+            return
+        drop_existing_confirmed = (p["database"] in set(confirmed_drop_names))
 
         if p["blob_auth_mode"] == "managed_identity" and _is_azure_sql_managed_instance_host(p["server"]):
             if not messagebox.askyesno(
@@ -4556,6 +4852,7 @@ class BackupRestoreTab:
                         cancel_event=self._restore_blob_stop_event,
                         on_connect=_store_conn,
                         on_restore_spid=on_restore_spid,
+                        drop_existing_confirmed=drop_existing_confirmed,
                     ),
                     auth=self.restore_blob_auth_var.get() or "windows",
                     user=self.restore_blob_user_var.get() or "",

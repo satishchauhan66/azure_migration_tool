@@ -164,6 +164,24 @@ class _CachingTokenCredential:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._info_entries.clear()
+
+
+def clear_shared_azure_credential() -> None:
+    """Drop the process-wide credential and in-memory token cache (after logout / MFA refresh)."""
+    global _credential
+    with _lock:
+        cred = _credential
+        _credential = None
+    if cred is None:
+        return
+    inner = getattr(cred, "_inner", cred)
+    if hasattr(inner, "clear_cache"):
+        inner.clear_cache()
+
 
 def _build_interactive_browser_credential() -> Any:
     from azure.identity import InteractiveBrowserCredential

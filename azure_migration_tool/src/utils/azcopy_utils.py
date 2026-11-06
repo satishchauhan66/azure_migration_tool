@@ -336,6 +336,7 @@ def run_az_login(
     use_device_code: bool = False,
     on_device_code: Optional[Callable[[str], None]] = None,
     force: bool = False,
+    tenant: str = "",
 ) -> bool:
     """
     Run ``az login``. Returns True when an account is available afterward.
@@ -352,15 +353,20 @@ def run_az_login(
         return False
 
     before = get_azure_cli_account()
+    tenant_id = (tenant or before.get("tenant") or "").strip()
     if before.get("logged_in") and not force:
         _log(f"Already signed in: {before.get('user')}")
         return True
 
     _log("Starting Azure sign-in (az login)...")
+    login_args: List[str] = ["login"]
+    if tenant_id:
+        login_args.extend(["--tenant", tenant_id])
+    login_args.extend(["--scope", "https://management.azure.com/.default"])
     try:
         if use_device_code:
             rc, stdout, stderr = _run_cmd(
-                _az_cli_command("login", "--use-device-code"),
+                _az_cli_command(*login_args, "--use-device-code"),
                 timeout=600,
             )
             for line in (stdout + "\n" + stderr).splitlines():
@@ -377,7 +383,7 @@ def run_az_login(
             _log("Opening a console window for az login (complete sign-in in the browser)...")
             flags = subprocess.CREATE_NEW_CONSOLE if sys.platform.startswith("win") else 0
             proc = subprocess.Popen(
-                _az_cli_command("login"),
+                _az_cli_command(*login_args),
                 creationflags=flags,
             )
             proc.wait(timeout=600)
@@ -404,12 +410,14 @@ def run_az_relogin(
 ) -> bool:
     """Sign out of Azure CLI, then run interactive ``az login`` (for MFA / token refresh)."""
     _log = log or (lambda _m: None)
+    tenant = (get_azure_cli_account().get("tenant") or "").strip()
     run_az_logout(_log)
     return run_az_login(
         _log,
         use_device_code=use_device_code,
         on_device_code=on_device_code,
         force=True,
+        tenant=tenant,
     )
 
 

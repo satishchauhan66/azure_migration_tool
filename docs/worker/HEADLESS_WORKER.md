@@ -1,5 +1,7 @@
 # Headless worker (CLI + MCP)
 
+For **why** the current design reduces migration wall-clock time (phased batch vs per-DB pipeline, diagrams), see [MIGRATION_TIME_IMPROVEMENTS.md](../MIGRATION_TIME_IMPROVEMENTS.md).
+
 Run the **Local Backup (multiple databases)** flow without the GUI:
 
 1. **Backup** selected databases to disk  

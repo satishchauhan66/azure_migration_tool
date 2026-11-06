@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Any, Callable, Optional, Sequence, Tuple
 
 # Keys where we should not re-filter the suggestion list (navigation / modifiers).
 TYPEAHEAD_SKIP_KEYSYMS = frozenset(
@@ -133,12 +133,14 @@ class SearchablePicker(ttk.Frame):
         width_chars: int = 40,
         get_choices: Callable[[], Tuple[str, ...]],
         textvariable: Optional[tk.StringVar] = None,
+        on_before_open: Optional[Callable[[], Any]] = None,
         **kwargs,
     ) -> None:
         super().__init__(parent, **kwargs)
         self._get_choices = get_choices
         self._hide_after_id: Optional[str] = None
         self._textvariable = textvariable
+        self._on_before_open = on_before_open
 
         self._row = ttk.Frame(self)
         self._row.pack(fill=tk.X, expand=True)
@@ -209,6 +211,14 @@ class SearchablePicker(ttk.Frame):
         """Sync listbox from data after async load; do not open the popup."""
         self._apply_filter_and_popup(show_popup=False)
 
+    def refresh_open_popup(self) -> None:
+        """If the dropdown is open, redraw it from ``get_choices`` (e.g. after async load)."""
+        try:
+            if self._popup.winfo_viewable():
+                self._apply_filter_and_popup(show_popup=True, force_all=True)
+        except tk.TclError:
+            pass
+
     def restore_full_suggestions(self) -> None:
         """Re-sync filtered list for current entry text without opening the popup."""
         self._apply_filter_and_popup(show_popup=False)
@@ -237,7 +247,11 @@ class SearchablePicker(ttk.Frame):
 
     def _maybe_hide_popup(self) -> None:
         self._hide_after_id = None
-        fw = self.focus_get()
+        # focus_get() can raise KeyError (e.g. focus on another widget's Tcl-only child like TCombobox popdown).
+        try:
+            fw = self.focus_get()
+        except (KeyError, tk.TclError):
+            fw = None
         if fw in (self.entry, self._lb, self._btn_drop):
             return
         if fw is not None:
@@ -268,9 +282,18 @@ class SearchablePicker(ttk.Frame):
         self._lb.delete(0, tk.END)
         for v in filt:
             self._lb.insert(tk.END, v)
-        if filt and show_popup:
-            self._show_popup()
-        else:
+        try:
+            popup_was_open = bool(self._popup.winfo_viewable())
+        except tk.TclError:
+            popup_was_open = False
+        # Opening from arrow / typing uses show_popup=True. Async refresh uses show_popup=False
+        # but must NOT hide an already-open list — that was closing the dropdown after "Loading…".
+        if filt:
+            if show_popup or popup_was_open:
+                self._show_popup()
+        elif show_popup:
+            self.hide_popup()
+        elif popup_was_open:
             self.hide_popup()
 
     def _on_dropdown_click(self) -> None:
@@ -283,6 +306,13 @@ class SearchablePicker(ttk.Frame):
                 return
         except tk.TclError:
             pass
+        if self._on_before_open is not None:
+            try:
+                pre = self._on_before_open()
+            except Exception:
+                pre = None
+            if pre is False:
+                return
         # Arrow always shows the full list; typing filters, an auto-selected value does not.
         self._apply_filter_and_popup(show_popup=True, force_all=True)
         try:

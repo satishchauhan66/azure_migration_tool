@@ -80,28 +80,15 @@ def azure_browse_dependency_error() -> Optional[str]:
     )
 
 
-_CACHED_CREDENTIAL: Optional[Any] = None
-_CACHED_USER_INFO: Optional[str] = None
-
-
 def _get_or_create_credential() -> Tuple[Any, str]:
-    """Get cached credential or create a new one."""
-    global _CACHED_CREDENTIAL, _CACHED_USER_INFO
+    """Shared app credential (Azure CLI → PowerShell → browser) for ARM listing."""
+    try:
+        from utils.azure_shared_credential import get_shared_azure_credential
+    except ImportError:
+        from azure_migration_tool.utils.azure_shared_credential import get_shared_azure_credential
 
-    if _CACHED_CREDENTIAL is not None and _CACHED_USER_INFO is not None:
-        return (_CACHED_CREDENTIAL, _CACHED_USER_INFO)
-
-    from azure.identity import DefaultAzureCredential
-
-    credential = DefaultAzureCredential(
-        exclude_managed_identity_credential=True,
-        exclude_interactive_browser_credential=False,
-    )
-
+    credential = get_shared_azure_credential()
     user_info = _extract_user_info(credential)
-    _CACHED_CREDENTIAL = credential
-    _CACHED_USER_INFO = user_info
-
     return (credential, user_info)
 
 
@@ -122,9 +109,12 @@ def _extract_user_info(credential: Any) -> str:
 
 def clear_azure_credential_cache() -> None:
     """Clear cached Azure credential to force re-authentication next time."""
-    global _CACHED_CREDENTIAL, _CACHED_USER_INFO
-    _CACHED_CREDENTIAL = None
-    _CACHED_USER_INFO = None
+    try:
+        from gui.utils.azure_arm_auth import clear_all_azure_auth_caches
+    except ImportError:
+        from azure_migration_tool.gui.utils.azure_arm_auth import clear_all_azure_auth_caches
+
+    clear_all_azure_auth_caches()
 
 
 class AzureBlobBrowser(tk.Toplevel):
@@ -168,9 +158,16 @@ class AzureBlobBrowser(tk.Toplevel):
             side=tk.LEFT, fill=tk.X, expand=True
         )
         self._auth_toggle_btn = ttk.Button(
-            auth_row, text="Sign in", width=12, command=self._on_auth_toggle_clicked
+            auth_row, text="Sign in", width=14, command=self._on_auth_toggle_clicked
         )
         self._auth_toggle_btn.pack(side=tk.RIGHT, padx=(4, 0))
+        self._auth_menu = tk.Menu(self._auth_toggle_btn, tearoff=0)
+        self._auth_menu.add_command(
+            label="Load subscriptions from Azure",
+            command=self._kick_off_login,
+        )
+        self._auth_menu.add_command(label="Refresh sign-in", command=self._on_refresh_sign_in_clicked)
+        self._auth_toggle_btn.bind("<Button-3>", self._on_auth_button_right_click)
         self._auth_busy = False
 
         row = ttk.Frame(self)
@@ -271,11 +268,22 @@ class AzureBlobBrowser(tk.Toplevel):
     def _update_auth_toggle_button(self) -> None:
         if self._auth_busy:
             return
-        text = "Sign out" if self._azure_cli_logged_in() else "Sign in"
         try:
-            self._auth_toggle_btn.configure(text=text)
+            from gui.utils.azure_arm_auth import azure_subscriptions_button_label
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import azure_subscriptions_button_label
+        try:
+            self._auth_toggle_btn.configure(text=azure_subscriptions_button_label())
         except tk.TclError:
             pass
+
+    def _on_auth_button_right_click(self, event: tk.Event) -> None:
+        if self._auth_busy:
+            return
+        try:
+            self._auth_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._auth_menu.grab_release()
 
     def _set_auth_toggle_enabled(self, enabled: bool) -> None:
         try:
@@ -345,6 +353,42 @@ class AzureBlobBrowser(tk.Toplevel):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _on_refresh_sign_in_clicked(self) -> None:
+        if self._auth_busy:
+            return
+        self._auth_busy = True
+        self._set_auth_toggle_enabled(False)
+        self.signed_in_var.set("Refreshing sign-in...")
+        self._set_status("Complete MFA in the browser if prompted.")
+
+        def run() -> None:
+            try:
+                try:
+                    from gui.utils.azure_arm_auth import refresh_azure_sign_in
+                except ImportError:
+                    from azure_migration_tool.gui.utils.azure_arm_auth import refresh_azure_sign_in
+                self._credential = None
+                ok = refresh_azure_sign_in(lambda m: self.after(0, lambda msg=m: self._set_status(msg[:200])))
+            except Exception as exc:
+                ok = False
+                err = str(exc)
+            else:
+                err = ""
+
+            def after_refresh() -> None:
+                self._auth_busy = False
+                self._set_auth_toggle_enabled(True)
+                self._update_auth_toggle_button()
+                if not ok:
+                    self.signed_in_var.set("Refresh failed")
+                    self._set_status(err[:400] if err else "Sign-in refresh did not complete.")
+                    return
+                self._kick_off_login()
+
+            self.after(0, after_refresh)
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _on_sign_in_clicked(self) -> None:
         if self._auth_busy:
             return
@@ -392,7 +436,10 @@ class AzureBlobBrowser(tk.Toplevel):
             self.after(0, lambda m=err: self._fatal_missing_deps(m))
             return
         try:
-            self._credential, user = _get_or_create_credential()
+            try:
+                from gui.utils.azure_arm_auth import ensure_arm_credential
+            except ImportError:
+                from azure_migration_tool.gui.utils.azure_arm_auth import ensure_arm_credential
             from azure.mgmt.subscription import SubscriptionClient
         except ImportError as e:
             self.after(
@@ -403,7 +450,16 @@ class AzureBlobBrowser(tk.Toplevel):
                 ),
             )
             return
+
+        def log_status(msg: str) -> None:
+            self.after(0, lambda m=msg: self._set_status(m[:200]))
+
         try:
+            self._credential, arm_err = ensure_arm_credential(log_status)
+            if arm_err or self._credential is None:
+                self.after(0, lambda msg=arm_err or "Sign-in failed": self._on_list_subscriptions_failed(msg))
+                return
+            user = _extract_user_info(self._credential)
             client = SubscriptionClient(self._credential)
             subs = list(client.subscriptions.list())
             self._subs = [
@@ -412,6 +468,9 @@ class AzureBlobBrowser(tk.Toplevel):
             self.after(0, lambda: self._populate_subs(user))
         except Exception as e:
             self.after(0, lambda msg=str(e): self._on_list_subscriptions_failed(msg))
+        finally:
+            self.after(0, lambda: self._set_auth_toggle_enabled(True))
+            self.after(0, self._update_auth_toggle_button)
 
     def _fatal_missing_deps(self, msg: str) -> None:
         self.signed_in_var.set("Missing dependencies")
@@ -424,17 +483,24 @@ class AzureBlobBrowser(tk.Toplevel):
         clear_azure_credential_cache()
         self._credential = None
         self.signed_in_var.set("Could not load subscriptions")
-        self._set_status("Click Sign out, then Sign in to refresh your session.")
         self._set_auth_toggle_enabled(True)
         self._update_auth_toggle_button()
-        short = (msg or "").strip()
-        if len(short) > 600:
-            short = short[:600] + "..."
-        messagebox.showerror(
-            "Browse Azure",
-            f"Could not list subscriptions:\n\n{short}\n\n"
-            "Click Sign out, then Sign in to refresh your Azure session.",
-        )
+        try:
+            from gui.utils.azure_arm_auth import azure_auth_error_needs_refresh, format_user_azure_error
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import (
+                azure_auth_error_needs_refresh,
+                format_user_azure_error,
+            )
+        if azure_auth_error_needs_refresh(msg):
+            self._set_status("Session expired — use Refresh sign-in.")
+            if messagebox.askyesno(
+                "Browse Azure",
+                format_user_azure_error(msg) + "\n\nRefresh sign-in now?",
+            ):
+                self._on_refresh_sign_in_clicked()
+                return
+        messagebox.showerror("Browse Azure", format_user_azure_error(msg))
 
     def _populate_subs(self, user: str) -> None:
         self._set_auth_toggle_enabled(True)

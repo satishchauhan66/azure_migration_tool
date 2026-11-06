@@ -152,10 +152,18 @@ class MiPitrRestoreTab:
         top_btn.pack(fill=tk.X, padx=10, pady=(8, 4))
         self.btn_load_subs = ttk.Button(
             top_btn,
-            text="Load subscriptions from Azure",
-            command=self._on_load_subscriptions,
+            text="Sign in to Azure",
+            command=self._on_azure_primary_button,
         )
         self.btn_load_subs.pack(side=tk.LEFT)
+        self._azure_subs_menu = tk.Menu(self.btn_load_subs, tearoff=0)
+        self._azure_subs_menu.add_command(
+            label="Load subscriptions from Azure",
+            command=self._fetch_and_load_subscriptions,
+        )
+        self._azure_subs_menu.add_command(label="Refresh sign-in", command=self._azure_refresh_sign_in)
+        self.btn_load_subs.bind("<Button-3>", self._on_azure_subs_right_click)
+        self.frame.after(0, self._update_azure_subs_button_label)
 
         src = ttk.LabelFrame(scrollable, text="Source (database to copy from)", padding=10)
         src.pack(fill=tk.X, padx=10, pady=8)
@@ -170,11 +178,24 @@ class MiPitrRestoreTab:
             width_chars=78,
             get_choices=lambda: tuple(_mi_instance_label(m) for m in self._src_mis),
         )
-        self.src_db_cb = _ArmPicker(src, width_chars=78, get_choices=lambda: tuple(self._src_dbs))
+        self.src_db_cb = _ArmPicker(
+            src,
+            width_chars=78,
+            get_choices=lambda: tuple(self._filtered_src_dbs()),
+        )
+        self.src_db_filter_var = tk.StringVar()
+        self.src_db_count_var = tk.StringVar(value="")
         self._grid_combo_row(src, 0, "Subscription", self.src_sub_cb)
         self._grid_combo_row(src, 1, "Resource group", self.src_rg_cb)
         self._grid_combo_row(src, 2, "Managed instance", self.src_mi_cb)
-        self._grid_combo_row(src, 3, "Database", self.src_db_cb)
+        ttk.Label(src, text="Filter databases:").grid(row=3, column=0, sticky=tk.W, padx=4, pady=3)
+        db_filter_row = ttk.Frame(src)
+        db_filter_row.grid(row=3, column=1, sticky=tk.EW, padx=4, pady=3)
+        db_filter_entry = ttk.Entry(db_filter_row, textvariable=self.src_db_filter_var, width=72)
+        db_filter_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(db_filter_row, textvariable=self.src_db_count_var).pack(side=tk.LEFT, padx=(8, 0))
+        self.src_db_filter_var.trace_add("write", lambda *_: self._on_src_db_filter_changed())
+        self._grid_combo_row(src, 4, "Database", self.src_db_cb)
         src.columnconfigure(1, weight=1)
         self.src_sub_cb.bind("<<ComboboxSelected>>", lambda e: self._on_src_sub_changed())
         self.src_rg_cb.bind("<<ComboboxSelected>>", lambda e: self._on_src_rg_changed())
@@ -281,6 +302,8 @@ class MiPitrRestoreTab:
         self.src_mi_cb.set("")
         self.src_mi_cb.refresh_suggestions()
         self._src_dbs = []
+        self.src_db_filter_var.set("")
+        self.src_db_count_var.set("")
         self.src_db_cb.set("")
         self.src_db_cb.refresh_suggestions()
 
@@ -298,44 +321,163 @@ class MiPitrRestoreTab:
             return None
         return self._subscriptions[idx]["subscription_id"]
 
-    def _on_load_subscriptions(self) -> None:
+    def _filtered_src_dbs(self) -> List[str]:
+        q = (self.src_db_filter_var.get() or "").strip().lower()
+        if not q:
+            return list(self._src_dbs)
+        return [d for d in self._src_dbs if q in d.lower()]
+
+    def _update_src_db_count_label(self) -> None:
+        total = len(self._src_dbs)
+        visible = len(self._filtered_src_dbs())
+        if (self.src_db_filter_var.get() or "").strip():
+            self.src_db_count_var.set(f"Showing {visible} of {total}")
+        elif total:
+            self.src_db_count_var.set(f"{total} database(s)")
+        else:
+            self.src_db_count_var.set("")
+
+    def _on_src_db_filter_changed(self) -> None:
+        self.src_db_cb.refresh_suggestions()
+        self._update_src_db_count_label()
+
+    def _update_azure_subs_button_label(self) -> None:
+        try:
+            from gui.utils.azure_arm_auth import azure_subscriptions_button_label
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import azure_subscriptions_button_label
+        try:
+            self.btn_load_subs.configure(text=azure_subscriptions_button_label())
+        except tk.TclError:
+            pass
+
+    def _on_azure_subs_right_click(self, event: tk.Event) -> None:
         if self._busy:
             return
-        if get_shared_azure_credential is None:
-            messagebox.showerror("Error", "azure-identity / utils.azure_shared_credential not available.")
+        try:
+            self._azure_subs_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._azure_subs_menu.grab_release()
+
+    def _azure_refresh_sign_in(self) -> None:
+        if self._busy:
             return
 
-        def run():
+        def run() -> None:
             self.frame.after(0, lambda: self._set_busy(True))
-            self.frame.after(0, lambda: self._log("Loading subscriptions…"))
+            self.frame.after(0, lambda: self._log("Refreshing Azure sign-in…"))
             try:
-                cred = get_shared_azure_credential(lambda m: self.frame.after(0, lambda p=m: self._log(p)))
-                rows, err = list_subscriptions(cred)
+                try:
+                    from gui.utils.azure_arm_auth import refresh_azure_sign_in
+                except ImportError:
+                    from azure_migration_tool.gui.utils.azure_arm_auth import refresh_azure_sign_in
+                ok = refresh_azure_sign_in(
+                    lambda m: self.frame.after(0, lambda p=m: self._log(p)),
+                )
+            except Exception as ex:
+                ok = False
+                self.frame.after(0, lambda: self._log(f"[X] {ex}"))
+
+            def done() -> None:
+                self._set_busy(False)
+                self._update_azure_subs_button_label()
+                if ok:
+                    self._log("[OK] Sign-in refreshed. Right-click → Load subscriptions if needed.")
+
+            self.frame.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_azure_primary_button(self) -> None:
+        try:
+            from gui.utils.azure_arm_auth import azure_cli_logged_in
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import azure_cli_logged_in
+        if azure_cli_logged_in():
+            self._azure_sign_out()
+        else:
+            self._fetch_and_load_subscriptions()
+
+    def _fetch_and_load_subscriptions(self) -> None:
+        if self._busy:
+            return
+
+        def run() -> None:
+            self.frame.after(0, lambda: self._set_busy(True))
+            self.frame.after(0, lambda: self._log("Connecting to Azure and loading subscriptions…"))
+            try:
+                try:
+                    from gui.utils.azure_arm_auth import fetch_arm_subscriptions
+                except ImportError:
+                    from azure_migration_tool.gui.utils.azure_arm_auth import fetch_arm_subscriptions
+
+                rows, err = fetch_arm_subscriptions(
+                    lambda m: self.frame.after(0, lambda p=m: self._log(p)),
+                )
                 if err:
-                    self.frame.after(0, lambda: self._log(f"[X] {err}"))
-                    self.frame.after(0, lambda: messagebox.showerror("Azure", err))
+                    self.frame.after(0, lambda e=err: self._on_subscription_load_error(e))
                     return
                 if not rows:
                     self.frame.after(0, lambda: self._log("[X] No subscriptions returned."))
-                    self.frame.after(0, lambda: messagebox.showwarning("Azure", "No subscriptions found for this account."))
+                    self.frame.after(0, lambda: messagebox.showwarning("Azure", "No subscriptions found."))
                     return
-
-                def apply():
-                    self._subscriptions = rows
-                    self.src_sub_cb.refresh_suggestions()
-                    self.tgt_sub_cb.refresh_suggestions()
-                    self._clear_src_downstream()
-                    self._clear_tgt_downstream()
-                    self.src_sub_cb.set("")
-                    self.tgt_sub_cb.set("")
-                    self._log(f"[OK] Loaded {len(rows)} subscription(s). Pick subscription, then resource group.")
-
-                self.frame.after(0, apply)
+                self.frame.after(0, lambda r=rows: self._apply_loaded_subscriptions(r))
             except Exception as ex:
-                self.frame.after(0, lambda: self._log(f"[X] {ex}"))
-                self.frame.after(0, lambda: messagebox.showerror("Error", str(ex)))
+                self.frame.after(0, lambda e=str(ex): self._on_subscription_load_error(e))
             finally:
                 self.frame.after(0, lambda: self._set_busy(False))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _apply_loaded_subscriptions(self, rows: List[Dict[str, str]]) -> None:
+        self._subscriptions = rows
+        self.src_sub_cb.refresh_suggestions()
+        self.tgt_sub_cb.refresh_suggestions()
+        self._clear_src_downstream()
+        self._clear_tgt_downstream()
+        self.src_sub_cb.set("")
+        self.tgt_sub_cb.set("")
+        self._log(f"[OK] Loaded {len(rows)} subscription(s). Pick subscription, then resource group.")
+        self._update_azure_subs_button_label()
+
+    def _on_subscription_load_error(self, err: str) -> None:
+        self._log(f"[X] {err}")
+        try:
+            from gui.utils.azure_arm_auth import format_user_azure_error
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import format_user_azure_error
+        messagebox.showerror("Azure", format_user_azure_error(err))
+        self._update_azure_subs_button_label()
+
+    def _azure_sign_out(self) -> None:
+        if self._busy:
+            return
+
+        def run() -> None:
+            self.frame.after(0, lambda: self._set_busy(True))
+            self.frame.after(0, lambda: self._log("Signing out of Azure CLI…"))
+            try:
+                try:
+                    from gui.utils.azure_arm_auth import sign_out_azure
+                except ImportError:
+                    from azure_migration_tool.gui.utils.azure_arm_auth import sign_out_azure
+                ok = sign_out_azure(lambda m: self.frame.after(0, lambda p=m: self._log(p)))
+            except Exception as ex:
+                ok = False
+                self.frame.after(0, lambda: self._log(f"[X] {ex}"))
+
+            def done() -> None:
+                self._subscriptions = []
+                self.src_sub_cb.refresh_suggestions()
+                self.tgt_sub_cb.refresh_suggestions()
+                self._clear_src_downstream()
+                self._clear_tgt_downstream()
+                self._set_busy(False)
+                self._update_azure_subs_button_label()
+                if ok:
+                    self._log("[OK] Signed out.")
+
+            self.frame.after(0, done)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -443,9 +585,11 @@ class MiPitrRestoreTab:
 
                 def apply():
                     self._src_dbs = dbs
+                    self.src_db_filter_var.set("")
+                    self.src_db_cb.set("")
                     self.src_db_cb.refresh_suggestions()
-                    self.src_db_cb.set(dbs[0] if len(dbs) == 1 else "")
-                    self._log(f"[OK] {len(dbs)} database(s) on {mi_name}.")
+                    self._update_src_db_count_label()
+                    self._log(f"[OK] {len(dbs)} database(s) on {mi_name}. Pick one from the Database list.")
 
                 self.frame.after(0, apply)
             except Exception as ex:

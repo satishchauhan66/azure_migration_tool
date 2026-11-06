@@ -94,9 +94,7 @@ def _ensure_sql_blob_credential(
     mode = (blob_auth_mode or "").strip().lower()
 
     if exists and mode == "managed_identity":
-        log(
-            f"SQL credential already exists [{credential_name}] — reusing for Managed Identity RESTORE."
-        )
+        log("Reusing existing SQL credential for RESTORE FROM URL (Managed Identity).")
         return
 
     if exists:
@@ -114,7 +112,7 @@ def _ensure_sql_blob_credential(
 
     if mode == "managed_identity":
         create_cred_sql = mi_credential_sql(credential_name)
-        log("CREATE CREDENTIAL (IDENTITY = 'Managed Identity').")
+        log("CREATE CREDENTIAL (Managed Identity) for blob URL.")
     else:
         create_cred_sql = (
             f"CREATE CREDENTIAL [{cred_bracket}] "
@@ -904,61 +902,73 @@ def _monitor_request_progress(
 
 
 def _log_sql_engine_context_for_mi_blob(cur, server: str, log) -> None:
-    """Log SQL Server version and Windows service account — helps explain MI vs laptop identity."""
-    log("--- SQL Server host (identity used for Managed Identity blob access) ---")
-    log(f"  Connected instance: {server}")
-    edition = ""
+    """One short line: SQL host + version (long RBAC how-to stays in the GUI, not the log)."""
     try:
         cur.execute(
             """
-            SELECT CAST(SERVERPROPERTY('ProductMajorVersion') AS INT),
-                   CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(64)),
-                   CAST(SERVERPROPERTY('Edition') AS NVARCHAR(256)),
-                   CAST(SERVERPROPERTY('MachineName') AS NVARCHAR(128))
+            SELECT CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(64)),
+                   CAST(SERVERPROPERTY('Edition') AS NVARCHAR(256))
             """
         )
         row = cur.fetchone()
-        if row:
-            maj, ver, ed, mach = row[0], row[1], row[2], row[3]
-            edition = str(ed or "")
-            log(f"  ProductMajorVersion: {maj} (SQL Server 2022 = 16)")
-            log(f"  ProductVersion / Edition: {ver} / {ed}")
-            if mach:
-                log(f"  MachineName (SERVERPROPERTY): {mach}")
-            if "SQL Azure" in edition:
-                log(
-                    "  Azure SQL detected: RESTORE FROM URL with IDENTITY = 'Managed Identity' uses the "
-                    "**Managed Instance's Azure AD identity** — not your PC user and not the VM service account."
-                )
-                log(
-                    "  Portal → your SQL managed instance → Security → Identity → grant that identity "
-                    "**Storage Blob Data Reader** on the storage account (or use Connection String / SAS auth in Step 1)."
-                )
+        ver_ed = f"{row[0]} / {row[1]}" if row else "version unknown"
     except Exception as ex:
-        log(f"  (Could not read SERVERPROPERTY: {ex})")
-    try:
-        cur.execute(
-            """
-            SELECT servicename, service_account
-            FROM sys.dm_server_services
-            WHERE servicename LIKE N'SQL Server (%'
-            """
-        )
-        for r in cur.fetchall() or []:
-            log(f"  Windows service: {r[0]} → runs as: {r[1]}")
-    except Exception as ex:
-        log(f"  (Could not read sys.dm_server_services: {ex})")
-    log(
-        "  For RESTORE/BACKUP … TO/FROM URL with IDENTITY = 'Managed Identity', Azure Storage "
-        "RBAC must be granted to the **managed identity of this host** (Azure VM / MI), not to "
-        "your workstation user."
-    )
-    log("--- (end SQL host context) ---")
+        ver_ed = f"version lookup failed ({ex})"
+    log(f"RESTORE target SQL: {server} | {ver_ed}")
 
 
 def _q(name: str) -> str:
     """Quote SQL identifier."""
     return "[" + name.replace("]", "]]") + "]"
+
+
+def _drop_database_if_exists_for_confirmed_replace(
+    cur,
+    database: str,
+    *,
+    log: Callable[[str], None],
+    cancel_event: Optional[Any] = None,
+) -> Tuple[bool, Optional[str]]:
+    """
+    When the user confirmed replace: drop the database if it exists so RESTORE recreates it.
+    Uses SINGLE_USER WITH ROLLBACK IMMEDIATE, then DROP DATABASE (required for Azure SQL MI
+    where ``WITH REPLACE`` is not used on blob URL restores).
+    """
+    db = (database or "").strip()
+    if not db:
+        return False, "Database name is empty."
+    if re.search(r"[\];'\"\\]", db):
+        return False, "Invalid database name for DROP DATABASE."
+
+    qdb = _q(db)
+    try:
+        cur.execute("SELECT DB_ID(?)", (db,))
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            log(f"No existing database [{db}] on server — RESTORE will create it.")
+            return True, None
+        if cancel_event is not None and cancel_event.is_set():
+            return False, "Restore cancelled before DROP DATABASE."
+
+        log(f"Dropping existing database [{db}] (user confirmed delete and recreate)…")
+        try:
+            cur.execute(f"ALTER DATABASE {qdb} SET SINGLE_USER WITH ROLLBACK IMMEDIATE")
+        except Exception as ex_alter:
+            # Azure SQL / MI often does not support this ALTER; DROP still works — avoid log noise.
+            exs = redact_sensitive_text(str(ex_alter))
+            if "5008" not in exs and "5069" not in exs:
+                log(f"  (ALTER DATABASE SINGLE_USER: {exs})")
+
+        if cancel_event is not None and cancel_event.is_set():
+            return False, "Restore cancelled before DROP DATABASE."
+
+        cur.execute(f"DROP DATABASE {qdb}")
+        log(f"Existing database [{db}] dropped — starting RESTORE.")
+        return True, None
+    except Exception as exc:
+        err = redact_sensitive_text(str(exc))
+        log(f"DROP DATABASE failed for [{db}]: {err}")
+        return False, err
 
 
 def _esc_sql(s: str) -> str:
@@ -1100,7 +1110,7 @@ def _prepare_blob_restore_urls(
                 f"(use .blob.core.windows.net): {acct_url}"
             )
         credential_name = f"{acct_url}/{container}"
-        log(f"Using Managed Identity auth (credential = {credential_name})")
+        log(f"Blob (this PC): Azure AD auth — listing stripes for container '{container}'")
         sas_token = None
     else:
         if not container:
@@ -1122,12 +1132,6 @@ def _prepare_blob_restore_urls(
         )
 
     if blob_auth_mode == "managed_identity":
-        log(
-            "Next: listing blobs / stripe detection uses **this PC’s** Azure AD credential "
-            "(same chain as Browse Azure) — not SQL Server."
-        )
-
-    if blob_auth_mode == "managed_identity":
         try:
             from ..backup.local_backup_and_upload import _get_tool_blob_service_client
         except ImportError:
@@ -1138,6 +1142,7 @@ def _prepare_blob_restore_urls(
             blob_account_url=storage_account_url,
             container=container,
             log=log,
+            verbose_log=False,
         )
         stripe_paths = _discover_stripe_set(
             "", container, blob_path, log=log, blob_service_client=list_client
@@ -1555,6 +1560,7 @@ def run_restore_from_blob(
     cancel_event: Optional[Any] = None,
     on_connect: Optional[Any] = None,
     on_restore_spid: Optional[Callable[[int], None]] = None,
+    drop_existing_confirmed: bool = False,
 ) -> Dict[str, Any]:
     """
     Restore a SQL Server database from one or more .bak stripes in Azure Blob.
@@ -1574,6 +1580,8 @@ def run_restore_from_blob(
         blob_auth_mode: 'connection_string' (default, SAS) or 'managed_identity'.
         storage_account_url: Required for blob_auth_mode='managed_identity'.
         progress_callback: Optional callable(percent: float) for driving a progress bar.
+        drop_existing_confirmed: If True and the database exists, run DROP DATABASE before
+            RESTORE (matches GUI typed confirmation; needed for MI where WITH REPLACE is omitted).
 
     Returns:
         dict with status, error message if failed.
@@ -1663,10 +1671,6 @@ def run_restore_from_blob(
 
         if blob_auth_mode == "managed_identity":
             _log_sql_engine_context_for_mi_blob(cur, server, log)
-            log(
-                "RESTORE … FROM URL uses the **SQL host** managed identity from the block above — "
-                "grant that identity **Storage Blob Data Reader** (or Contributor) on the storage account if you see OS error 5."
-            )
 
         if blob_auth_mode == "managed_identity" and not target_managed_instance:
             mi_err = _check_mi_backup_supported(cur, log)
@@ -1675,6 +1679,22 @@ def run_restore_from_blob(
                 log(mi_err)
                 try:
                     cur.close(); conn.close()
+                except Exception:
+                    pass
+                return result
+
+        if drop_existing_confirmed:
+            drop_ok, drop_err = _drop_database_if_exists_for_confirmed_replace(
+                cur,
+                database,
+                log=log,
+                cancel_event=cancel_event,
+            )
+            if not drop_ok:
+                result["error"] = drop_err or "DROP DATABASE failed."
+                try:
+                    cur.close()
+                    conn.close()
                 except Exception:
                     pass
                 return result

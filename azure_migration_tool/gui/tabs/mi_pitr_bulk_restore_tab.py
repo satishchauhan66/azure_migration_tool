@@ -87,6 +87,8 @@ class MiPitrBulkRestoreTab:
         self._src_rgs: List[str] = []
         self._src_mis: List[Dict[str, str]] = []
         self._src_dbs: List[str] = []
+        self._db_checked: Dict[str, bool] = {}
+        self._db_targets: Dict[str, str] = {}
         self._tgt_rgs: List[str] = []
         self._tgt_mis: List[Dict[str, str]] = []
         self._create_widgets()
@@ -163,10 +165,18 @@ class MiPitrBulkRestoreTab:
         top_btn.pack(fill=tk.X, padx=10, pady=(8, 4))
         self.btn_load_subs = ttk.Button(
             top_btn,
-            text="Load subscriptions from Azure",
-            command=self._on_load_subscriptions,
+            text="Sign in to Azure",
+            command=self._on_azure_primary_button,
         )
         self.btn_load_subs.pack(side=tk.LEFT)
+        self._azure_subs_menu = tk.Menu(self.btn_load_subs, tearoff=0)
+        self._azure_subs_menu.add_command(
+            label="Load subscriptions from Azure",
+            command=self._on_load_subscriptions,
+        )
+        self._azure_subs_menu.add_command(label="Refresh sign-in", command=self._azure_refresh_sign_in)
+        self.btn_load_subs.bind("<Button-3>", self._on_azure_subs_right_click)
+        self.frame.after(0, self._update_azure_subs_button_label)
 
         src = ttk.LabelFrame(scrollable, text="Source (managed instance)", padding=10)
         src.pack(fill=tk.X, padx=10, pady=8)
@@ -195,6 +205,16 @@ class MiPitrBulkRestoreTab:
             padding=10,
         )
         db_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        filter_row = ttk.Frame(db_frame)
+        filter_row.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(filter_row, text="Filter databases:").pack(side=tk.LEFT, padx=(0, 6))
+        self.db_filter_var = tk.StringVar()
+        ttk.Entry(filter_row, textvariable=self.db_filter_var, width=48).pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
+        self.db_count_var = tk.StringVar(value="")
+        ttk.Label(filter_row, textvariable=self.db_count_var).pack(side=tk.LEFT, padx=(8, 0))
+        self.db_filter_var.trace_add("write", lambda *_: self._refresh_db_listbox())
         db_inner = ttk.Frame(db_frame)
         db_inner.pack(fill=tk.BOTH, expand=True)
         db_sb = ttk.Scrollbar(db_inner)
@@ -222,7 +242,9 @@ class MiPitrBulkRestoreTab:
         self._edit_item: Optional[str] = None
         db_btn_row = ttk.Frame(db_frame)
         db_btn_row.pack(fill=tk.X, pady=(6, 0))
-        self.btn_select_all = ttk.Button(db_btn_row, text="Select all", command=self._select_all_dbs)
+        self.btn_select_all = ttk.Button(
+            db_btn_row, text="Select all visible", command=self._select_all_dbs
+        )
         self.btn_select_all.pack(side=tk.LEFT, padx=(0, 6))
         self.btn_clear_sel = ttk.Button(db_btn_row, text="Clear selection", command=self._clear_db_selection)
         self.btn_clear_sel.pack(side=tk.LEFT)
@@ -371,6 +393,10 @@ class MiPitrBulkRestoreTab:
         self.src_mi_cb.set("")
         self.src_mi_cb.refresh_suggestions()
         self._src_dbs = []
+        self._db_checked = {}
+        self._db_targets = {}
+        if hasattr(self, "db_filter_var"):
+            self.db_filter_var.set("")
         self._refresh_db_listbox()
 
     def _clear_tgt_downstream(self, from_rg: bool = False) -> None:
@@ -386,32 +412,56 @@ class MiPitrBulkRestoreTab:
     _CHECKED = "\u2611"  # ☑
     _UNCHECKED = "\u2610"  # ☐
 
+    def _filtered_src_dbs_for_tree(self) -> List[str]:
+        q = (self.db_filter_var.get() or "").strip().lower()
+        if not q:
+            return list(self._src_dbs)
+        return [d for d in self._src_dbs if q in d.lower()]
+
+    def _update_db_count_label(self) -> None:
+        total = len(self._src_dbs)
+        visible = len(self._filtered_src_dbs_for_tree())
+        selected = sum(1 for name in self._src_dbs if self._db_checked.get(name))
+        if (self.db_filter_var.get() or "").strip():
+            text = f"Showing {visible} of {total} · {selected} selected"
+        elif total:
+            text = f"{total} database(s) · {selected} selected"
+        else:
+            text = ""
+        self.db_count_var.set(text)
+
     def _refresh_db_listbox(self) -> None:
-        """Rebuild the database tree from self._src_dbs (all rows ticked, target = naming default)."""
+        """Rebuild the database tree; preserve tick/target per database name."""
         self._cancel_edit()
         for item in self.db_tree.get_children():
             self.db_tree.delete(item)
-        for name in self._src_dbs:
+        for name in self._filtered_src_dbs_for_tree():
+            checked = self._db_checked.get(name, False)
+            mark = self._CHECKED if checked else self._UNCHECKED
+            tgt = self._db_targets.get(name) or self._target_name_for(name)
             self.db_tree.insert(
                 "",
                 tk.END,
-                values=(self._CHECKED, name, self._target_name_for(name)),
+                values=(mark, name, tgt),
             )
+        self._update_db_count_label()
 
     def _select_all_dbs(self) -> None:
-        for item in self.db_tree.get_children():
-            self.db_tree.set(item, "check", self._CHECKED)
+        for name in self._filtered_src_dbs_for_tree():
+            self._db_checked[name] = True
+        self._refresh_db_listbox()
 
     def _clear_db_selection(self) -> None:
-        for item in self.db_tree.get_children():
-            self.db_tree.set(item, "check", self._UNCHECKED)
+        for name in self._src_dbs:
+            self._db_checked[name] = False
+        self._refresh_db_listbox()
 
     def _apply_naming_to_all(self) -> None:
         """Recompute every Target name cell from the current naming-helper mode."""
         self._cancel_edit()
-        for item in self.db_tree.get_children():
-            src = self.db_tree.set(item, "source")
-            self.db_tree.set(item, "target", self._target_name_for(src))
+        for name in self._src_dbs:
+            self._db_targets[name] = self._target_name_for(name)
+        self._refresh_db_listbox()
 
     def _get_checked_pairs(self) -> List[Tuple[str, str]]:
         """Return (source_db, target_name) for every ticked row."""
@@ -435,7 +485,12 @@ class MiPitrBulkRestoreTab:
         if not item:
             return
         current = self.db_tree.set(item, "check")
-        self.db_tree.set(item, "check", self._UNCHECKED if current == self._CHECKED else self._CHECKED)
+        src = self.db_tree.set(item, "source")
+        new_checked = current != self._CHECKED
+        self.db_tree.set(item, "check", self._CHECKED if new_checked else self._UNCHECKED)
+        if src:
+            self._db_checked[src] = new_checked
+            self._update_db_count_label()
 
     def _on_tree_double_click(self, event: tk.Event) -> Optional[str]:
         """Open an inline editor over the Target name cell."""
@@ -475,6 +530,9 @@ class MiPitrBulkRestoreTab:
             new_value = self._edit_entry.get()
             if self.db_tree.exists(self._edit_item):
                 self.db_tree.set(self._edit_item, "target", new_value)
+                src = self.db_tree.set(self._edit_item, "source")
+                if src:
+                    self._db_targets[src] = new_value
         finally:
             self._destroy_editor()
 
@@ -536,42 +594,140 @@ class MiPitrBulkRestoreTab:
         mi = self._tgt_mis[mi_i]["name"]
         return sub, rg, mi, None
 
+    def _apply_loaded_subscriptions(self, rows: List[Dict[str, str]]) -> None:
+        self._subscriptions = rows
+        self.src_sub_cb.refresh_suggestions()
+        self.tgt_sub_cb.refresh_suggestions()
+        self._clear_src_downstream()
+        self._clear_tgt_downstream()
+        self.src_sub_cb.set("")
+        self.tgt_sub_cb.set("")
+        self._log(f"[OK] Loaded {len(rows)} subscription(s).")
+        self._update_azure_subs_button_label()
+
+    def _update_azure_subs_button_label(self) -> None:
+        try:
+            from gui.utils.azure_arm_auth import azure_subscriptions_button_label
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import azure_subscriptions_button_label
+        try:
+            self.btn_load_subs.configure(text=azure_subscriptions_button_label())
+        except tk.TclError:
+            pass
+
+    def _on_azure_subs_right_click(self, event: tk.Event) -> None:
+        if self._busy:
+            return
+        try:
+            self._azure_subs_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._azure_subs_menu.grab_release()
+
+    def _azure_refresh_sign_in(self) -> None:
+        if self._busy:
+            return
+
+        def run() -> None:
+            self.frame.after(0, lambda: self._set_busy(True))
+            self.frame.after(0, lambda: self._log("Refreshing Azure sign-in…"))
+            try:
+                try:
+                    from gui.utils.azure_arm_auth import refresh_azure_sign_in
+                except ImportError:
+                    from azure_migration_tool.gui.utils.azure_arm_auth import refresh_azure_sign_in
+                ok = refresh_azure_sign_in(
+                    lambda m: self.frame.after(0, lambda p=m: self._log(p)),
+                )
+            except Exception as ex:
+                ok = False
+                self.frame.after(0, lambda: self._log(f"[X] {ex}"))
+
+            def done() -> None:
+                self._set_busy(False)
+                self._update_azure_subs_button_label()
+                if ok:
+                    self._log("[OK] Sign-in refreshed. Right-click → Load subscriptions if needed.")
+
+            self.frame.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_azure_primary_button(self) -> None:
+        try:
+            from gui.utils.azure_arm_auth import azure_cli_logged_in
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import azure_cli_logged_in
+        if azure_cli_logged_in():
+            self._azure_sign_out()
+        else:
+            self._on_load_subscriptions()
+
+    def _azure_sign_out(self) -> None:
+        if self._busy:
+            return
+
+        def run() -> None:
+            self.frame.after(0, lambda: self._set_busy(True))
+            self.frame.after(0, lambda: self._log("Signing out of Azure CLI…"))
+            try:
+                try:
+                    from gui.utils.azure_arm_auth import sign_out_azure
+                except ImportError:
+                    from azure_migration_tool.gui.utils.azure_arm_auth import sign_out_azure
+                ok = sign_out_azure(lambda m: self.frame.after(0, lambda p=m: self._log(p)))
+            except Exception as ex:
+                ok = False
+                self.frame.after(0, lambda: self._log(f"[X] {ex}"))
+
+            def done() -> None:
+                self._subscriptions = []
+                self.src_sub_cb.refresh_suggestions()
+                self.tgt_sub_cb.refresh_suggestions()
+                self._clear_src_downstream()
+                self._clear_tgt_downstream()
+                self._set_busy(False)
+                self._update_azure_subs_button_label()
+                if ok:
+                    self._log("[OK] Signed out.")
+
+            self.frame.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_subscription_load_error(self, err: str) -> None:
+        self._log(f"[X] {err}")
+        try:
+            from gui.utils.azure_arm_auth import format_user_azure_error
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import format_user_azure_error
+        messagebox.showerror("Azure", format_user_azure_error(err))
+
     def _on_load_subscriptions(self) -> None:
         if self._busy:
             return
-        if get_shared_azure_credential is None:
-            messagebox.showerror("Error", "azure-identity / utils.azure_shared_credential not available.")
-            return
 
-        def run():
+        def run() -> None:
             self.frame.after(0, lambda: self._set_busy(True))
-            self.frame.after(0, lambda: self._log("Loading subscriptions…"))
+            self.frame.after(0, lambda: self._log("Connecting to Azure and loading subscriptions…"))
             try:
-                cred = get_shared_azure_credential(lambda m: self.frame.after(0, lambda p=m: self._log(p)))
-                rows, err = list_subscriptions(cred)
+                try:
+                    from gui.utils.azure_arm_auth import fetch_arm_subscriptions
+                except ImportError:
+                    from azure_migration_tool.gui.utils.azure_arm_auth import fetch_arm_subscriptions
+
+                rows, err = fetch_arm_subscriptions(
+                    lambda m: self.frame.after(0, lambda p=m: self._log(p)),
+                )
                 if err:
-                    self.frame.after(0, lambda: self._log(f"[X] {err}"))
-                    self.frame.after(0, lambda: messagebox.showerror("Azure", err))
+                    self.frame.after(0, lambda e=err: self._on_subscription_load_error(e))
                     return
                 if not rows:
                     self.frame.after(0, lambda: self._log("[X] No subscriptions returned."))
                     self.frame.after(0, lambda: messagebox.showwarning("Azure", "No subscriptions found."))
                     return
-
-                def apply():
-                    self._subscriptions = rows
-                    self.src_sub_cb.refresh_suggestions()
-                    self.tgt_sub_cb.refresh_suggestions()
-                    self._clear_src_downstream()
-                    self._clear_tgt_downstream()
-                    self.src_sub_cb.set("")
-                    self.tgt_sub_cb.set("")
-                    self._log(f"[OK] Loaded {len(rows)} subscription(s).")
-
-                self.frame.after(0, apply)
+                self.frame.after(0, lambda r=rows: self._apply_loaded_subscriptions(r))
             except Exception as ex:
-                self.frame.after(0, lambda: self._log(f"[X] {ex}"))
-                self.frame.after(0, lambda: messagebox.showerror("Error", str(ex)))
+                self.frame.after(0, lambda e=str(ex): self._on_subscription_load_error(e))
             finally:
                 self.frame.after(0, lambda: self._set_busy(False))
 
@@ -679,8 +835,14 @@ class MiPitrBulkRestoreTab:
 
                 def apply():
                     self._src_dbs = dbs
+                    self._db_checked = {n: False for n in dbs}
+                    self._db_targets = {}
+                    self.db_filter_var.set("")
                     self._refresh_db_listbox()
-                    self._log(f"[OK] {len(dbs)} database(s) on {mi_name} (all ticked).")
+                    self._log(
+                        f"[OK] {len(dbs)} database(s) on {mi_name}. "
+                        "Tick rows to restore (none selected by default)."
+                    )
 
                 self.frame.after(0, apply)
             except Exception as ex:

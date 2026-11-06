@@ -1308,6 +1308,7 @@ def _get_tool_blob_service_client(
     blob_account_url: str,
     container: str,
     log: Callable[[str], None],
+    verbose_log: bool = True,
 ):
     """
     BlobServiceClient for Python-side uploads from this PC.
@@ -1343,10 +1344,9 @@ def _get_tool_blob_service_client(
                 "azure-identity is required for Managed Identity upload.\n"
                 "Install: pip install azure-identity"
             )
-        log(
-            "  Authenticating with Azure AD (shared credential — same chain as Browse Azure)..."
+        credential = get_shared_azure_credential(
+            (log if verbose_log else lambda _m: None)
         )
-        credential = get_shared_azure_credential(log)
         return BlobServiceClient(account_url=account_url, credential=credential)
 
     if not blob_connection_string or not blob_connection_string.strip():
@@ -1360,7 +1360,8 @@ def _get_tool_blob_service_client(
             "does not). Use Browse Azure in 'Connection String (storage account key)' mode, or paste "
             "the full AccountKey= connection string from the Azure portal."
         )
-    log("  Authenticating with storage account key (connection string)...")
+    if verbose_log:
+        log("  Authenticating with storage account key (connection string)...")
     return BlobServiceClient.from_connection_string(blob_connection_string)
 
 
