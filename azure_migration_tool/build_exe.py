@@ -251,6 +251,8 @@ a = Analysis(
         "gui.widgets", "gui.widgets.connection_widget", "gui.widgets.schema_tree",
         "gui.widgets.schema_diff_viewer", "gui.widgets.azure_blob_browser",
         "gui.dialogs", "gui.dialogs.restore_preview_dialog",
+        "gui.dialogs.prerequisites_row_dialog",
+        "gui.utils.prerequisites_profiles",
         # Setup
         "setup", "setup.auto_setup",
         # Validation (Legacy schema/data comparison – Python only)
@@ -266,6 +268,8 @@ a = Analysis(
         "src.restore", "src.restore.schema_restore", "src.restore.nullability_fix",
         "src.restore.restore_from_blob", "src.restore.restore_from_disk", "src.restore.download_from_blob",
         "src.migration", "src.migration.data_migration", "src.migration.bcp_preflight",
+        "src.migration.prerequisites_check",
+        "gui.tabs.prerequisites_tool_tab",
         "src.utils.bcp_tools",
         "src.orchestration", "src.orchestration.full_migration",
         "src.utils", "src.utils.database", "src.utils.sql", "src.utils.paths",

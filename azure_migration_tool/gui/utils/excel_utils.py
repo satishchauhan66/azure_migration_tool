@@ -137,6 +137,26 @@ def normalize_column_name(col_name: str) -> Optional[str]:
         "chunk_threshold": ["chunk_threshold", "chunk threshold", "chunking_threshold"],
         "num_chunks": ["num_chunks", "num chunks", "number_of_chunks", "chunks"],
         "chunk_workers": ["chunk_workers", "chunk workers", "chunking_workers", "chunk_parallel"],
+        "row_label": ["row label", "row_label", "label", "pair name", "database pair"],
+        "blob_auth_mode": [
+            "blob auth", "blob_auth", "blob_auth_mode", "storage auth", "storage_auth",
+        ],
+        "blob_connection_string": [
+            "blob connection string", "blob_connection_string", "storage connection string",
+        ],
+        "blob_account_url": [
+            "blob account url", "blob_account_url", "storage account url", "blob url",
+        ],
+        "blob_container": [
+            "blob container", "blob_container", "container", "storage container",
+        ],
+        "backup_unc_path": [
+            "backup unc", "backup_unc_path", "backup unc path", "unc backup path",
+        ],
+        "blob_probe_prefix": ["blob probe prefix", "blob_probe_prefix", "blob folder prefix"],
+        "dest_managed_instance": [
+            "dest managed instance", "dest_managed_instance", "target mi", "target_managed_instance",
+        ],
     }
     
     for key, possible_names in column_mapping.items():
@@ -182,24 +202,12 @@ def clean_server_name(server: str) -> str:
     return server
 
 
-def read_excel_file(excel_file: str, required_columns: List[str], default_user: Optional[str] = None) -> List[Dict]:
-    """
-    Read database configuration from Excel file.
-    
-    Args:
-        excel_file: Path to Excel file
-        required_columns: List of required column keys (e.g., ["src_server", "src_db"])
-        default_user: Default user if not in Excel
-    
-    Returns:
-        List of dictionaries, each containing configuration
-    """
-    excel_path = Path(excel_file)
-    if not excel_path.exists():
-        raise FileNotFoundError(f"Excel file not found: {excel_file}")
-    
-    df = pd.read_excel(excel_path)
-    
+def _configs_from_dataframe(
+    df: "pd.DataFrame",
+    required_columns: List[str],
+    default_user: Optional[str] = None,
+) -> List[Dict]:
+    """Parse bulk spreadsheet rows into configuration dicts."""
     # Normalize column names
     column_map = {}
     for col in df.columns:
@@ -250,7 +258,7 @@ def read_excel_file(excel_file: str, required_columns: List[str], default_user: 
                     elif key in ["truncate_dest", "delete_dest", "restore_tables", "restore_programmables",
                                 "restore_constraints", "restore_indexes", "skip_backup", "skip_migration", "skip_restore",
                                 "disable_fk", "disable_indexes", "disable_triggers", "skip_completed", "resume_enabled",
-                                "verify_after_copy", "enable_chunking"]:
+                                "verify_after_copy", "enable_chunking", "dest_managed_instance", "target_managed_instance"]:
                         val_lower = val_str.lower()
                         config[key] = val_lower in ['true', 'yes', '1', 'y', 't']
                     else:
@@ -307,9 +315,45 @@ def read_excel_file(excel_file: str, required_columns: List[str], default_user: 
         configs.append(config)
     
     if not configs:
-        raise ValueError("No valid configurations found in Excel file")
+        raise ValueError("No valid configurations found in spreadsheet")
     
     return configs
+
+
+def read_excel_file(excel_file: str, required_columns: List[str], default_user: Optional[str] = None) -> List[Dict]:
+    """
+    Read database configuration from Excel file.
+    
+    Args:
+        excel_file: Path to Excel file
+        required_columns: List of required column keys (e.g., ["src_server", "src_db"])
+        default_user: Default user if not in Excel
+    
+    Returns:
+        List of dictionaries, each containing configuration
+    """
+    excel_path = Path(excel_file)
+    if not excel_path.exists():
+        raise FileNotFoundError(f"Excel file not found: {excel_file}")
+    
+    df = pd.read_excel(excel_path)
+    return _configs_from_dataframe(df, required_columns, default_user)
+
+
+def read_bulk_config_spreadsheet(
+    file_path: str,
+    required_columns: List[str],
+    default_user: Optional[str] = None,
+) -> List[Dict]:
+    """Read Excel (.xlsx) or CSV bulk configuration."""
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    if path.suffix.lower() == ".csv":
+        df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    else:
+        df = pd.read_excel(path)
+    return _configs_from_dataframe(df, required_columns, default_user)
 
 
 def create_sample_excel(template_type: str, output_path: Optional[str] = None) -> str:
@@ -409,6 +453,26 @@ def create_sample_excel(template_type: str, output_path: Optional[str] = None) -
             "Destination DB Type": ["sqlserver", "sqlserver"],
             "Destination Port": [1433, 1433],
             "Table Name": ["", ""],  # Empty for all tables, or single table name per row
+        }
+    elif template_type == "prerequisites":
+        data = {
+            "Row Label": ["Wave1-DB1", "Wave1-DB2"],
+            "Source Server": ["src-sql.corp.local", "src-sql.corp.local"],
+            "Source Database": ["AppDB1", "AppDB2"],
+            "Source Authentication": ["windows", "windows"],
+            "Source User": ["", ""],
+            "Source Password": ["", ""],
+            "Destination Server": ["mi-prod.public.abc.database.windows.net", "mi-prod.public.abc.database.windows.net"],
+            "Destination Database": ["AppDB1", "AppDB2"],
+            "Destination Authentication": ["entra_mfa", "entra_mfa"],
+            "Destination User": ["operator@contoso.com", "operator@contoso.com"],
+            "Destination Password": ["", ""],
+            "Blob Auth": ["connection_string", "managed_identity"],
+            "Blob Connection String": ["DefaultEndpointsProtocol=https;AccountName=...", ""],
+            "Blob Account URL": ["", "https://mystorageaccount.blob.core.windows.net"],
+            "Blob Container": ["migration-backups", "migration-wave2"],
+            "Backup UNC path": ["\\\\fileserver\\sqlbackup\\", ""],
+            "Target MI": [True, True],
         }
     elif template_type == "schema_validation":
         data = {

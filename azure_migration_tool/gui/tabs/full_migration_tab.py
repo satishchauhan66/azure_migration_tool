@@ -48,6 +48,14 @@ class FullMigrationTab:
     def set_project_path(self, project_path):
         """Set the current project path."""
         self.project_path = project_path
+
+    def load_bulk_configs(self, configs: list, *, source_label: str = "Prerequisites") -> None:
+        """Load row configs from Prerequisites (or other caller) for bulk migration."""
+        self.excel_configs = [dict(c) for c in (configs or [])]
+        n = len(self.excel_configs)
+        self.excel_file_var.set(f"{n} database(s) from {source_label}")
+        if hasattr(self, "bulk_btn"):
+            self.bulk_btn.config(state=tk.NORMAL if n else tk.DISABLED)
         
     def _create_widgets(self):
         """Create UI widgets."""

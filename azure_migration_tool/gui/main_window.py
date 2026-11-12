@@ -272,6 +272,7 @@ class MainWindow:
         menubar.add_cascade(label="Tools", menu=tools_menu)
         tools_menu.add_command(label="Check what's installed...", command=self._show_dependency_check)
         tools_menu.add_command(label="Install database driver...", command=self._install_odbc_driver)
+        tools_menu.add_command(label="Prerequisites (multi-DB)...", command=self._open_prerequisites_tool)
         tools_menu.add_separator()
         tools_menu.add_command(label="ADF Migration...", command=self._open_adf_migration)
         tools_menu.add_command(label="Data Migration...", command=self._open_data_migration)
@@ -383,6 +384,14 @@ class MainWindow:
             "azure_migration_tool.gui.tabs.local_backup_bulk_tool_tab",
             "LocalBackupBulkToolTab",
             "Local Backup (multiple databases)",
+        )
+
+    def _open_prerequisites_tool(self):
+        """Open multi-DB prerequisite checks (Tools menu)."""
+        self._open_tool_window(
+            "azure_migration_tool.gui.tabs.prerequisites_tool_tab",
+            "PrerequisitesToolTab",
+            "Prerequisites (multi-DB)",
         )
 
     def _open_restore_from_blob_bulk(self):
