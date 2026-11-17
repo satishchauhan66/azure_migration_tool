@@ -45,11 +45,27 @@ def _run_job_dict(job: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     lines: list[str] = []
+    try:
+        from azure_migration_tool.gui.utils.agent_ops_progress import make_agent_ops_hooks
+    except ImportError:
+        try:
+            from gui.utils.agent_ops_progress import make_agent_ops_hooks
+        except ImportError:
+            make_agent_ops_hooks = None  # type: ignore[misc, assignment]
+            chain_log = None  # type: ignore[misc, assignment]
+
+    hist_log: Any = lambda _m: None
+    progress_callback: Any = None
+    if make_agent_ops_hooks is not None:
+        hist_log, progress_callback = make_agent_ops_hooks(job)
 
     def log(msg: str) -> None:
         lines.append(msg)
+        hist_log(msg)
 
-    summary = run_bulk_local_backup_blob_restore_job(job, log=log)
+    summary = run_bulk_local_backup_blob_restore_job(
+        job, log=log, progress_callback=progress_callback
+    )
     summary["_log_tail"] = lines[-50:]
     return summary
 

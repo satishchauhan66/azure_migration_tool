@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 T = TypeVar("T")
 
 ROW_PREREQ_TIMEOUT_SEC = 120
+ROW_PREREQ_FAST_TIMEOUT_SEC = 50
 _BLOB_SQL_PROBE_TIMEOUT_SEC = 90
 _UNC_BACKUP_PROBE_TIMEOUT_SEC = 90
 
@@ -323,6 +324,58 @@ def _sql_path_is_backup_file(
     return bool(fr and int(fr[0]) == 1 and int(fr[1]) == 0)
 
 
+def test_src_sql_unc_light(
+    server: str,
+    auth: str,
+    user: str,
+    password: Optional[str],
+    unc_path: str,
+    log: LogFn,
+) -> tuple[Optional[bool], str, List[str]]:
+    """Fast UNC check: SQL can see the folder (no BACKUP probe)."""
+    raw = (unc_path or "").strip()
+    if not raw:
+        return None, "Not configured", []
+    if not (server or "").strip():
+        return False, "Source server empty", ["UNC set but source server missing"]
+    folder = _backup_dir_from_path(raw)
+    log(f"Fast UNC check (no backup): {folder}")
+    warnings = ["UNC backup write probe skipped (fast check)."]
+    try:
+        try:
+            from ..utils.database import connect_to_database, pick_sql_driver
+        except ImportError:
+            from src.utils.database import connect_to_database, pick_sql_driver
+
+        import logging
+
+        temp_log = logging.getLogger("prereq_unc_light")
+        driver = pick_sql_driver(temp_log)
+        conn = connect_to_database(
+            server.strip(),
+            "master",
+            (user or "").strip(),
+            driver,
+            _norm_auth(auth),
+            password,
+            timeout=_QUICK_ODBC_TIMEOUT,
+            logger=temp_log,
+        )
+        cur = conn.cursor()
+        cur.execute("IF OBJECT_ID('tempdb..#f') IS NOT NULL DROP TABLE #f")
+        cur.execute("CREATE TABLE #f (FileExists int, FileIsDirectory int, ParentExists int)")
+        cur.execute("INSERT #f EXEC master.dbo.xp_fileexist ?", folder)
+        cur.execute("SELECT FileExists, FileIsDirectory, ParentExists FROM #f")
+        fr = cur.fetchone()
+        cur.close()
+        conn.close()
+        if fr and (int(fr[2] or 0) == 1 or int(fr[1] or 0) == 1):
+            return True, "Folder reachable by SQL (no write probe)", warnings
+        return False, "SQL cannot see UNC folder/path", warnings
+    except Exception as ex:
+        return False, str(ex)[:400], warnings
+
+
 def test_src_sql_unc(
     server: str,
     database: str,
@@ -546,6 +599,8 @@ def test_unc_to_blob(
     backup_path: str,
     src_sql_unc: Optional[bool],
     log: LogFn,
+    *,
+    skip_unc_probe: bool = False,
 ) -> tuple[bool, str]:
     """UNC backup folder + configured blob (upload/landing path)."""
     storage_ok, storage_msg = test_blob_container_quick(row, log)
@@ -555,6 +610,9 @@ def test_unc_to_blob(
     if not raw:
         log("UNC→Blob: blob only (no UNC path on row).")
         return True, "Blob container OK"
+    if skip_unc_probe:
+        log("UNC→Blob: fast mode (blob OK; UNC write probe skipped).")
+        return True, "Blob OK (UNC write probe skipped)"
     if src_sql_unc is not True:
         return False, "Source UNC backup probe must pass before UNC→Blob"
     log("UNC→Blob: probe .bak path + blob container.")
@@ -642,6 +700,7 @@ def run_row_prerequisites(row: Dict[str, Any], log: Optional[LogFn] = None) -> P
 
     inner(f"=== {label} ===")
     inner("Quick sanity only — verifies connectivity/storage; does not migrate data.")
+    skip_unc = bool(row.get("_skip_unc_probe") or row.get("skip_unc_probe"))
 
     src_ok, src_msg = test_sql_connection(
         "Source",
@@ -666,19 +725,32 @@ def run_row_prerequisites(row: Dict[str, Any], log: Optional[LogFn] = None) -> P
     backup_path = (
         str(row.get("backup_unc_path") or row.get("local_backup_path") or row.get("backup_path") or "").strip()
     )
-    unc_ok, unc_detail, unc_warnings = test_src_sql_unc(
-        str(row.get("src_server") or ""),
-        str(row.get("src_db") or ""),
-        str(row.get("src_auth") or "windows"),
-        str(row.get("src_user") or ""),
-        row.get("src_password"),
-        backup_path,
-        inner,
-    )
+    if skip_unc:
+        inner("Fast check: skipping UNC BACKUP write probe.")
+        unc_ok, unc_detail, unc_warnings = test_src_sql_unc_light(
+            str(row.get("src_server") or ""),
+            str(row.get("src_auth") or "windows"),
+            str(row.get("src_user") or ""),
+            row.get("src_password"),
+            backup_path,
+            inner,
+        )
+    else:
+        unc_ok, unc_detail, unc_warnings = test_src_sql_unc(
+            str(row.get("src_server") or ""),
+            str(row.get("src_db") or ""),
+            str(row.get("src_auth") or "windows"),
+            str(row.get("src_user") or ""),
+            row.get("src_password"),
+            backup_path,
+            inner,
+        )
     warnings.extend(unc_warnings)
 
     inner("--- UNC → blob ---")
-    unc_blob_ok, unc_blob_msg = test_unc_to_blob(row, backup_path, unc_ok, inner)
+    unc_blob_ok, unc_blob_msg = test_unc_to_blob(
+        row, backup_path, unc_ok, inner, skip_unc_probe=skip_unc
+    )
     src_blob_ok = unc_blob_ok
     src_blob_msg = unc_blob_msg
 

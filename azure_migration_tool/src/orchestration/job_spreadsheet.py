@@ -316,6 +316,109 @@ def _merge_rows_to_job(rows: Sequence[Dict[str, str]]) -> Dict[str, Any]:
     return job
 
 
+def _prerequisite_row_to_canonical(row: Dict[str, Any]) -> Dict[str, str]:
+    """Map a Prerequisites tool row to worker job spreadsheet columns."""
+    mapped: Dict[str, str] = {c: "" for c in CANONICAL_COLUMNS}
+
+    def cell(key: str) -> str:
+        return _cell_str(row.get(key))
+
+    mapped["source_server"] = cell("src_server")
+    mapped["source_auth"] = cell("src_auth") or "windows"
+    mapped["source_user"] = cell("src_user")
+    mapped["source_password"] = cell("src_password")
+    mapped["database"] = cell("src_db")
+    backup_path = (
+        cell("backup_unc_path") or cell("local_backup_path") or cell("backup_path")
+    )
+    mapped["local_backup_path"] = backup_path
+    mapped["restore_server"] = cell("dest_server")
+    mapped["restore_auth"] = cell("dest_auth") or "entra_mfa"
+    mapped["restore_user"] = cell("dest_user")
+    mapped["restore_password"] = cell("dest_password")
+    mi = row.get("dest_managed_instance")
+    if mi is None:
+        mi = row.get("target_mi")
+    parsed_mi = _parse_bool(mi)
+    if parsed_mi is not None:
+        mapped["restore_target_mi"] = str(parsed_mi).lower()
+    blob_url = cell("blob_account_url")
+    blob_container = cell("blob_container")
+    blob_auth = cell("blob_auth_mode")
+    blob_conn = cell("blob_connection_string")
+    if blob_url or blob_container or blob_auth or blob_conn:
+        mapped["blob_use_saved_settings"] = "false"
+        mapped["blob_storage_account_url"] = blob_url
+        mapped["blob_container"] = blob_container
+        mapped["blob_auth_mode"] = blob_auth
+    else:
+        mapped["blob_use_saved_settings"] = "true"
+    mapped["blob_folder"] = cell("blob_folder")
+    project = cell("project_path")
+    if project:
+        mapped["project_path"] = project
+    return mapped
+
+
+def prerequisite_row_to_job(
+    row: Dict[str, Any], *, job_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """One worker job per prerequisite row (single database, own servers)."""
+    row = dict(row)
+    job = _merge_rows_to_job([_prerequisite_row_to_canonical(row)])
+    if job_id:
+        job["job_id"] = job_id
+    label = (str(row.get("row_label") or row.get("label") or "")).strip()
+    if label:
+        job["row_label"] = label
+    dest_server = (str(row.get("dest_server") or "")).strip()
+    if dest_server:
+        job.setdefault("restore_target", {})["server"] = dest_server
+        job["_explicit_restore_target"] = True
+    blob = job.setdefault("blob", {})
+    if isinstance(blob, dict):
+        blob["use_profile"] = False
+    env = (str(row.get("environment") or row.get("profile") or "")).strip()
+    if env:
+        job["environment"] = env
+    src_db = (str(row.get("src_db") or "")).strip()
+    dest_db = (str(row.get("dest_db") or src_db) or "").strip()
+    if src_db:
+        job["src_db"] = src_db
+    if dest_db:
+        job["dest_db"] = dest_db
+        job.setdefault("restore_target", {})["database"] = dest_db
+    if src_db and dest_db and src_db != dest_db:
+        job["database_map"] = {src_db: dest_db}
+    return job
+
+
+def prerequisite_rows_to_jobs(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build worker job dict(s) from Prerequisites tab row data (grouped by source server)."""
+    if not rows:
+        return []
+    canon = [_prerequisite_row_to_canonical(dict(r)) for r in rows]
+    return canonical_rows_to_jobs(canon)
+
+
+def prerequisite_rows_to_separate_jobs(
+    rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """One isolated job per prerequisite row (for MCP / per-DB runs)."""
+    import uuid
+
+    jobs: List[Dict[str, Any]] = []
+    for row in rows:
+        label = (
+            str(row.get("row_label") or row.get("label") or row.get("src_db") or "db")
+            .strip()
+        )
+        safe = re.sub(r"[^\w\-]+", "-", label).strip("-")[:48] or "db"
+        jid = f"preq-{uuid.uuid4().hex[:8]}-{safe}"
+        jobs.append(prerequisite_row_to_job(dict(row), job_id=jid))
+    return jobs
+
+
 def canonical_rows_to_jobs(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """Group rows by job_id + source_server; merge databases per group."""
     groups: Dict[Tuple[str, str], List[Dict[str, str]]] = {}

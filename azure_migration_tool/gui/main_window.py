@@ -402,16 +402,20 @@ class MainWindow:
             "Restore from Blob (multiple databases)",
         )
 
-    def _open_agent_ops_dashboard(self):
+    def _open_agent_ops_dashboard(self, auto_refresh: bool = False):
         """AgentOps run history dashboard (Tools menu)."""
+        if auto_refresh:
+            self._pending_agent_ops_auto_refresh = True
         self._open_tool_window(
             "azure_migration_tool.gui.tabs.agent_ops_dashboard_tab",
             "AgentOpsDashboardTab",
             "AgentOps — Run history",
         )
 
-    def _open_agent_workflow(self):
+    def _open_agent_workflow(self, prerequisite_configs=None):
         """Open headless worker job tester (Tools menu)."""
+        if prerequisite_configs is not None:
+            self._pending_prerequisite_agent_configs = list(prerequisite_configs)
         self._open_tool_window(
             "azure_migration_tool.gui.tabs.agent_workflow_tool_tab",
             "AgentWorkflowToolTab",
@@ -486,6 +490,8 @@ class MainWindow:
             placeholder.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
             tab = cls(placeholder, self)
             tab.frame.pack(fill=tk.BOTH, expand=True)
+            if class_name == "AgentOpsDashboardTab":
+                self._agent_ops_tab = tab
             if hasattr(self, "_project_path") and self._project_path and hasattr(tab, "set_project_path"):
                 tab.set_project_path(self._project_path)
             if poc_experiment:

@@ -75,6 +75,35 @@ def _import_list_databases():
     return list_databases
 
 
+def resolve_restore_database_name(
+    source_database: str,
+    *,
+    job: Optional[Dict[str, Any]] = None,
+    target: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Target DB name for RESTORE (dest_db when it differs from source, e.g. IngressManager → test22db)."""
+    job = job or {}
+    target = target or (job.get("restore_target") or {})
+    if not isinstance(target, dict):
+        target = {}
+    src = (source_database or "").strip()
+    explicit = (
+        (target.get("database") or target.get("dest_database") or target.get("dest_db") or "")
+    ).strip()
+    if explicit:
+        return explicit
+    dest = (job.get("dest_db") or "").strip()
+    dbs = list((job.get("source") or {}).get("databases") or [])
+    if dest and len(dbs) <= 1:
+        return dest
+    db_map = job.get("database_map") or target.get("database_map") or {}
+    if isinstance(db_map, dict):
+        mapped = str(db_map.get(src) or "").strip()
+        if mapped:
+            return mapped
+    return src
+
+
 def _resolve_pipeline_parallelism(job: Dict[str, Any], database_count: int) -> int:
     pipe = job.get("pipeline") or {}
     if pipe.get("phase_batches") or job.get("phase_batches"):
@@ -104,6 +133,7 @@ def backup_single_database(
     stripes: Optional[int] = None,
     cancel_event: Optional[threading.Event] = None,
     log: Optional[LogFn] = None,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ) -> Tuple[Optional[RunSpec], Optional[str]]:
     """Backup one database; returns (run spec, error message)."""
     log = log or _default_log
@@ -123,6 +153,7 @@ def backup_single_database(
             structured_local_paths=structured_local_paths,
             stripes=stripes,
             cancel_event=cancel_event,
+            progress_callback=progress_callback,
             log=log,
         )
     except Exception as exc:
@@ -439,14 +470,23 @@ def restore_single_database_from_blob(
     storage: Dict[str, Any],
     target: Dict[str, Any],
     *,
+    job: Optional[Dict[str, Any]] = None,
     cancel_event: Optional[threading.Event] = None,
     log: Optional[LogFn] = None,
+    on_restore_percent: Optional[Callable[[float], None]] = None,
 ) -> Tuple[bool, Optional[str]]:
     log = log or _default_log
     run_restore_from_blob = _import_restore()
     server = (target.get("server") or "").strip()
     if not server:
         return False, "restore_target.server is required."
+
+    restore_name = resolve_restore_database_name(database, job=job, target=target)
+    if restore_name != (database or "").strip():
+        log(
+            f"Restore target database name: [{restore_name}] "
+            f"(backup taken from source DB [{database}])"
+        )
 
     auth = (target.get("auth") or "windows").strip()
     user = target.get("user") or None
@@ -460,10 +500,17 @@ def restore_single_database_from_blob(
     if cancel_event and cancel_event.is_set():
         return False, "cancelled"
 
+    drop_confirmed = False
+    if job:
+        opts = job.get("restore_options") or {}
+        drops = set(opts.get("drop_existing_confirmed_databases") or [])
+        if restore_name in drops:
+            drop_confirmed = True
+
     try:
         summary = run_restore_from_blob(
             server=server,
-            database=database,
+            database=restore_name,
             auth=auth,
             user=user,
             password=password,
@@ -475,6 +522,8 @@ def restore_single_database_from_blob(
             blob_auth_mode=storage["blob_auth_mode"],
             storage_account_url=storage.get("storage_account_url") or "",
             cancel_event=cancel_event,
+            progress_callback=on_restore_percent,
+            drop_existing_confirmed=drop_confirmed,
         )
     except Exception as exc:
         return False, str(exc)
@@ -490,6 +539,7 @@ def restore_databases_from_blob(
     storage: Dict[str, Any],
     target: Dict[str, Any],
     *,
+    job: Optional[Dict[str, Any]] = None,
     cancel_event: Optional[threading.Event] = None,
     log: Optional[LogFn] = None,
 ) -> Dict[str, Any]:
@@ -533,23 +583,25 @@ def restore_databases_from_blob(
             break
         database = job["database"]
         blob_path = job["blob_path"]
-        log(f"--- [{idx}/{total}] {database} ---")
+        restore_as = resolve_restore_database_name(database, job=job, target=target)
+        log(f"--- [{idx}/{total}] {database} → restore as [{restore_as}] ---")
         log(f"  Blob: {container}/{blob_path}")
         ok, err = restore_single_database_from_blob(
             database,
             blob_path,
             storage,
             target,
+            job=job,
             cancel_event=cancel_event,
             log=log,
         )
         if ok:
             ok_count += 1
-            log(f"OK {database}: restore finished")
+            log(f"OK {restore_as}: restore finished")
         else:
             fail_count += 1
-            errors.append(f"{database}: {err or 'restore failed'}")
-            log(f"FAIL {database}: {err}")
+            errors.append(f"{database}→{restore_as}: {err or 'restore failed'}")
+            log(f"FAIL {restore_as}: {err}")
 
     st = "success" if fail_count == 0 and ok_count > 0 else "failed"
     if ok_count and fail_count:
@@ -606,6 +658,7 @@ def _process_database_pipeline(
     stripes: Optional[int],
     storage_dict: Dict[str, Any],
     target: Dict[str, Any],
+    job: Dict[str, Any],
     do_backup: bool,
     do_upload: bool,
     do_restore: bool,
@@ -629,12 +682,25 @@ def _process_database_pipeline(
             if do_restore:
                 progress("restore", "skipped", "")
 
-    row: Dict[str, Any] = {"database": database, "errors": []}
+    restore_as = resolve_restore_database_name(database, job=job, target=target)
+    row: Dict[str, Any] = {
+        "database": database,
+        "restore_database": restore_as,
+        "errors": [],
+    }
     run: Optional[RunSpec] = initial_run
 
     if do_backup:
-        progress("backup", "running", "backup to disk")
+        progress("backup", "running", "0%")
         tlog("Step 1/3 backup started")
+
+        def on_backup_percent(pct: float) -> None:
+            try:
+                val = float(pct)
+            except (TypeError, ValueError):
+                return
+            progress("backup", "running", f"{val:.0f}%")
+
         run, err = backup_single_database(
             server=server,
             database=database,
@@ -649,6 +715,7 @@ def _process_database_pipeline(
             stripes=stripes,
             cancel_event=cancel_event,
             log=tlog,
+            progress_callback=on_backup_percent,
         )
         if not run:
             row["backup"] = "failed"
@@ -698,15 +765,25 @@ def _process_database_pipeline(
             progress("restore", "failed", "no blob path")
             return row
         blob_path = restore_jobs[0]["blob_path"]
-        progress("restore", "running", blob_path)
+        progress("restore", "running", "0%")
         tlog(f"Step 3/3 restore started ({blob_path})")
+
+        def on_restore_percent(pct: float) -> None:
+            try:
+                val = float(pct)
+            except (TypeError, ValueError):
+                return
+            progress("restore", "running", f"{val:.0f}%")
+
         ok, err = restore_single_database_from_blob(
             database,
             blob_path,
             storage_dict,
             target,
+            job=job,
             cancel_event=cancel_event,
             log=tlog,
+            on_restore_percent=on_restore_percent,
         )
         row["restore"] = "success" if ok else "failed"
         if ok:
@@ -759,6 +836,7 @@ def _execute_database_pipelines(
                 stripes=stripes,
                 storage_dict=storage_dict,
                 target=target,
+                job=job,
                 do_backup=do_backup,
                 do_upload=do_upload,
                 do_restore=do_restore,
@@ -831,7 +909,13 @@ def run_bulk_local_backup_blob_restore_job(
         job.clear()
         job.update(merged)
     job_id = (job.get("job_id") or "").strip() or str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
     started = datetime.now(timezone.utc).isoformat()
+    try:
+        from ..utils.run_provenance import collect_run_provenance
+    except ImportError:
+        from azure_migration_tool.src.utils.run_provenance import collect_run_provenance
+    provenance = collect_run_provenance()
 
     steps_cfg = job.get("steps") or {}
     do_backup = bool(steps_cfg.get("backup", not job.get("skip_backup", False)))
@@ -840,6 +924,8 @@ def run_bulk_local_backup_blob_restore_job(
 
     result: Dict[str, Any] = {
         "job_id": job_id,
+        "run_id": run_id,
+        "provenance": provenance,
         "operation": job.get("operation") or "bulk_local_backup_blob_restore",
         "started_utc": started,
         "ended_utc": None,
@@ -979,6 +1065,7 @@ def run_bulk_local_backup_blob_restore_job(
                     jobs,
                     storage_dict,
                     job.get("restore_target") or {},
+                    job=job,
                     cancel_event=cancel_event,
                     log=log,
                 )
@@ -1022,8 +1109,18 @@ def run_bulk_local_backup_blob_restore_job(
         result_path = str(out_dir / f"{job_id}_result.json")
     if result_path:
         Path(result_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(result_path).write_text(json.dumps(result, indent=2), encoding="utf-8")
         result["result_path"] = result_path
+        try:
+            try:
+                from .run_traceability import attach_run_traceability
+            except ImportError:
+                from azure_migration_tool.src.orchestration.run_traceability import (
+                    attach_run_traceability,
+                )
+            attach_run_traceability(result, job)
+        except Exception as exc:
+            log(f"Traceability artifacts skipped: {exc}")
+        Path(result_path).write_text(json.dumps(result, indent=2), encoding="utf-8")
         log(f"Wrote result: {result_path}")
 
     _try_record_run_history(result, job)

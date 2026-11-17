@@ -142,11 +142,18 @@ def build_migration_brief(
                 resolve_database_catalog(db_name, restore_server=str(src_server))
             )
 
+    prov = result.get("provenance") or {}
+    artifacts = result.get("artifact_paths") or {}
     brief: Dict[str, Any] = {
-        "brief_version": 1,
+        "brief_version": 2,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "provenance": prov,
+        "artifact_paths": artifacts,
         "summary": {
             "job_id": job_id,
+            "run_id": result.get("run_id") or (history_entry or {}).get("run_id") or "",
+            "app_version": prov.get("app_version") or "",
+            "git_revision": prov.get("git_revision") or "",
             "status": status,
             "environment": env,
             "source_server": result.get("source_server")
@@ -189,6 +196,9 @@ def brief_to_markdown(brief: Dict[str, Any]) -> str:
         "## Summary",
         "",
         f"- **Job ID:** {s.get('job_id', '')}",
+        f"- **Run ID:** {s.get('run_id') or '—'}",
+        f"- **App version:** {s.get('app_version') or '—'}",
+        f"- **Git revision:** {s.get('git_revision') or '—'}",
         f"- **Status:** {s.get('status', '')}",
         f"- **Environment:** {s.get('environment') or '—'}",
         f"- **Source server:** {s.get('source_server') or '—'}",

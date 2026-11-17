@@ -216,6 +216,7 @@ def run_local_backup_and_upload(
     stripes: Optional[int] = None,
     cancel_event: Optional[Any] = None,
     on_connect: Optional[Callable[[Any], None]] = None,
+    progress_callback: Optional[Callable[[float], None]] = None,
     log: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
@@ -526,6 +527,40 @@ def run_local_backup_and_upload(
             log("")
         
         backup_start = time.time()
+        stop_event = threading.Event()
+        monitor: Optional[threading.Thread] = None
+        monitor_connect = dict(
+            server=server,
+            db="master",
+            user=user or "",
+            driver=driver,
+            auth=auth or "windows",
+            password=password,
+            timeout=60,
+            logger=logger,
+        )
+        odbc_spid: Optional[int] = None
+        try:
+            from .backup_progress import get_spid, monitor_backup_request_progress
+        except ImportError:
+            from src.backup.backup_progress import get_spid, monitor_backup_request_progress
+        odbc_spid = get_spid(cur)
+        if odbc_spid:
+            log(f"Monitoring backup progress (ODBC SPID {odbc_spid}) via DMV…")
+        monitor = threading.Thread(
+            target=monitor_backup_request_progress,
+            kwargs=dict(
+                connect_kwargs=monitor_connect,
+                database=database,
+                log=log,
+                stop_event=stop_event,
+                poll_sec=5.0,
+                progress_callback=progress_callback,
+                odbc_spid=odbc_spid,
+            ),
+            daemon=True,
+        )
+        monitor.start()
         try:
             log(f"Executing: BACKUP DATABASE [{database}] TO {disk_clause}")
             log("")
@@ -543,13 +578,24 @@ def run_local_backup_and_upload(
             backup_elapsed = time.time() - backup_start
             result["backup_time_sec"] = round(backup_elapsed, 2)
             _watcher_stop = True
-            
+            stop_event.set()
+            if monitor is not None:
+                monitor.join(timeout=6)
+            if progress_callback:
+                try:
+                    progress_callback(100.0)
+                except Exception:
+                    pass
+
             log("")
             log(f"SQL Server backup command completed in {backup_elapsed:.1f}s")
-            
+
         except Exception as backup_error:
             backup_elapsed = time.time() - backup_start
             _watcher_stop = True
+            stop_event.set()
+            if monitor is not None:
+                monitor.join(timeout=6)
             try:
                 cur.close()
                 conn.close()

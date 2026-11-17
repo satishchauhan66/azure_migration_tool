@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from pathlib import Path
@@ -34,6 +34,7 @@ except ImportError:
 
 try:
     from src.migration.prerequisites_check import (
+        ROW_PREREQ_FAST_TIMEOUT_SEC,
         ROW_PREREQ_TIMEOUT_SEC,
         merge_row_with_defaults,
         run_row_prerequisites_bounded,
@@ -41,6 +42,7 @@ try:
     )
 except ImportError:
     from azure_migration_tool.src.migration.prerequisites_check import (
+        ROW_PREREQ_FAST_TIMEOUT_SEC,
         ROW_PREREQ_TIMEOUT_SEC,
         merge_row_with_defaults,
         run_row_prerequisites_bounded,
@@ -56,7 +58,9 @@ class PrerequisitesToolTab:
         self.frame = ttk.Frame(parent)
         self._rows: Dict[str, Dict[str, Any]] = {}
         self._results: Dict[str, Any] = {}
-        self._run_thread: Optional[threading.Thread] = None
+        self._check_executor: Optional[ThreadPoolExecutor] = None
+        self._in_flight: set[str] = set()
+        self._check_lock = threading.Lock()
         self._create_widgets()
 
     def set_project_path(self, _project_path: Optional[str]) -> None:
@@ -79,31 +83,51 @@ class PrerequisitesToolTab:
         hdr.pack(fill=tk.X, padx=8, pady=(8, 6))
         tk.Label(hdr, text="Migration prerequisites", font=("Arial", 12, "bold")).pack(side=tk.LEFT)
         self.status_var = tk.StringVar(
-            value="Run quick check = all rows (sanity). Start migration = selected → Full Migration."
+            value="Quick check: selected rows, or all if none selected."
         )
         tk.Label(hdr, textvariable=self.status_var, fg="gray").pack(side=tk.RIGHT)
 
-        btn_row = ttk.Frame(shell)
-        btn_row.pack(fill=tk.X, padx=8, pady=(0, 6))
-        ttk.Button(btn_row, text="Import CSV/Excel…", command=self._import_spreadsheet, width=18).pack(
+        row_btn = ttk.Frame(shell)
+        row_btn.pack(fill=tk.X, padx=8, pady=(0, 4))
+        ttk.Button(row_btn, text="Import…", command=self._import_spreadsheet, width=10).pack(
             side=tk.LEFT, padx=2
         )
-        ttk.Button(btn_row, text="Export rows…", command=self._export_rows, width=14).pack(
+        ttk.Button(row_btn, text="Export…", command=self._export_rows, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row_btn, text="Add…", command=self._add_row_dialog, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row_btn, text="Edit…", command=self._edit_row_dialog, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row_btn, text="Remove", command=self._remove_selected, width=10).pack(side=tk.LEFT, padx=2)
+
+        run_btn = ttk.Frame(shell)
+        run_btn.pack(fill=tk.X, padx=8, pady=(0, 6))
+        ttk.Button(run_btn, text="Quick check", command=self._run_quick_check, width=12).pack(
             side=tk.LEFT, padx=2
         )
-        ttk.Button(btn_row, text="Add row…", command=self._add_row_dialog, width=10).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row, text="Edit row…", command=self._edit_row_dialog, width=10).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row, text="Remove selected", command=self._remove_selected, width=14).pack(
-            side=tk.LEFT, padx=2
+        self.cancel_btn = ttk.Button(
+            run_btn, text="Cancel", command=self._cancel_checks, width=8, state=tk.DISABLED
         )
-        ttk.Button(btn_row, text="Run workstation checks", command=self._run_baseline, width=20).pack(
+        self.cancel_btn.pack(side=tk.LEFT, padx=2)
+        ttk.Button(run_btn, text="Start migration", command=self._start_migrations, width=16).pack(
             side=tk.LEFT, padx=8
         )
-        self.run_btn = ttk.Button(btn_row, text="Run quick check (all)", command=self._run_all, width=18)
-        self.run_btn.pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row, text="Start migration (selected)", command=self._start_migrations, width=22).pack(
-            side=tk.LEFT, padx=2
-        )
+        more = tk.Menubutton(run_btn, text="More", relief=tk.RAISED, width=8)
+        more_menu = tk.Menu(more, tearoff=0)
+        more_menu.add_command(label="Workstation checks…", command=self._run_baseline)
+        more.config(menu=more_menu)
+        more.pack(side=tk.LEFT, padx=2)
+        opts = ttk.Frame(shell)
+        opts.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self.skip_unc_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opts,
+            text="Fast check (skip UNC backup write probe)",
+            variable=self.skip_unc_var,
+        ).pack(side=tk.LEFT)
+        self.auto_check_new_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opts,
+            text="Auto-check new rows",
+            variable=self.auto_check_new_var,
+        ).pack(side=tk.LEFT, padx=(12, 0))
 
         scroll_host = ttk.Frame(shell)
         scroll_host.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -242,6 +266,8 @@ class PrerequisitesToolTab:
         iid = str(uuid4())
         self._rows[iid] = merged
         self._refresh_tree_row(iid)
+        if self.auto_check_new_var.get():
+            self.frame.after(100, lambda: self._submit_checks([iid]))
         return iid
 
     def _import_spreadsheet(self) -> None:
@@ -394,81 +420,152 @@ class PrerequisitesToolTab:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _run_ids(self, iids: List[str]) -> None:
-        if self._run_thread and self._run_thread.is_alive():
-            messagebox.showwarning("Busy", "A run is already in progress.")
-            return
+    def _ensure_check_executor(self) -> ThreadPoolExecutor:
+        if self._check_executor is None:
+            self._check_executor = ThreadPoolExecutor(max_workers=8)
+        return self._check_executor
+
+    def _check_timeout_sec(self) -> int:
+        return ROW_PREREQ_FAST_TIMEOUT_SEC if self.skip_unc_var.get() else ROW_PREREQ_TIMEOUT_SEC
+
+    def _submit_checks(self, iids: List[str]) -> None:
         if not iids:
             messagebox.showinfo("Prerequisites", "No rows to check.")
             return
-        self.run_btn.config(state=tk.DISABLED)
-        total = len(iids)
-        workers = min(8, max(1, total))
-        self.status_var.set(f"Running {total} row(s) in parallel ({workers} workers)…")
+        skip_unc = bool(self.skip_unc_var.get())
+        timeout = self._check_timeout_sec()
+        pool = self._ensure_check_executor()
+        queued: List[str] = []
+        with self._check_lock:
+            for rid in iids:
+                if rid not in self._rows or rid in self._in_flight:
+                    continue
+                self._in_flight.add(rid)
+                queued.append(rid)
+        if not queued:
+            self.status_var.set("Selected row(s) already checking — wait or pick others.")
+            return
+        for rid in queued:
+            fut = pool.submit(self._check_one_row, rid, skip_unc, timeout)
+            fut.add_done_callback(lambda f, r=rid: self.frame.after(0, lambda: self._finish_check_row(f, r)))
+        self.cancel_btn.config(state=tk.NORMAL)
+        mode = "fast" if skip_unc else "full"
+        self.status_var.set(
+            f"Checking {len(queued)} row(s) ({mode}, {timeout}s max each); "
+            f"{len(self._in_flight)} in flight…"
+        )
 
-        def _check_one(row_id: str) -> Optional[tuple[str, Any]]:
-            row = self._rows.get(row_id)
-            if not row:
-                return None
-            res = run_row_prerequisites_bounded(dict(row), None, timeout_sec=ROW_PREREQ_TIMEOUT_SEC)
-            return row_id, res
+    def _check_one_row(
+        self, row_id: str, skip_unc: bool, timeout_sec: int
+    ) -> Optional[tuple[str, Any]]:
+        row = dict(self._rows.get(row_id) or {})
+        if not row:
+            return None
+        if skip_unc:
+            row["_skip_unc_probe"] = True
+        return row_id, run_row_prerequisites_bounded(row, None, timeout_sec=timeout_sec)
 
-        def work() -> None:
-            done_count = 0
-            result_lock = threading.Lock()
-            completed: List[str] = []
+    def _finish_check_row(self, fut: Any, row_id: str) -> None:
+        with self._check_lock:
+            self._in_flight.discard(row_id)
+            inflight = len(self._in_flight)
+        try:
+            pair = fut.result()
+        except Exception as ex:
+            self.status_var.set(f"Check error: {str(ex)[:120]}")
+            pair = None
+        if pair:
+            rid, res = pair
+            if res is not None:
+                self._results[rid] = res
+                self._refresh_tree_row(rid)
+        if inflight == 0:
+            self.cancel_btn.config(state=tk.DISABLED)
+            fails = sum(1 for r in self._results.values() if not getattr(r, "passed", False))
+            self.status_var.set(
+                f"Idle — {len(self._results)} result(s); {fails} failed overall."
+                if fails
+                else f"Idle — {len(self._results)} result(s)."
+            )
+        else:
+            self.status_var.set(f"{inflight} row check(s) still running…")
 
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                future_to_rid = {pool.submit(_check_one, rid): rid for rid in iids}
-                for fut in as_completed(future_to_rid):
-                    rid_key = future_to_rid[fut]
-                    try:
-                        pair = fut.result()
-                    except Exception as ex:
-                        pair = None
+    def _cancel_checks(self) -> None:
+        with self._check_lock:
+            pending = len(self._in_flight)
+        if pending == 0:
+            return
+        if self._check_executor is not None:
+            self._check_executor.shutdown(wait=False, cancel_futures=True)
+            self._check_executor = None
+        with self._check_lock:
+            self._in_flight.clear()
+        self.cancel_btn.config(state=tk.DISABLED)
+        self.status_var.set(
+            "Cancelled queued checks. In-flight ODBC calls may run until their timeout."
+        )
 
-                        def _ui_err(msg: str = str(ex)[:200], rk: str = rid_key) -> None:
-                            self.status_var.set(f"Error on {rk[:8]}: {msg}")
+    def _run_quick_check(self) -> None:
+        sel = list(self.tree.selection())
+        if sel:
+            self._submit_checks(sel)
+        else:
+            self._submit_checks(list(self._rows.keys()))
 
-                        self.frame.after(0, _ui_err)
-                    if not pair:
-                        continue
-                    row_id, res = pair
-                    with result_lock:
-                        self._results[row_id] = res
-                        completed.append(row_id)
-                        done_count += 1
-                        n = done_count
+    def _build_mcp_job_for_row(
+        self, row: Dict[str, Any], project_path: Optional[str]
+    ) -> Dict[str, Any]:
+        try:
+            from azure_migration_tool.src.orchestration.job_spreadsheet import (
+                prerequisite_row_to_job,
+            )
+        except ImportError:
+            from src.orchestration.job_spreadsheet import prerequisite_row_to_job
 
-                    def ui_row(rid: str = row_id, count: int = n) -> None:
-                        self._refresh_tree_row(rid)
-                        self.status_var.set(f"Checked {count}/{total} (parallel)…")
+        import re
+        from uuid import uuid4
 
-                    self.frame.after(0, ui_row)
+        label = str(row.get("row_label") or row.get("src_db") or "db").strip()
+        safe = re.sub(r"[^\w\-]+", "-", label).strip("-")[:32] or "db"
+        jid = f"preq-{uuid4().hex[:8]}-{safe}"
+        job = prerequisite_row_to_job(dict(row), job_id=jid)
+        if project_path:
+            job["project_path"] = project_path
+        job["_run_origin"] = "mcp"
+        return job
 
-            done_ids = list(completed)
-
-            def ui_done() -> None:
-                for rid in done_ids:
-                    self._refresh_tree_row(rid)
-                self.run_btn.config(state=tk.NORMAL)
-                fails = sum(1 for i in done_ids if i in self._results and not self._results[i].passed)
-                self.status_var.set(
-                    f"Completed {len(done_ids)} row(s); {fails} failed."
-                    if fails
-                    else f"All {len(done_ids)} row(s) passed."
+    def _run_prepared_mcp_job(self, job: Dict[str, Any], row_label: str = "") -> None:
+        try:
+            try:
+                from gui.utils.run_history import (
+                    record_pipeline_run_failed,
+                    record_pipeline_run_started,
                 )
-                if done_ids:
-                    self.tree.selection_set(done_ids[0])
-                    self._on_select()
+            except ImportError:
+                from azure_migration_tool.gui.utils.run_history import (
+                    record_pipeline_run_failed,
+                    record_pipeline_run_started,
+                )
 
-            self.frame.after(0, ui_done)
+            record_pipeline_run_started(job, origin="mcp")
+            try:
+                from azure_migration_tool.mcp_server import _run_job_dict
+            except ImportError:
+                from mcp_server import _run_job_dict  # type: ignore[no-redef]
+            _run_job_dict(job)
+        except Exception as exc:
+            try:
+                record_pipeline_run_failed(job, str(exc), origin="mcp")
+            except Exception:
+                pass
+            who = row_label or job.get("src_db") or job.get("job_id") or "?"
+            err = f"{who}: {exc}"
+            self.frame.after(0, lambda m=err: self.status_var.set(f"MCP job failed — {m[:120]}"))
 
-        self._run_thread = threading.Thread(target=work, daemon=True)
-        self._run_thread.start()
-
-    def _run_all(self) -> None:
-        self._run_ids(list(self._rows.keys()))
+    def _run_mcp_job_for_row(self, row: Dict[str, Any], project_path: Optional[str]) -> None:
+        job = self._build_mcp_job_for_row(row, project_path)
+        label = str(row.get("row_label") or row.get("src_db") or "")
+        self._run_prepared_mcp_job(job, row_label=label)
 
     def _start_migrations(self) -> None:
         sel = list(self.tree.selection())
@@ -503,22 +600,71 @@ class PrerequisitesToolTab:
                 f"{len(failed)} row(s) did not pass quick check.\nStart migration anyway?",
             ):
                 return
-        mw = self.main_window
         try:
+            from azure_migration_tool.worker.__main__ import _validate_job
+        except ImportError:
+            from worker.__main__ import _validate_job  # type: ignore[no-redef]
+        try:
+            from azure_migration_tool.src.orchestration.job_defaults import (
+                prepare_job_with_defaults,
+            )
+        except ImportError:
+            from src.orchestration.job_defaults import prepare_job_with_defaults
+
+        mw = self.main_window
+        pp = getattr(mw, "_project_path", None) or None
+        bundles: List[tuple[Dict[str, Any], Dict[str, Any]]] = []
+        blockers: List[str] = []
+        for row in configs:
+            job = self._build_mcp_job_for_row(dict(row), pp)
+            prepared = prepare_job_with_defaults(dict(job))
+            for issue in _validate_job(prepared):
+                label = row.get("row_label") or row.get("src_db")
+                blockers.append(f"{label}: {issue}")
+            bundles.append((dict(row), prepared))
+        if blockers:
+            messagebox.showerror(
+                "Cannot start",
+                "Fix these before migration:\n\n" + "\n".join(blockers[:12]),
+            )
+            return
+        try:
+            try:
+                from gui.utils.restore_target_confirm import confirm_existing_targets_for_jobs
+            except ImportError:
+                from azure_migration_tool.gui.utils.restore_target_confirm import (
+                    confirm_existing_targets_for_jobs,
+                )
+            ok_targets, drop_confirmed = confirm_existing_targets_for_jobs(
+                mw.root,
+                [job for _row, job in bundles],
+            )
+            if not ok_targets:
+                self.status_var.set("Migration cancelled — destination not confirmed.")
+                return
+            for _row, job in bundles:
+                jid = (job.get("job_id") or "").strip()
+                drops = drop_confirmed.get(jid) or set()
+                if drops:
+                    job.setdefault("restore_options", {})
+                    job["restore_options"]["drop_existing_confirmed_databases"] = sorted(drops)
             mw.root.lift()
-            mw._ensure_tab_created(2)
-            tab = mw._tab_instances.get(2)
+            if hasattr(mw, "_open_agent_ops_dashboard"):
+                mw._open_agent_ops_dashboard(auto_refresh=True)
+            def _start_job(delay_ms: int, j: Dict[str, Any], lbl: str) -> None:
+                if delay_ms > 0:
+                    import time
+
+                    time.sleep(delay_ms / 1000.0)
+                self._run_prepared_mcp_job(j, row_label=lbl)
+
+            for idx, (row, job) in enumerate(bundles):
+                label = str(row.get("row_label") or row.get("src_db") or "")
+                threading.Thread(
+                    target=_start_job,
+                    args=(idx * 150, dict(job), label),
+                    daemon=True,
+                ).start()
+            self.status_var.set(f"Started {len(bundles)} MCP job(s). Track in AgentOps.")
         except Exception as ex:
-            messagebox.showerror("Migration", f"Could not open Full Migration tab: {ex}")
-            return
-        if tab is None or not hasattr(tab, "load_bulk_configs"):
-            messagebox.showerror("Migration", "Full Migration tab is not available.")
-            return
-        tab.load_bulk_configs(configs, source_label="Prerequisites")
-        mw.notebook.select(2)
-        if messagebox.askyesno(
-            "Full Migration",
-            f"Loaded {len(configs)} database(s) on the Full Migration tab.\n"
-            "Start bulk migration now?",
-        ):
-            tab._start_bulk_migration()
+            messagebox.showerror("Migration", str(ex))

@@ -36,9 +36,16 @@ def resolve_environment_for_job(job: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     explicit = (job.get("environment") or job.get("profile") or "").strip()
+    try:
+        from gui.utils.environment_profiles import _normalize_env_name
+    except ImportError:
+        from azure_migration_tool.gui.utils.environment_profiles import _normalize_env_name
+    if explicit and not _normalize_env_name(explicit):
+        explicit = ""
     blob = job.get("blob") or {}
     if not explicit and isinstance(blob, dict):
-        explicit = (blob.get("profile") or blob.get("environment") or "").strip()
+        blob_env = (blob.get("profile") or blob.get("environment") or "").strip()
+        explicit = blob_env if _normalize_env_name(blob_env) else ""
     tgt = job.get("restore_target") or {}
     restore_server = (tgt.get("server") or "").strip()
     storage_url = ""
@@ -105,13 +112,16 @@ def apply_environment_to_job(job: Dict[str, Any]) -> Dict[str, Any]:
     use_profile = blob.get("use_profile")
     if use_profile is None:
         use_profile = not blob.get("use_saved_settings", False)
+    if job.get("_explicit_restore_target"):
+        use_profile = False
 
     tgt = job.setdefault("restore_target", {})
     if not isinstance(tgt, dict):
         tgt = {}
         job["restore_target"] = tgt
 
-    if use_profile and prof.get("mi_server") and _is_empty(tgt.get("server")):
+    explicit_restore = not _is_empty(tgt.get("server"))
+    if use_profile and prof.get("mi_server") and not explicit_restore:
         tgt["server"] = prof["mi_server"]
     if "target_managed_instance" not in tgt and prof.get("target_managed_instance") is not None:
         tgt["target_managed_instance"] = prof["target_managed_instance"]

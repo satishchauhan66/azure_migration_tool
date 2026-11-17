@@ -364,6 +364,51 @@ class AgentWorkflowToolTab:
 
         self._apply_org_defaults_to_form()
         self._sync_json_preview()
+        pending = getattr(self.main_window, "_pending_prerequisite_agent_configs", None)
+        if pending:
+            self.main_window._pending_prerequisite_agent_configs = None
+            configs = list(pending)
+            self.frame.after(50, lambda: self.load_from_prerequisite_configs(configs))
+
+    def load_from_prerequisite_configs(self, configs: List[Dict[str, Any]]) -> None:
+        """Apply selected Prerequisites rows as a worker job in this form."""
+        if not configs:
+            return
+        try:
+            try:
+                from azure_migration_tool.src.orchestration.job_spreadsheet import (
+                    prerequisite_rows_to_jobs,
+                )
+            except ImportError:
+                from src.orchestration.job_spreadsheet import prerequisite_rows_to_jobs
+
+            jobs = prerequisite_rows_to_jobs(configs)
+            if not jobs:
+                raise ValueError("No jobs could be built from the selected rows.")
+            pp = getattr(self.main_window, "_project_path", None)
+            if pp and not (jobs[0].get("project_path") or "").strip():
+                jobs[0]["project_path"] = str(pp)
+            if len(jobs) > 1:
+                messagebox.showwarning(
+                    "Multiple jobs",
+                    f"Selected rows span {len(jobs)} source server group(s).\n\n"
+                    "Only the first job is loaded in Agent Workflow. "
+                    "Export or split rows by source server to run the rest.",
+                )
+            try:
+                from azure_migration_tool.worker.__main__ import _prepare_job
+            except ImportError:
+                from worker.__main__ import _prepare_job  # type: ignore[no-redef]
+            prepared = _prepare_job(dict(jobs[0]))
+            self._apply_prepared_job_to_ui(prepared)
+            self._log(f"Loaded {len(configs)} prerequisite row(s) → Agent Workflow job.")
+            messagebox.showinfo(
+                "Agent Workflow",
+                f"Loaded {len(configs)} database(s) from Prerequisites.\n"
+                "Review the job and use Validate or Run job.",
+            )
+        except Exception as exc:
+            messagebox.showerror("Agent Workflow", _compact_dialog_error(str(exc)))
 
     def _apply_org_defaults_to_form(self) -> None:
         try:
