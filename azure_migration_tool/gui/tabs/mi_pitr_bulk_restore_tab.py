@@ -92,6 +92,7 @@ class MiPitrBulkRestoreTab:
         self._tgt_rgs: List[str] = []
         self._tgt_mis: List[Dict[str, str]] = []
         self._create_widgets()
+        self.frame.after(600, self._bootstrap_from_session_cache)
 
     def set_project_path(self, project_path):
         self.project_path = project_path
@@ -594,16 +595,87 @@ class MiPitrBulkRestoreTab:
         mi = self._tgt_mis[mi_i]["name"]
         return sub, rg, mi, None
 
-    def _apply_loaded_subscriptions(self, rows: List[Dict[str, str]]) -> None:
+    def _persist_session_cache(self) -> None:
+        try:
+            from gui.utils.mi_pitr_session_cache import TAB_BULK, save_tab_session
+        except ImportError:
+            from azure_migration_tool.gui.utils.mi_pitr_session_cache import TAB_BULK, save_tab_session
+        from datetime import datetime, timezone
+
+        patch = {
+            "subscriptions": list(self._subscriptions),
+            "src_sub": (self.src_sub_cb.get() or "").strip(),
+            "src_rg": (self.src_rg_cb.get() or "").strip(),
+            "src_mi": (self.src_mi_cb.get() or "").strip(),
+            "tgt_sub": (self.tgt_sub_cb.get() or "").strip(),
+            "tgt_rg": (self.tgt_rg_cb.get() or "").strip(),
+            "tgt_mi": (self.tgt_mi_cb.get() or "").strip(),
+        }
+        if self._subscriptions:
+            patch["subscriptions_saved_utc"] = datetime.now(timezone.utc).isoformat()
+        save_tab_session(TAB_BULK, patch)
+
+    def _bootstrap_from_session_cache(self) -> None:
+        try:
+            from gui.utils.mi_pitr_session_cache import (
+                TAB_BULK,
+                cached_subscriptions,
+                load_tab_session,
+                subscriptions_still_fresh,
+            )
+        except ImportError:
+            from azure_migration_tool.gui.utils.mi_pitr_session_cache import (
+                TAB_BULK,
+                cached_subscriptions,
+                load_tab_session,
+                subscriptions_still_fresh,
+            )
+        sess = load_tab_session(TAB_BULK)
+        subs = cached_subscriptions(sess)
+        if subs and subscriptions_still_fresh(sess):
+            self._apply_loaded_subscriptions(subs, restore_pickers=True)
+            self._log("Restored cached subscriptions and last picker values.")
+        try:
+            from gui.utils.azure_arm_auth import azure_cli_logged_in
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import azure_cli_logged_in
+        if azure_cli_logged_in():
+            self._on_load_subscriptions()
+
+    def _apply_loaded_subscriptions(
+        self,
+        rows: List[Dict[str, str]],
+        *,
+        restore_pickers: bool = True,
+    ) -> None:
         self._subscriptions = rows
         self.src_sub_cb.refresh_suggestions()
         self.tgt_sub_cb.refresh_suggestions()
-        self._clear_src_downstream()
-        self._clear_tgt_downstream()
-        self.src_sub_cb.set("")
-        self.tgt_sub_cb.set("")
+        try:
+            from gui.utils.mi_pitr_session_cache import TAB_BULK, load_tab_session
+        except ImportError:
+            from azure_migration_tool.gui.utils.mi_pitr_session_cache import TAB_BULK, load_tab_session
+        sess = load_tab_session(TAB_BULK) if restore_pickers else {}
+        if restore_pickers and (sess.get("src_sub") or sess.get("tgt_sub")):
+            for key, widget in (
+                ("src_sub", self.src_sub_cb),
+                ("src_rg", self.src_rg_cb),
+                ("src_mi", self.src_mi_cb),
+                ("tgt_sub", self.tgt_sub_cb),
+                ("tgt_rg", self.tgt_rg_cb),
+                ("tgt_mi", self.tgt_mi_cb),
+            ):
+                val = (sess.get(key) or "").strip()
+                if val:
+                    widget.set(val)
+        else:
+            self._clear_src_downstream()
+            self._clear_tgt_downstream()
+            self.src_sub_cb.set("")
+            self.tgt_sub_cb.set("")
         self._log(f"[OK] Loaded {len(rows)} subscription(s).")
         self._update_azure_subs_button_label()
+        self._persist_session_cache()
 
     def _update_azure_subs_button_label(self) -> None:
         try:

@@ -12,7 +12,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from pathlib import Path
 import sys
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 parent_dir = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(parent_dir))
@@ -90,6 +90,7 @@ class MiPitrRestoreTab:
         self._tgt_mis: List[Dict[str, str]] = []
         self._tgt_dbs: List[str] = []
         self._create_widgets()
+        self.frame.after(600, self._bootstrap_from_session_cache)
 
     def set_project_path(self, project_path):
         self.project_path = project_path
@@ -197,9 +198,17 @@ class MiPitrRestoreTab:
         self.src_db_filter_var.trace_add("write", lambda *_: self._on_src_db_filter_changed())
         self._grid_combo_row(src, 4, "Database", self.src_db_cb)
         src.columnconfigure(1, weight=1)
-        self.src_sub_cb.bind("<<ComboboxSelected>>", lambda e: self._on_src_sub_changed())
-        self.src_rg_cb.bind("<<ComboboxSelected>>", lambda e: self._on_src_rg_changed())
-        self.src_mi_cb.bind("<<ComboboxSelected>>", lambda e: self._on_src_mi_changed())
+        def _sel(fn):
+            def _wrapper(_e):
+                fn()
+                self.frame.after(200, self._persist_session_cache)
+
+            return _wrapper
+
+        self.src_sub_cb.bind("<<ComboboxSelected>>", _sel(self._on_src_sub_changed))
+        self.src_rg_cb.bind("<<ComboboxSelected>>", _sel(self._on_src_rg_changed))
+        self.src_mi_cb.bind("<<ComboboxSelected>>", _sel(self._on_src_mi_changed))
+        self.src_db_cb.bind("<<ComboboxSelected>>", lambda _e: self.frame.after(200, self._persist_session_cache))
 
         tgt = ttk.LabelFrame(scrollable, text="Target (new database on destination MI)", padding=10)
         tgt.pack(fill=tk.X, padx=10, pady=8)
@@ -223,9 +232,10 @@ class MiPitrRestoreTab:
             row=3, column=1, sticky=tk.EW, padx=4, pady=3
         )
         tgt.columnconfigure(1, weight=1)
-        self.tgt_sub_cb.bind("<<ComboboxSelected>>", lambda e: self._on_tgt_sub_changed())
-        self.tgt_rg_cb.bind("<<ComboboxSelected>>", lambda e: self._on_tgt_rg_changed())
-        self.tgt_mi_cb.bind("<<ComboboxSelected>>", lambda e: self._on_tgt_mi_changed())
+        self.tgt_sub_cb.bind("<<ComboboxSelected>>", _sel(self._on_tgt_sub_changed))
+        self.tgt_rg_cb.bind("<<ComboboxSelected>>", _sel(self._on_tgt_rg_changed))
+        self.tgt_mi_cb.bind("<<ComboboxSelected>>", _sel(self._on_tgt_mi_changed))
+        self.tgt_new_db_var.trace_add("write", lambda *_: self.frame.after(300, self._persist_session_cache))
 
         opts = ttk.LabelFrame(scrollable, text="Restore options", padding=10)
         opts.pack(fill=tk.X, padx=10, pady=8)
@@ -260,6 +270,80 @@ class MiPitrRestoreTab:
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _arm_credential(self) -> Tuple[Optional[Any], Optional[str]]:
+        try:
+            from gui.utils.azure_arm_auth import ensure_arm_credential
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import ensure_arm_credential
+        return ensure_arm_credential(lambda m: self.frame.after(0, lambda p=m: self._log(p)))
+
+    def _persist_session_cache(self) -> None:
+        try:
+            from gui.utils.mi_pitr_session_cache import TAB_SINGLE, save_tab_session
+        except ImportError:
+            from azure_migration_tool.gui.utils.mi_pitr_session_cache import TAB_SINGLE, save_tab_session
+        patch: Dict[str, Any] = {
+            "subscriptions": list(self._subscriptions),
+            "src_sub": (self.src_sub_cb.get() or "").strip(),
+            "src_rg": (self.src_rg_cb.get() or "").strip(),
+            "src_mi": (self.src_mi_cb.get() or "").strip(),
+            "src_db": (self.src_db_cb.get() or "").strip(),
+            "tgt_sub": (self.tgt_sub_cb.get() or "").strip(),
+            "tgt_rg": (self.tgt_rg_cb.get() or "").strip(),
+            "tgt_mi": (self.tgt_mi_cb.get() or "").strip(),
+            "tgt_new_db": (self.tgt_new_db_var.get() or "").strip(),
+        }
+        if self._subscriptions:
+            from datetime import datetime, timezone
+
+            patch["subscriptions_saved_utc"] = datetime.now(timezone.utc).isoformat()
+        save_tab_session(TAB_SINGLE, patch)
+
+    def _restore_pickers_from_session(self, sess: Dict[str, Any]) -> None:
+        mapping = (
+            ("src_sub", self.src_sub_cb),
+            ("src_rg", self.src_rg_cb),
+            ("src_mi", self.src_mi_cb),
+            ("src_db", self.src_db_cb),
+            ("tgt_sub", self.tgt_sub_cb),
+            ("tgt_rg", self.tgt_rg_cb),
+            ("tgt_mi", self.tgt_mi_cb),
+        )
+        for key, widget in mapping:
+            val = (sess.get(key) or "").strip()
+            if val:
+                widget.set(val)
+        tgt_db = (sess.get("tgt_new_db") or "").strip()
+        if tgt_db:
+            self.tgt_new_db_var.set(tgt_db)
+
+    def _bootstrap_from_session_cache(self) -> None:
+        try:
+            from gui.utils.mi_pitr_session_cache import (
+                TAB_SINGLE,
+                cached_subscriptions,
+                load_tab_session,
+                subscriptions_still_fresh,
+            )
+        except ImportError:
+            from azure_migration_tool.gui.utils.mi_pitr_session_cache import (
+                TAB_SINGLE,
+                cached_subscriptions,
+                load_tab_session,
+                subscriptions_still_fresh,
+            )
+        sess = load_tab_session(TAB_SINGLE)
+        subs = cached_subscriptions(sess)
+        if subs and subscriptions_still_fresh(sess):
+            self._apply_loaded_subscriptions(subs, restore_pickers=True)
+            self._log("Restored cached subscriptions and last picker values.")
+        try:
+            from gui.utils.azure_arm_auth import azure_cli_logged_in
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import azure_cli_logged_in
+        if azure_cli_logged_in():
+            self._fetch_and_load_subscriptions()
 
     def _grid_combo_row(self, parent, row: int, label: str, combo: ttk.Widget) -> None:
         ttk.Label(parent, text=label + ":").grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
@@ -429,16 +513,30 @@ class MiPitrRestoreTab:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _apply_loaded_subscriptions(self, rows: List[Dict[str, str]]) -> None:
+    def _apply_loaded_subscriptions(
+        self,
+        rows: List[Dict[str, str]],
+        *,
+        restore_pickers: bool = True,
+    ) -> None:
         self._subscriptions = rows
         self.src_sub_cb.refresh_suggestions()
         self.tgt_sub_cb.refresh_suggestions()
-        self._clear_src_downstream()
-        self._clear_tgt_downstream()
-        self.src_sub_cb.set("")
-        self.tgt_sub_cb.set("")
+        try:
+            from gui.utils.mi_pitr_session_cache import TAB_SINGLE, load_tab_session
+        except ImportError:
+            from azure_migration_tool.gui.utils.mi_pitr_session_cache import TAB_SINGLE, load_tab_session
+        sess = load_tab_session(TAB_SINGLE) if restore_pickers else {}
+        if restore_pickers and (sess.get("src_sub") or sess.get("tgt_sub")):
+            self._restore_pickers_from_session(sess)
+        else:
+            self._clear_src_downstream()
+            self._clear_tgt_downstream()
+            self.src_sub_cb.set("")
+            self.tgt_sub_cb.set("")
         self._log(f"[OK] Loaded {len(rows)} subscription(s). Pick subscription, then resource group.")
         self._update_azure_subs_button_label()
+        self._persist_session_cache()
 
     def _on_subscription_load_error(self, err: str) -> None:
         self._log(f"[X] {err}")
@@ -467,6 +565,14 @@ class MiPitrRestoreTab:
                 self.frame.after(0, lambda: self._log(f"[X] {ex}"))
 
             def done() -> None:
+                try:
+                    from gui.utils.mi_pitr_session_cache import TAB_SINGLE, save_tab_session
+                except ImportError:
+                    from azure_migration_tool.gui.utils.mi_pitr_session_cache import (
+                        TAB_SINGLE,
+                        save_tab_session,
+                    )
+                save_tab_session(TAB_SINGLE, {"subscriptions": [], "src_sub": "", "tgt_sub": ""})
                 self._subscriptions = []
                 self.src_sub_cb.refresh_suggestions()
                 self.tgt_sub_cb.refresh_suggestions()
@@ -496,7 +602,10 @@ class MiPitrRestoreTab:
             self.frame.after(0, lambda: self._set_busy(True))
             self.frame.after(0, lambda: self._log(f"Loading resource groups (source)…"))
             try:
-                cred = get_shared_azure_credential(lambda m: self.frame.after(0, lambda p=m: self._log(p)))
+                cred, arm_err = self._arm_credential()
+                if arm_err or cred is None:
+                    self.frame.after(0, lambda e=arm_err or "Azure sign-in failed": self._log(f"[X] {e}"))
+                    return
                 rgs, err = list_resource_groups(cred, sub_id)
                 if err:
                     self.frame.after(0, lambda: self._log(f"[X] {err}"))
@@ -614,7 +723,10 @@ class MiPitrRestoreTab:
             self.frame.after(0, lambda: self._set_busy(True))
             self.frame.after(0, lambda: self._log(f"Loading resource groups (target)…"))
             try:
-                cred = get_shared_azure_credential(lambda m: self.frame.after(0, lambda p=m: self._log(p)))
+                cred, arm_err = self._arm_credential()
+                if arm_err or cred is None:
+                    self.frame.after(0, lambda e=arm_err or "Azure sign-in failed": self._log(f"[X] {e}"))
+                    return
                 rgs, err = list_resource_groups(cred, sub_id)
                 if err:
                     self.frame.after(0, lambda: self._log(f"[X] {err}"))

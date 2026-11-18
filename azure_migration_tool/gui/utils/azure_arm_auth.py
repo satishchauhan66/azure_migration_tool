@@ -127,8 +127,8 @@ def ensure_arm_credential(
         _log("Azure CLI is not signed in — opening sign-in…")
         if not sign_in_azure(_log, force=True):
             return None, "Azure sign-in did not complete."
+        clear_all_azure_auth_caches()
 
-    clear_all_azure_auth_caches()
     cred = _get_shared_credential(_log)
     err = probe_arm_token(cred)
     if err and allow_refresh and azure_auth_error_needs_refresh(err):

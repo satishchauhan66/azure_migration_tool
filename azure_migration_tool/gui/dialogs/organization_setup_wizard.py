@@ -48,15 +48,125 @@ def open_organization_setup_wizard(main_window: Any, *, parent: tk.Misc | None =
     body.pack(fill=tk.BOTH, expand=True)
 
     pages: List[ttk.Frame] = []
-    for _ in range(4):
+    for _ in range(5):
         f = ttk.Frame(body)
         pages.append(f)
 
-    # --- Step 1: Blob ---
-    p1 = pages[0]
+    # --- Step 1: Azure CLI (global sign-in) ---
+    p0 = pages[0]
+    tk.Label(
+        p0,
+        text="Step 1 — Azure sign-in (az login)",
+        font=("Arial", 10, "bold"),
+    ).pack(anchor=tk.W)
+    tk.Label(
+        p0,
+        text=(
+            "Sign in once for the whole application: MI PITR (ARM), Blob managed identity browsing, "
+            "AzCopy Entra uploads, and SQL Entra where applicable. Uses Azure CLI (`az login`) so "
+            "sessions survive app restarts until they expire."
+        ),
+        wraplength=500,
+        justify=tk.LEFT,
+    ).pack(anchor=tk.W, pady=(6, 10))
+    azure_status = tk.StringVar(value="Checking…")
+    tk.Label(p0, textvariable=azure_status, fg="#1a5276", wraplength=500, justify=tk.LEFT).pack(
+        anchor=tk.W, pady=(0, 8)
+    )
+    az_btn_row = ttk.Frame(p0)
+    az_btn_row.pack(fill=tk.X, pady=(0, 6))
+
+    def _refresh_azure_status() -> None:
+        try:
+            from gui.utils.azure_arm_auth import azure_cli_logged_in
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import azure_cli_logged_in
+        if azure_cli_logged_in():
+            name = (org.get("azure_account_name") or "").strip()
+            azure_status.set(
+                "Signed in to Azure CLI."
+                + (f" Last verified account: {name}" if name else "")
+            )
+        else:
+            azure_status.set("Not signed in — click Sign in to Azure before using MI PITR or MI blob tools.")
+
+    def _wizard_sign_in() -> None:
+        import threading
+
+        def work() -> None:
+            try:
+                from gui.utils.azure_arm_auth import sign_in_azure
+            except ImportError:
+                from azure_migration_tool.gui.utils.azure_arm_auth import sign_in_azure
+            ok = sign_in_azure(lambda m: dlg.after(0, lambda p=m: None), force=True)
+            dlg.after(0, lambda: _refresh_azure_status())
+            if not ok:
+                dlg.after(0, lambda: messagebox.showwarning("Azure", "Sign-in did not complete.", parent=dlg))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _wizard_sign_out() -> None:
+        import threading
+
+        def work() -> None:
+            try:
+                from gui.utils.azure_arm_auth import sign_out_azure
+            except ImportError:
+                from azure_migration_tool.gui.utils.azure_arm_auth import sign_out_azure
+            sign_out_azure()
+            dlg.after(0, lambda: _refresh_azure_status())
+
+        threading.Thread(target=work, daemon=True).start()
+
+    ttk.Button(az_btn_row, text="Sign in to Azure", command=_wizard_sign_in, width=18).pack(
+        side=tk.LEFT, padx=(0, 8)
+    )
+    ttk.Button(az_btn_row, text="Sign out", command=_wizard_sign_out, width=10).pack(side=tk.LEFT)
+    _refresh_azure_status()
+
+    def _save_azure_step() -> bool:
+        try:
+            from gui.utils.azure_arm_auth import azure_cli_logged_in, fetch_arm_subscriptions
+        except ImportError:
+            from azure_migration_tool.gui.utils.azure_arm_auth import (
+                azure_cli_logged_in,
+                fetch_arm_subscriptions,
+            )
+        if not azure_cli_logged_in():
+            messagebox.showwarning(
+                "Azure sign-in required",
+                "Sign in to Azure CLI before continuing setup.",
+                parent=dlg,
+            )
+            return False
+        rows, err = fetch_arm_subscriptions()
+        if err:
+            messagebox.showerror(
+                "Azure verification failed",
+                _compact_dialog_error(err),
+                parent=dlg,
+            )
+            return False
+        from datetime import datetime, timezone
+
+        try:
+            from gui.utils.org_settings import save_org_settings
+        except ImportError:
+            from azure_migration_tool.gui.utils.org_settings import save_org_settings
+        acct = (rows[0].get("display_name") if rows else "") or ""
+        save_org_settings(
+            azure_cli_configured=True,
+            azure_cli_verified_utc=datetime.now(timezone.utc).isoformat(),
+            azure_account_name=str(acct).strip(),
+        )
+        _refresh_azure_status()
+        return True
+
+    # --- Step 2: Blob ---
+    p1 = pages[1]
     tk.Label(
         p1,
-        text="Step 1 — Azure Blob storage (upload & restore)",
+        text="Step 2 — Azure Blob storage (upload & restore)",
         font=("Arial", 10, "bold"),
     ).pack(anchor=tk.W)
     tk.Label(
@@ -176,9 +286,9 @@ def open_organization_setup_wizard(main_window: Any, *, parent: tk.Misc | None =
         save_environment_profiles(cfg)
         return True
 
-    # --- Step 2: Backup UNC ---
-    p2 = pages[1]
-    tk.Label(p2, text="Step 2 — SQL Server backup folder (UNC)", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+    # --- Step 3: Backup UNC ---
+    p2 = pages[2]
+    tk.Label(p2, text="Step 3 — SQL Server backup folder (UNC)", font=("Arial", 10, "bold")).pack(anchor=tk.W)
     tk.Label(
         p2,
         text="Path on the SQL Server host (share both SQL and this PC can use).",
@@ -257,9 +367,9 @@ def open_organization_setup_wizard(main_window: Any, *, parent: tk.Misc | None =
         save_org_settings(default_backup_unc_path=path)
         return True
 
-    # --- Step 3: Project & blob prefix ---
-    p3 = pages[2]
-    tk.Label(p3, text="Step 3 — Project & blob paths", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+    # --- Step 4: Project & blob prefix ---
+    p3 = pages[3]
+    tk.Label(p3, text="Step 4 — Project & blob paths", font=("Arial", 10, "bold")).pack(anchor=tk.W)
     tk.Label(
         p3,
         text="Default project folder for job results; optional blob root prefix inside the container.",
@@ -296,11 +406,11 @@ def open_organization_setup_wizard(main_window: Any, *, parent: tk.Misc | None =
             main_window._project_path = (proj_var.get() or "").strip()
         return True
 
-    # --- Step 4: Environment profiles ---
-    p4 = pages[3]
+    # --- Step 5: Environment profiles ---
+    p4 = pages[4]
     tk.Label(
         p4,
-        text="Step 4 — Environments (dev / qa / uat / prod)",
+        text="Step 5 — Environments (dev / qa / uat / prod)",
         font=("Arial", 10, "bold"),
     ).pack(anchor=tk.W)
     tk.Label(
@@ -426,6 +536,7 @@ def open_organization_setup_wizard(main_window: Any, *, parent: tk.Misc | None =
         return True
 
     step_titles = [
+        "Azure sign-in",
         "Azure Blob",
         "Backup UNC path",
         "Project & paths",
@@ -454,6 +565,7 @@ def open_organization_setup_wizard(main_window: Any, *, parent: tk.Misc | None =
     ttk.Button(foot, text="Cancel", command=dlg.destroy, width=10).pack(side=tk.RIGHT, padx=(0, 8))
 
     savers: List[Callable[[], bool]] = [
+        _save_azure_step,
         _save_blob_step,
         _save_unc_step,
         _save_final_step,

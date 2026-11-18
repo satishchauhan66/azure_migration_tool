@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 try:
     from src.backup.backup_path_utils import DEFAULT_SHARED_BACKUP_ROOT
@@ -31,6 +31,9 @@ def load_org_settings() -> Dict[str, Any]:
             "default_backup_unc_path": DEFAULT_SHARED_BACKUP_ROOT,
             "default_blob_folder_prefix": "",
             "default_project_path": "",
+            "azure_cli_configured": False,
+            "azure_cli_verified_utc": "",
+            "azure_account_name": "",
         }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -38,6 +41,9 @@ def load_org_settings() -> Dict[str, Any]:
             data.setdefault("default_backup_unc_path", DEFAULT_SHARED_BACKUP_ROOT)
             data.setdefault("default_blob_folder_prefix", "")
             data.setdefault("default_project_path", "")
+            data.setdefault("azure_cli_configured", False)
+            data.setdefault("azure_cli_verified_utc", "")
+            data.setdefault("azure_account_name", "")
             return data
     except (OSError, json.JSONDecodeError):
         pass
@@ -45,6 +51,9 @@ def load_org_settings() -> Dict[str, Any]:
         "default_backup_unc_path": DEFAULT_SHARED_BACKUP_ROOT,
         "default_blob_folder_prefix": "",
         "default_project_path": "",
+        "azure_cli_configured": False,
+        "azure_cli_verified_utc": "",
+        "azure_account_name": "",
     }
 
 
@@ -53,6 +62,9 @@ def save_org_settings(
     default_backup_unc_path: str = "",
     default_blob_folder_prefix: str = "",
     default_project_path: str = "",
+    azure_cli_configured: Optional[bool] = None,
+    azure_cli_verified_utc: str = "",
+    azure_account_name: str = "",
 ) -> None:
     data = load_org_settings()
     if default_backup_unc_path is not None:
@@ -61,6 +73,12 @@ def save_org_settings(
         data["default_blob_folder_prefix"] = (default_blob_folder_prefix or "").strip()
     if default_project_path is not None:
         data["default_project_path"] = (default_project_path or "").strip()
+    if azure_cli_configured is not None:
+        data["azure_cli_configured"] = bool(azure_cli_configured)
+    if azure_cli_verified_utc is not None:
+        data["azure_cli_verified_utc"] = (azure_cli_verified_utc or "").strip()
+    if azure_account_name is not None:
+        data["azure_account_name"] = (azure_account_name or "").strip()
     get_org_settings_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
@@ -82,4 +100,9 @@ def org_settings_summary() -> str:
     proj = (o.get("default_project_path") or "").strip()
     if proj:
         parts.append(f"Projects: {proj}")
+    if o.get("azure_cli_configured"):
+        acct = (o.get("azure_account_name") or "").strip()
+        parts.append(f"Azure CLI: {acct or 'signed in'}")
+    else:
+        parts.append("Azure CLI: not verified in setup")
     return " · ".join(parts)
